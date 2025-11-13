@@ -155,7 +155,9 @@ dev = [
     { name = "pre-commit" },
     { name = "ruff" },
 ]
-test = [
+
+[package.dev-dependencies]
+dev = [
     { name = "pytest" },
 ]
 
@@ -167,12 +169,14 @@ requires-dist = [
     { name = "pre-commit", marker = "extra == 'dev'", specifier = ">=4.4.0" },
     { name = "pydantic-settings", specifier = ">=2.12.0" },
     { name = "pyodbc", specifier = ">=5.0.0" },
-    { name = "pytest", marker = "extra == 'test'", specifier = ">=9.0.1" },
     { name = "ruff", marker = "extra == 'dev'", specifier = ">=0.14.4" },
     { name = "sqlalchemy", specifier = ">=2.0.44" },
     { name = "tqdm", specifier = ">=4.67.1" },
 ]
-provides-extras = ["test", "dev"]
+provides-extras = ["dev"]
+
+[package.metadata.requires-dev]
+dev = [{ name = "pytest", specifier = ">=9.0.1" }]
 
 [[package]]
 name = "executing"

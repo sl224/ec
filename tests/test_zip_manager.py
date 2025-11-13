@@ -1,7 +1,9 @@
 # %%
 from pathlib import Path
 import pytest
-from rsm_extract import UnzipContext, FileType
+
+from etude_core.services.zip_io import UnzipContext, FileType
+
 
 STATIC_ASSETS_ROOT = Path("tests/static_assets")
 
@@ -37,11 +39,5 @@ def test_zip_manager_file_not_found():
             pass  # This code should not be reached
 
 
-if __name__ == "__main__":
-    # To run all tests in this file:
-    # pytest.main(['-s', __file__])
-
-    # To run a specific test by name, use the '::' syntax.
-    # Here, we're running only 'test_zip_manager_print_files'.
-    # pytest.main(['-s', f'{__file__}::test_zip_manager_print_files'])
-    test_zip_manager_print_files()
+# if __name__ == "__main__":
+    # test_zip_manager_print_files()
