@@ -1,0 +1,33 @@
+# Data files
+*.pkl
+*.zip
+*.e2d
+
+# Macos
+.DS_Store
+
+# Distribution / packaging
+*.egg-info/
+dist/
+build/
+
+# IDE configuration
+.vscode/
+.idea/
+.vs/
+
+# Python virtual environments
+venv/
+.venv/
+env/
+
+# Python cache and artifacts
+__pycache__/
+*.pyc
+.pytest_cache/
+
+# Test assets
+tests/static_assets/
+
+# DB
+*.sqlite*
