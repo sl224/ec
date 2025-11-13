@@ -160,7 +160,7 @@ if __name__ == "__main__":
     test_zip = (
         STATIC_ASSETS_ROOT / "zips/169069_20250203_004745_025_TransportRSM.fpkg.e2d.zip"
     )
-    id_paths = [(-1, test_zip)]
+    id_paths = [(-i, test_zip) for i in range(10)]
 
     logger.info(f"Found {len(id_paths)} folders to process.")
 

@@ -1,18 +1,12 @@
 from zipfile import ZipFile
-from hashlib import md5
 import tempfile
 import shutil
 from typing import List
 from enum import StrEnum
-from dataclasses import dataclass
 from pathlib import Path
 
 import logging
 from typing import Tuple, Union
-
-# --- Assume your existing code is here ---
-# (FileType, file_type_patterns, recursive_unzip, etc.)
-# ---
 
 
 class UnzipContext:
@@ -158,74 +152,6 @@ file_type_patterns = {
 }
 
 
-@dataclass
-class E2D_File:
-    Type: FileType = None
-    Md5: str = None
-    FileSizeBytes: int = 0
-    RawText: List[str] = None
-    FileName: str = None
-    RelativePath: str = None
-
-    def __len__(self):
-        return len(self.RawText) if self.RawText else 0
-
-
-def extract(
-    zip_file: Path | str,
-    file_types=None,
-    extract_dir=None,
-    read_lines=False,
-    calc_md5=False,
-) -> List[E2D_File]:
-    """
-    Extracts and processes files from a zip archive.
-
-    Args:
-        zip_file: Path to the zip file.
-        file_types: List of FileTypes to extract. Extracts all if None.
-        extract_dir: Optional destination directory. A temp dir is used if None.
-        read_lines: If True, reads file content into E2D_File.RawText.
-        calc_md5: If True, calculates and stores the MD5 hash.
-    Returns:
-        A list of E2D_File objects.
-    """
-
-    if file_types is None:
-        file_types = list(file_type_patterns.keys())
-
-    use_temp_dir = extract_dir is None
-    if use_temp_dir:
-        extract_dir = tempfile.mkdtemp()
-
-    extract_dir_path = Path(extract_dir)
-
-    recursive_unzip(extract_dir_path, zip_file)
-
-    ret_file_objs = []
-    for file_type in file_types:
-        for file_path in extract_dir_path.glob(file_type_patterns[file_type]):
-            file_obj = E2D_File(Type=file_type)
-            with open(file_path) as f:
-                if read_lines:
-                    file_obj.RawText = f.readlines()
-                if calc_md5:
-                    bin_data = f.read().encode("utf-8")
-                    file_obj.Md5 = md5(bin_data).hexdigest()
-
-                file_obj.RelativePath = str(file_path.relative_to(extract_dir))
-                file_obj.FileName = file_path.name
-                file_obj.FileSizeBytes = file_path.stat().st_size
-
-            ret_file_objs.append(file_obj)
-
-    if use_temp_dir:
-        logging.info(f"Deleting temp dir: {extract_dir_path}")
-        shutil.rmtree(extract_dir_path)
-
-    return ret_file_objs
-
-
 def recursive_unzip(extract_dir, zip_path):
     with ZipFile(zip_path, "r") as zip_ref:
         zip_ref.extractall(extract_dir)
@@ -245,17 +171,5 @@ def recursive_unzip(extract_dir, zip_path):
             to_unzip.append(Path(new_zip_path))
         nesting += 1
 
-    if nesting == MAX_NESTING:
-        raise Exception("ERROR: hit max nesting limit")
-        zip_path = to_unzip.pop()
-        extract_dir = Path(zip_path.parent / zip_path.stem)
-        extract_dir.mkdir()
-        with ZipFile(zip_path, "r") as zip_ref:
-            zip_ref.extractall(extract_dir)
-        zip_path.unlink()
-        for new_zip_path in extract_dir.glob("*.zip"):
-            to_unzip.append(Path(new_zip_path))
-        nesting += 1
-
-    if nesting == MAX_NESTING:
-        raise Exception("ERROR: hit max nesting limit")
+        if nesting == MAX_NESTING:
+            raise Exception("ERROR: hit max nesting limit")
