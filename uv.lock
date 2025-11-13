@@ -157,6 +157,11 @@ dev = [
     { name = "ruff" },
 ]
 
+[package.dev-dependencies]
+dev = [
+    { name = "pre-commit" },
+]
+
 [package.metadata]
 requires-dist = [
     { name = "ipykernel", marker = "extra == 'dev'", specifier = ">=7.1.0" },
@@ -171,6 +176,9 @@ requires-dist = [
     { name = "tqdm", specifier = ">=4.67.1" },
 ]
 provides-extras = ["dev"]
+
+[package.metadata.requires-dev]
+dev = [{ name = "pre-commit", specifier = ">=4.4.0" }]
 
 [[package]]
 name = "executing"

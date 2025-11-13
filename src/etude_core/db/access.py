@@ -6,15 +6,17 @@ from tqdm import tqdm
 
 logger = logging.getLogger(__name__)
 
+
 class BadParameter(ValueError):
     pass
+
 
 def get_engine(db_settings, fast_executemany: bool = True, echo: bool = False):
     """
     Creates and returns a SQLAlchemy engine based on the loaded pydantic settings.
     """
     engine_args = {"echo": echo}
-    url_object = None 
+    url_object = None
 
     match db_settings.type:
         case "mssql":
@@ -57,8 +59,8 @@ def bulk_upload(
 ):
     """
     Uploads a DataFrame to a database table in chunks.
-    
-    FIXED: Replaces np.array_split with pure pandas slicing to avoid 
+
+    FIXED: Replaces np.array_split with pure pandas slicing to avoid
     NumPy 2.0 'swapaxes' warnings on object columns.
     """
     if df.empty:
@@ -67,7 +69,7 @@ def bulk_upload(
     # 1. Pure Python Chunking (Avoids np.array_split on DataFrames)
     # This prevents NumPy from trying to inspect complex DataFrame types
     total_rows = len(df)
-    
+
     with tqdm(
         total=total_rows,
         desc=tqdm_description,
@@ -75,17 +77,16 @@ def bulk_upload(
         leave=leave,
         disable=not show_progress,
     ) as pbar:
-        
         # Iterate using standard range (Memory efficient view slicing)
         for start_idx in range(0, total_rows, chunksize):
             # Create the chunk via slicing
             df_chunk = df.iloc[start_idx : start_idx + chunksize]
-            
+
             # 2. Sanitize ONLY the chunk
             # .replace is generally safer/cleaner than .where(..., None)
             # This converts NaNs/pd.NA -> None (SQL NULL) just before upload
             clean_chunk = df_chunk.replace({np.nan: None, pd.NA: None})
-            
+
             conn.execute(
                 sa_table.insert(),
                 clean_chunk.to_dict(orient="records"),
@@ -121,10 +122,10 @@ def atomic_bulk_upload(
         with eng.begin() as conn:  # Transaction Start
             for start_idx in range(0, total_rows, chunksize):
                 df_chunk = df.iloc[start_idx : start_idx + chunksize]
-                
+
                 # Sanitize chunk for SQL
                 clean_chunk = df_chunk.replace({np.nan: None, pd.NA: None})
-                
+
                 conn.execute(
                     sa_table.insert(),
                     clean_chunk.to_dict(orient="records"),

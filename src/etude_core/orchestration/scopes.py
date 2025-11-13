@@ -2,7 +2,7 @@ import logging
 from contextlib import contextmanager
 
 # Core orchestration components for job status tracking
-from etude_core.orchestration.managers import SessionManager, JobUpdater
+from etude_core.orchestration.managers import SessionManager
 
 # Import type hints
 from etude_core.pipelines.protocols import PipelineJob
@@ -79,7 +79,6 @@ def job_scope(
         file_id = None
         hash_id = None
 
-    job_updater: JobUpdater = None
     try:
         # --- SKIP LOGIC ---
         # Check if this pipeline/hash combo has ever been completed successfully.
@@ -117,9 +116,8 @@ def job_scope(
             yield job_updater, True
             return
 
-        job_updater.update_status(
-            StatusEnum.RUNNING, f"Starting {pipeline_id} processing"
-        )
+        # --- REFACTOR 1: Use explicit method ---
+        job_updater.mark_running(f"Starting {pipeline_id} processing")
 
         # Yield (updater, should_skip=False)
         yield job_updater, False
@@ -128,7 +126,8 @@ def job_scope(
         # 'Error' logic
         logger.error(f"Failed to process {job_name}: {e}", exc_info=True)
         if job_updater:
-            job_updater.update_status(StatusEnum.ERROR, message=f"Failed: {e}")
+            # --- REFACTOR 2: Use explicit method ---
+            job_updater.mark_failed(error_message=f"Failed: {e}")
         # Re-raise exception to be handled by the outer session scope
         raise
     else:
@@ -137,10 +136,10 @@ def job_scope(
             # Retrieve the row count, if the handler set it
             rows = getattr(job_updater, "_rows_uploaded_in_scope", None)
 
-            job_updater.update_status(
-                StatusEnum.COMPLETED,
-                f"{pipeline_id} processed successfully",
-                rows_uploaded=rows,
+            # --- REFACTOR 3: Use explicit method ---
+            job_updater.mark_completed(
+                message=f"{pipeline_id} processed successfully",
+                rows=rows,
             )
     finally:
         # 'Teardown' logic

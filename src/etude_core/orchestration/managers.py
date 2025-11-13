@@ -5,13 +5,15 @@ from sqlalchemy import (
 )
 from sqlalchemy.orm import scoped_session, sessionmaker
 from etude_core.db.models import StatusEnum, ProcessingJob, ProcessingSession
+from etude_core.services.zip_io import FileType
 
 logger = logging.getLogger(__name__)
 
 
 # --- Manager Classes ---
 
-class JobUpdater:
+
+class JobManager:
     """Manages the status of a SINGLE file processing job."""
 
     def __init__(self, eng, job_id: int):
@@ -35,39 +37,51 @@ class JobUpdater:
             self._session.rollback()
             return None
 
-    def update_status(
-        self, status: StatusEnum, message: str = None, rows_uploaded: int = None
-    ):
-        """Updates the status and message for this job."""
-        # We use the persistent session `self._session`
+    def mark_running(self, message: str = "Processing started"):
+        """Transition job to RUNNING state and set start timer."""
+        self._transition(
+            status=StatusEnum.RUNNING,
+            message=message,
+            start_time=func.now(),  # Only set start_time here
+        )
+
+    def mark_completed(self, message: str = "Completed", rows: int = None):
+        """Transition job to COMPLETED state, set end timer, and record metrics."""
+        # Encapsulate the fallback logic for rows inside the 'Success' event only
+        final_rows = rows if rows is not None else self._rows_uploaded_in_scope
+
+        self._transition(
+            status=StatusEnum.COMPLETED,
+            message=message,
+            end_time=func.now(),
+            rows_uploaded=final_rows,
+        )
+
+    def mark_failed(self, error_message: str):
+        """Transition job to ERROR state and set end timer."""
+        self._transition(
+            status=StatusEnum.ERROR, message=error_message, end_time=func.now()
+        )
+
+    def _transition(self, status: StatusEnum, **updates):
+        """
+        Internal helper to execute the DB write.
+        This is private (_) because external callers shouldn't use generic updates.
+        """
         try:
-            job = self._session.query(ProcessingJob).get(self.job_id)
+            job = self._session.get(ProcessingJob, self.job_id)
             if not job:
-                logger.error(f"Could not find job with ID {self.job_id} to update.")
                 return
 
             job.status = status
-            if message:
-                job.message = message
-
-            if status == StatusEnum.RUNNING and not job.start_time:
-                job.start_time = func.now()
-
-            if status in [StatusEnum.COMPLETED, StatusEnum.ERROR]:
-                job.end_time = func.now()
-                # If rows_uploaded wasn't passed, check our internal property
-                if rows_uploaded is None and self._rows_uploaded_in_scope is not None:
-                    rows_uploaded = self._rows_uploaded_in_scope
-
-            if rows_uploaded is not None:
-                job.rows_uploaded = rows_uploaded
+            for key, value in updates.items():
+                setattr(job, key, value)
 
             self._session.commit()
-            logger.debug(f"Updated job {self.job_id} ({job.job_name}) to {status}")
+            logger.debug(f"Job {self.job_id} transitioned to {status}")
         except Exception as e:
             self._session.rollback()
-            logger.error(f"Failed to update job status for {self.job_id}: {e}")
-        # Do not close the session here, let the manager handle it
+            logger.error(f"Failed to transition job {self.job_id}: {e}")
 
     def close_session(self):
         """Closes the persistent session."""
@@ -114,14 +128,14 @@ class SessionManager:
     def get_or_create_job(
         self,
         job_name: str,
-        file_type: "FileType",
+        file_type: FileType,
         pipeline_id: str,
         file_id: int,
         hash_id: int,
-    ) -> JobUpdater:
+    ) -> JobManager:
         """
         Idempotently gets or creates a job for a specific pipeline and file.
-        Returns a JobUpdater for it.
+        Returns a JobManager for it.
         """
         try:
             # 1. Try to find an existing job *in this session*
@@ -137,8 +151,8 @@ class SessionManager:
                 logger.debug(
                     f"Found existing job {existing_job.id} for {pipeline_id} / FileID {file_id}"
                 )
-                # Return a JobUpdater for the *existing* job
-                return JobUpdater(self.eng, existing_job.id)
+                # Return a JobManager for the *existing* job
+                return JobManager(self.eng, existing_job.id)
 
             # 2. Create a new job if not found
             logger.info(f"Creating new job for {job_name}")
@@ -155,8 +169,8 @@ class SessionManager:
             self._session.commit()
             logger.info(f"Created new job '{job_name}' with ID: {new_job.id}")
 
-            # Return a JobUpdater for the *new* job
-            return JobUpdater(self.eng, new_job.id)
+            # Return a JobManager for the *new* job
+            return JobManager(self.eng, new_job.id)
 
         except Exception as e:
             self._session.rollback()

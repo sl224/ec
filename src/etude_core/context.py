@@ -19,7 +19,7 @@ class EtlContext:
                 .decode("ascii")
                 .strip()
             )
-        except:
+        except Exception:
             gh = "unknown"
 
         return cls(user_name=getpass.getuser(), git_hash=gh, host_name=platform.node())

@@ -17,8 +17,7 @@ from typing import (
 import pandas as pd
 import sqlalchemy as sa
 
-from etude_core.orchestration.managers import JobUpdater
-from etude_core.db.models import StatusEnum
+from etude_core.orchestration.managers import JobManager
 from etude_core.db import access as sql_io
 
 logger = logging.getLogger(__name__)
@@ -110,7 +109,7 @@ class FileHandler:
                 )
 
     def run(
-        self, eng: sa.Engine, hash_id: int, file_path: Path, job_updater: JobUpdater
+        self, eng: sa.Engine, hash_id: int, file_path: Path, job_updater: JobManager
     ):
         logger.info(f"[{self.PIPELINE_ID}] Processing HashID {hash_id}")
 
@@ -180,10 +179,7 @@ class FileHandler:
         # Standard Atomic Logic
         total_rows = 0
         row_count_sum = sum(len(item[1]) for item in payload)
-        job_updater.update_status(
-            StatusEnum.RUNNING, message=f"Uploading {row_count_sum} rows..."
-        )
-
+        job_updater.mark_running(f"Uploading {row_count_sum} rows...")
         with eng.begin() as conn:
             for table_model, df in payload:
                 if df.empty:

@@ -37,3 +37,18 @@ package-dir = {"" = "src"}
 # This automatically finds all packages (etude_core, etude_core.db, etc.)
 # under the 'src' directory.
 where = ["src"]
+
+[dependency-groups]
+dev = [
+    "pre-commit>=4.4.0",
+]
+
+[tool.ruff]
+# Extend this list for any directories that are not part of your
+# source distribution (e.g., deployment scripts, notebooks, tests).
+exclude = [
+    "scripts/",
+    "tests/",
+    "venv/",
+    "__pypackages__/",
+]

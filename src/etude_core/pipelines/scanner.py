@@ -7,9 +7,9 @@ from sqlalchemy import bindparam, insert, select, update
 from sqlalchemy.exc import IntegrityError
 
 from etude_core.services.fs_scanner import scan_directory
-from etude_core.db.models import FileMetadata, FileHashRegistry, StatusEnum
+from etude_core.db.models import FileMetadata, FileHashRegistry
 from etude_core.services.zip_io import FileType, file_type_patterns
-from etude_core.orchestration.managers import JobUpdater
+from etude_core.orchestration.managers import JobManager
 
 logger = logging.getLogger(__name__)
 
@@ -32,23 +32,21 @@ class MetadataScanHandler:
         self.extract_dir = extract_dir
         self.pattern_map = {v: k for k, v in file_type_patterns.items()}
 
-    def run(self, job_updater: JobUpdater, should_skip: bool) -> List[FileToProcess]:
+    def run(self, job_updater: JobManager, should_skip: bool) -> List[FileToProcess]:
         if should_skip:
             logger.info(
                 f"[{self.PIPELINE_ID}] Job skipped. Fetching existing file list."
             )
             return self._fetch_existing_files()
 
-        job_updater.update_status(StatusEnum.RUNNING, "Scanning directory...")
+        job_updater.mark_running("Scanning directory...")
         raw_files = scan_directory(self.extract_dir, self.pattern_map, FileType.UNKNOWN)
 
         if not raw_files:
             job_updater._rows_uploaded_in_scope = 0
             return []
 
-        job_updater.update_status(
-            StatusEnum.RUNNING, f"Cataloging {len(raw_files)} files..."
-        )
+        job_updater.mark_running(f"Cataloging {len(raw_files)} files...")
         self._upsert_metadata(raw_files)
 
         job_updater._rows_uploaded_in_scope = len(raw_files)
@@ -112,9 +110,9 @@ class MetadataScanHandler:
         ).fetchall()
 
         # After all inserts, the number of hashes in the DB must match our list
-        assert len(id_rows) == len(unique_md5s), (
-            "Hash resolution failed: count mismatch."
-        )
+        assert len(id_rows) == len(
+            unique_md5s
+        ), "Hash resolution failed: count mismatch."
 
         return {row.md5: row.id for row in id_rows}
 

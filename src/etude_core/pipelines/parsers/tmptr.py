@@ -1,6 +1,7 @@
 import pandas as pd
 from pathlib import Path
 
+
 def parse_tmptr_dataframe(file_path: Path) -> pd.DataFrame:
     """
     Reads a TMPTR_LOG file and returns a cleaned DataFrame.
@@ -12,19 +13,18 @@ def parse_tmptr_dataframe(file_path: Path) -> pd.DataFrame:
         dtype=str,
     )
 
-    
     for col, raw_col in [("temp_f", "temp_f_raw"), ("temp_c", "temp_c_raw")]:
         # 1. Clean whitespace
         s = df[raw_col].str.strip()
-        
+
         # 2. Filter: Keep only strings exactly length 4 (matches your 'if len(stoken) == 4')
         #    and slice off the last character (the unit).
-        valid_mask = (s.str.len() == 4)
+        valid_mask = s.str.len() == 4
         numeric_part = s.where(valid_mask).str[:-1]
-        
+
         # 3. Convert to numeric, coercing errors (malformed numbers) to NaN
         #    Int64 allows for integers mixed with NaN (pd.NA)
-        df[col] = pd.to_numeric(numeric_part, errors='coerce').astype("Int64")
+        df[col] = pd.to_numeric(numeric_part, errors="coerce").astype("Int64")
     # --- REFACTORED SECTION END ---
 
     date_str = df["date"].str.strip()

@@ -9,7 +9,6 @@ import re
 from datetime import datetime
 import logging
 import utils.sql_io as sql_io
-import MCData.sa_tables as sa_tables
 
 E2D_SHARED_DRIVE = Path("//rsiny1-ilsfs/RSM")
 
@@ -19,7 +18,7 @@ def main(eng, folder_cfg, years_filter, use_cache=False):
         READ_SUCCESS = 1
         try:
             folder_meta_df = folder_meta_df.read_feather("e2d_meta.feather")
-        except Exception as e:
+        except Exception:
             READ_SUCCESS = 0
 
     if use_cache and not READ_SUCCESS:
