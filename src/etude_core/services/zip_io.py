@@ -80,7 +80,7 @@ class FileType(StrEnum):
     AR = "AR"
     AIRCRAFT_CONFIG = "AIRCRAFT_CONFIGURATION"
     ACAWS_LOG = "ACAWS_LOG"
-    # maint_dat = "MAINT_DAT"  # <-- Removed this, see note below
+    # 'MAINT_DAT' omitted (legacy/unused)
     MAINT_XML = "MAINT_XML"
     MAINT_EVT = "MAINT_EVT"
     MAINT_PRM = "MAINT_PRM"
@@ -88,7 +88,7 @@ class FileType(StrEnum):
     MAINT_LOG = "MAINT_LOG"
 
     # Root-level CSV files
-    # TODO this should be broken out into types
+    # TODO: Extract metadata CSV categories into explicit enums/handlers.
     METADATA_CSV = "METADATA_CSV"
 
     # Files from _RSM_RawArchive/RSM/*_MAINT_*

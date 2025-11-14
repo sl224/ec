@@ -12,7 +12,7 @@ from etude_core.context import EtlContext
 from etude_core.pipelines.scanner import MetadataScanHandler, FileToProcess
 from etude_core.pipelines.contexts import ScanJobContext, FileJobContext
 from etude_core.orchestration.state import get_folder_work_delta, FolderState
-from etude_core.db.models import FileMetadata # Used for type hint
+from etude_core.db.models import FileMetadata  # Used for type hint
 
 logger = logging.getLogger(__name__)
 
@@ -31,7 +31,6 @@ def process_zip(
         with session_scope(
             eng, folder_id, context.git_hash, context.user_name
         ) as session_manager:
-            
             # 1. Calculate State
             work_delta = get_folder_work_delta(eng, folder_id)
             missing_items_lookup: Optional[List[Tuple[int, str]]] = None
@@ -93,9 +92,8 @@ def process_zip(
                     for file in files_to_process:
                         handler = HANDLER_REGISTRY.get(file.file_type)
                         if handler:
-                            # --- FIX ---
-                            # Use the new 'expected_models' attribute
-                            # This aligns with the logic in state.py
+                            # Enumerate required models via handler.expected_models.
+                            # Aligns with state.py expectations.
                             for model in handler.expected_models:
                                 work_items_to_process.append(
                                     (file.hash_id, model.__tablename__)
@@ -113,11 +111,8 @@ def process_zip(
                 )
 
                 # 5. Process work items
-                # --- FIX ---
-                # Renamed 'table_name' to 'dataset_key' for clarity
-                # as this is the key we use for job tracking.
+                # `dataset_key` is the job tracking key (replaces legacy 'table_name').
                 for hash_id, dataset_key in tqdm(
-                # --- END FIX ---
                     work_items_to_process, desc=f"Folder {folder_id} Jobs"
                 ):
                     file = file_map.get(hash_id)
@@ -150,7 +145,7 @@ def process_zip(
                                 hash_id=file.hash_id,
                                 file_path=file.full_path,
                                 job_updater=job_updater,
-                                keys_to_process=[dataset_key], # Pass the specific key
+                                keys_to_process=[dataset_key],  # Pass the specific key
                             )
 
                     except Exception as e:

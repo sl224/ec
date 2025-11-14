@@ -19,6 +19,7 @@ logger = logging.getLogger(__name__)
 
 # --- Data Structures ---
 
+
 class FolderState(Enum):
     UP_TO_DATE = auto()
     PARTIAL = auto()
@@ -31,6 +32,7 @@ class WorkDelta:
 
 
 # --- State Calculation Function ---
+
 
 def get_folder_work_delta(eng: sa.Engine, folder_id: int) -> Optional[WorkDelta]:
     """
@@ -83,9 +85,9 @@ def get_folder_work_delta(eng: sa.Engine, folder_id: int) -> Optional[WorkDelta]
 
         # 4. Calculate the delta
         missing_items = list(expected_work - actual_work)
-        
+
         if not missing_items:
             # If `files` was empty, both sets are empty, this is correct.
             return WorkDelta(status=FolderState.UP_TO_DATE)
-            
+
         return WorkDelta(status=FolderState.PARTIAL, missing_items=missing_items)

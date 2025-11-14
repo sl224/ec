@@ -10,7 +10,7 @@ from typing import (
     Type,
     TypeAlias,
     runtime_checkable,
-    Optional
+    Optional,
 )
 
 import pandas as pd
@@ -46,7 +46,7 @@ class FileHandler:
     a specific file type. It is configured with a list of expected
     SQLAlchemy models and a parser function that returns data for those models.
     """
-    
+
     PIPELINE_ID: str
     expected_models: List[Type[HashVerifiableModel]]
     model_map: Dict[str, Type[HashVerifiableModel]]
@@ -114,7 +114,9 @@ class FileHandler:
             # 1. Parse (expensive I/O)
             model_to_df_map = self._parser(file_path)
         except Exception:
-            logger.error(f"[{self.PIPELINE_ID}] Parser failed for {file_path}", exc_info=True)
+            logger.error(
+                f"[{self.PIPELINE_ID}] Parser failed for {file_path}", exc_info=True
+            )
             raise
 
         # 2. Filter payload based on what this job is for
@@ -167,25 +169,25 @@ class FileHandler:
 
     def _atomic_upload(self, eng, hash_id, payload: PayloadType, job_updater) -> int:
         """
-*Performs a transactional "delete-by-hash-and-insert" upload.*
-"""
+        *Performs a transactional "delete-by-hash-and-insert" upload.*
+        """
         total_rows = 0
         row_count_sum = sum(len(item[1]) for item in payload)  # item[1] is the df
         job_updater.mark_running(f"Uploading {row_count_sum} rows...")
-        
+
         with eng.begin() as conn:
             for model, df in payload:
                 if df.empty:
                     continue
-                
+
                 df_copy = df.copy()
                 df_copy["hash_id"] = hash_id
-                
+
                 # Idempotency: Delete all data for this hash_id from this table
                 conn.execute(model.__table__.delete().where(model.hash_id == hash_id))
 
                 # Bulk upload the new data
                 sql_io.bulk_upload(df_copy, conn, model.__table__)
                 total_rows += len(df_copy)
-                
+
         return total_rows

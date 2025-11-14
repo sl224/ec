@@ -1,6 +1,7 @@
 from sqlalchemy import Column, Integer, Float, Boolean, String, ForeignKey
 from sqlalchemy.dialects.mssql import DATETIME2
 from sqlalchemy.sql.sqltypes import DateTime
+
 # Import Base AND the new schema_fkey helper
 from etude_core.db.base_session import Base, schema_fkey
 
@@ -12,8 +13,10 @@ DATETIME2_MS = DateTime().with_variant(DATETIME2(3), "mssql")
 class Rpcs(Base):
     __tablename__ = "rsmdata_mc_rpcs"
 
-    # Use the helper here
-    hash_id = Column(Integer, ForeignKey(schema_fkey("metadata_hash_registry.id")), primary_key=True)
+    # Use `schema_fkey` to create a schema-qualified foreign key reference.
+    hash_id = Column(
+        Integer, ForeignKey(schema_fkey("metadata_hash_registry.id")), primary_key=True
+    )
     line_number = Column("LineNumber", Integer, primary_key=True)
     system_time_stamp = Column("System TimeStamp", DATETIME2_MS)
     humidity_b = Column("Humidity B", Float)
@@ -28,8 +31,10 @@ class Rpcs(Base):
 class RpcsPres(Base):
     __tablename__ = "rsmdata_mc_rpcs_pres"
 
-    # Use the helper here
-    hash_id = Column(Integer, ForeignKey(schema_fkey("metadata_hash_registry.id")), primary_key=True)
+    # Use `schema_fkey` to create a schema-qualified foreign key reference.
+    hash_id = Column(
+        Integer, ForeignKey(schema_fkey("metadata_hash_registry.id")), primary_key=True
+    )
     line_number = Column("LineNumber", Integer, primary_key=True)
     system_time_stamp = Column("System TimeStamp", DATETIME2_MS)
     dataset_time_stamp = Column("Dataset TimeStamp", DATETIME2_MS)
@@ -57,8 +62,10 @@ class RpcsPres(Base):
 class NavData(Base):
     __tablename__ = "rsmdata_mc_nav_data"
 
-    # Use the helper here
-    hash_id = Column(Integer, ForeignKey(schema_fkey("metadata_hash_registry.id")), primary_key=True)
+    # Use `schema_fkey` to create a schema-qualified foreign key reference.
+    hash_id = Column(
+        Integer, ForeignKey(schema_fkey("metadata_hash_registry.id")), primary_key=True
+    )
     line_number = Column("LineNumber", Integer, primary_key=True)
     system_time_stamp = Column("System TimeStamp", DATETIME2_MS)
     nav_mode = Column("Nav Mode", String(50))
@@ -98,8 +105,10 @@ class NavData(Base):
 class RadarState(Base):
     __tablename__ = "rsmdata_mc_radar_state"
 
-    # Use the helper here
-    hash_id = Column(Integer, ForeignKey(schema_fkey("metadata_hash_registry.id")), primary_key=True)
+    # Use `schema_fkey` to create a schema-qualified foreign key reference.
+    hash_id = Column(
+        Integer, ForeignKey(schema_fkey("metadata_hash_registry.id")), primary_key=True
+    )
     line_number = Column("LineNumber", Integer, primary_key=True)
     system_time_stamp = Column("System TimeStamp", DATETIME2_MS)
     rscp_off_switch_state = Column("RSCP_OFF_Switch_State", String)
@@ -118,8 +127,10 @@ class RadarState(Base):
 class RotoScan(Base):
     __tablename__ = "rsmdata_mc_rotoscan"
 
-    # Use the helper here
-    hash_id = Column(Integer, ForeignKey(schema_fkey("metadata_hash_registry.id")), primary_key=True)
+    # Use `schema_fkey` to create a schema-qualified foreign key reference.
+    hash_id = Column(
+        Integer, ForeignKey(schema_fkey("metadata_hash_registry.id")), primary_key=True
+    )
     line_number = Column("LineNumber", Integer, primary_key=True)
     system_time_stamp = Column("System TimeStamp", DATETIME2_MS)
     scan_mode = Column("ScanMode", String)
@@ -132,8 +143,10 @@ class RotoScan(Base):
 class GfcDb(Base):
     __tablename__ = "rsmdata_mc_gfc_db"
 
-    # Use the helper here
-    hash_id = Column(Integer, ForeignKey(schema_fkey("metadata_hash_registry.id")), primary_key=True)
+    # Use `schema_fkey` to create a schema-qualified foreign key reference.
+    hash_id = Column(
+        Integer, ForeignKey(schema_fkey("metadata_hash_registry.id")), primary_key=True
+    )
     line_number = Column("LineNumber", Integer, primary_key=True)
     system_time_stamp = Column("System TimeStamp", DATETIME2_MS)
     time_stamp = Column("Time Stamp", String)
@@ -150,8 +163,10 @@ class GfcDb(Base):
 class PfcDb(Base):
     __tablename__ = "rsmdata_mc_pfc_db"
 
-    # Use the helper here
-    hash_id = Column(Integer, ForeignKey(schema_fkey("metadata_hash_registry.id")), primary_key=True)
+    # Use `schema_fkey` to create a schema-qualified foreign key reference.
+    hash_id = Column(
+        Integer, ForeignKey(schema_fkey("metadata_hash_registry.id")), primary_key=True
+    )
     line_number = Column("LineNumber", Integer, primary_key=True)
     system_time_stamp = Column("System TimeStamp", DATETIME2_MS)
     processed_fault_code = Column("Processed Fault Code", Integer)
@@ -163,8 +178,10 @@ class PfcDb(Base):
 class RfcDb(Base):
     __tablename__ = "rsmdata_mc_rfc_db"
 
-    # Use the helper here
-    hash_id = Column(Integer, ForeignKey(schema_fkey("metadata_hash_registry.id")), primary_key=True)
+    # Use `schema_fkey` to create a schema-qualified foreign key reference.
+    hash_id = Column(
+        Integer, ForeignKey(schema_fkey("metadata_hash_registry.id")), primary_key=True
+    )
     line_number = Column("LineNumber", Integer, primary_key=True)
     system_time_stamp = Column("System TimeStamp", DATETIME2_MS)
     fci_indicator = Column("FCI Indicator", String)
@@ -185,8 +202,10 @@ class RfcDb(Base):
 class LcsTemp(Base):
     __tablename__ = "rsmdata_mc_lcs_temp"
 
-    # Use the helper here
-    hash_id = Column(Integer, ForeignKey(schema_fkey("metadata_hash_registry.id")), primary_key=True)
+    # Use `schema_fkey` to create a schema-qualified foreign key reference.
+    hash_id = Column(
+        Integer, ForeignKey(schema_fkey("metadata_hash_registry.id")), primary_key=True
+    )
     line_number = Column("LineNumber", Integer, primary_key=True)
     system_time_stamp = Column("System TimeStamp", DATETIME2_MS)
     lcs_temp_f = Column("LCS Temp F", String)
@@ -197,8 +216,10 @@ class LcsTemp(Base):
 class McInDiscr(Base):
     __tablename__ = "rsmdata_mc_mc_in_discr"
 
-    # Use the helper here
-    hash_id = Column(Integer, ForeignKey(schema_fkey("metadata_hash_registry.id")), primary_key=True)
+    # Use `schema_fkey` to create a schema-qualified foreign key reference.
+    hash_id = Column(
+        Integer, ForeignKey(schema_fkey("metadata_hash_registry.id")), primary_key=True
+    )
     line_number = Column("LineNumber", Integer, primary_key=True)
     system_time_stamp = Column("System TimeStamp", DATETIME2_MS)
     power_on = Column("Power On", Boolean)

@@ -72,7 +72,7 @@ def bulk_upload(
         leave=leave,
         disable=not show_progress,
     ) as pbar:
-        # Iterate using iloc slicing for memory-efficient chunking.
+        # Slice via `iloc` for memory-efficient chunking.
         for start_idx in range(0, total_rows, chunksize):
             df_chunk = df.iloc[start_idx : start_idx + chunksize]
 

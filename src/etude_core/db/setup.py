@@ -4,7 +4,8 @@ from sqlalchemy.schema import CreateSchema
 
 from etude_core.config import settings
 from etude_core.db.base_session import Base
-# We need to import all models so Base.metadata is populated
+
+# Import models to populate `Base.metadata` with table definitions
 import etude_core.db.models  # noqa: F401
 from etude_core.db.models import FolderMetadata
 
@@ -52,8 +53,8 @@ def get_or_create_folder(eng: sa.Engine, folder_id: int, folder_path: str) -> bo
         try:
             conn.execute(
                 FolderMetadata.__table__.insert(),
-                    # Note: Your model maps 'id' to 'FolderID' and 'path' to 'FolderPath'
-                {"FolderID": folder_id, "FolderPath": folder_path}
+                # Use model column names for insert: 'FolderID' and 'FolderPath'
+                {"FolderID": folder_id, "FolderPath": folder_path},
             )
             conn.commit()
             logger.debug(f"Created new FolderID {folder_id}")

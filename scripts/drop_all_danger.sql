@@ -1,9 +1,11 @@
--- WARNING: This will delete all data in the 'etude_core' schema.
--- Use the correct database
+-- Danger: This script irreversibly removes all objects in the 'etude_core' schema.
+-- Confirm you're connected to the intended database and have reliable backups.
+-- Intended for controlled maintenance; obtain approvals before executing.
 USE [AnalyticsDataMart];
 GO
 
--- 1. Drop all Foreign Key Constraints in the schema
+-- 1) Drop all foreign-key constraints in the target schema.
+-- Collect ALTER TABLE ... DROP CONSTRAINT statements into @sql and execute as a batch.
 DECLARE @sql NVARCHAR(MAX) = N'';
 
 SELECT @sql += N'ALTER TABLE ' 
@@ -19,7 +21,7 @@ PRINT @sql;
 EXEC sp_executesql @sql;
 GO
 
--- 2. Drop all Tables in the schema
+-- 2) Drop all tables in the target schema. Run after constraints are removed.
 DECLARE @sql NVARCHAR(MAX) = N'';
 
 SELECT @sql += N'DROP TABLE ' 
@@ -34,4 +36,4 @@ PRINT @sql;
 EXEC sp_executesql @sql;
 GO
 
-PRINT 'All tables in schema etude_core have been dropped.';
+PRINT 'All tables in schema etude_core have been dropped. Confirm expected outcome and restore from backup if necessary.';

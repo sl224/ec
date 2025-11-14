@@ -4,8 +4,9 @@ from pathlib import Path
 
 # --- Core ETL Imports ---
 from etude_core.context import EtlContext
+
 # Renamed import:
-from etude_core.orchestration.workflow import process_zip 
+from etude_core.orchestration.workflow import process_zip
 
 # --- Model & DB Imports ---
 # 1. Import all models (populates Base.metadata)
@@ -14,6 +15,7 @@ from etude_core.orchestration.workflow import process_zip
 # 2. Import DB setup helpers and config
 from etude_core.db import access as sql_io
 from etude_core.config import settings
+
 # New location for setup helpers:
 from etude_core.db.setup import initialize_database, get_or_create_folder
 
@@ -31,8 +33,6 @@ if __name__ == "__main__":
     logger.info(f"Connecting to database type: {settings.database.type}")
     eng = sql_io.get_engine(settings.database)
 
-
-
     # 1. Initialize DB
     # We set reset_tables=True because this is a dev/test script.
     # For production, this would be `reset_tables=False`.
@@ -47,8 +47,8 @@ if __name__ == "__main__":
     test_zip = (
         STATIC_ASSETS_ROOT / "zips/169069_20250203_004745_025_TransportRSM.fpkg.e2d.zip"
     )
-    # Note: Using a list of tuples (folder_id, path_to_zip)
-    id_paths = [(i, test_zip) for i in range(10)][-1:]
+    # Use a list of (folder_id, path_to_zip) tuples for deterministic ordering
+    id_paths = [(i, test_zip) for i in range(11)][-1:]
     logger.info(f"Found {len(id_paths)} folders to process.")
 
     # 4. Main Processing Loop

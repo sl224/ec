@@ -1,5 +1,6 @@
 from sqlalchemy import Column, Integer, String, ForeignKey
 from sqlalchemy.orm import relationship
+
 # Import Base AND the new schema_fkey helper
 from etude_core.db.base_session import Base, schema_fkey
 
@@ -37,7 +38,7 @@ class FileMetadata(Base):
 
     id = Column(Integer, primary_key=True)
 
-    # Use the helper here
+    # Use `schema_fkey` to reference schema-qualified columns for foreign keys.
     folder_id = Column(
         Integer,
         ForeignKey(schema_fkey("metadata_folder.FolderID")),
@@ -45,7 +46,7 @@ class FileMetadata(Base):
         index=True,
     )
 
-    # And here
+    # Use `schema_fkey` for the hash registry foreign key.
     hash_id = Column(
         Integer,
         ForeignKey(schema_fkey("metadata_hash_registry.id")),

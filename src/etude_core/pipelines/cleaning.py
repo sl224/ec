@@ -27,7 +27,8 @@ def clean_dataframe_from_model(df: pd.DataFrame, model: Type[Base]) -> pd.DataFr
     """
     dtypes = get_model_dtypes(model)
 
-    df = df.copy()  # Avoid SettingWithCopyWarning
+    # Operate on an explicit copy to avoid pandas' SettingWithCopyWarning.
+    df = df.copy()
 
     for col_name, py_type in dtypes.items():
         if col_name not in df.columns:
@@ -49,8 +50,8 @@ def clean_dataframe_from_model(df: pd.DataFrame, model: Type[Base]) -> pd.DataFr
 
             # Datetime types
             elif py_type is datetime:
-                # Use explicit format to improve parsing speed and avoid warnings.
-                # This format is common in the MCData files.
+                # Parse with an explicit datetime format for performance and stability.
+                # Matches common MCData timestamp format.
                 datetime_format = "%m/%d/%Y %H:%M:%S"
 
                 df[col_name] = pd.to_datetime(
