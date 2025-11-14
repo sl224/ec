@@ -14,14 +14,12 @@ from pydantic_settings import (
     SecretsSettingsSource,
 )
 
-# --- Define the absolute path to the config file ---
-# This finds the directory where 'global_config.py' lives
+# Define the absolute path to the config file.
+# This finds the directory where this file lives, then points to `global_config.toml`.
 BASE_DIR = Path(__file__).resolve().parent
-# This creates a full, absolute path to 'global_config.toml'
 TOML_PATH = BASE_DIR / "global_config.toml"
-# ---
 
-# --- Add a debug check ---
+# Add a debug check to warn if the config file is missing.
 if not TOML_PATH.is_file():
     print(f"WARNING: Config file not found at path: {TOML_PATH}", file=sys.stderr)
     print(f"WARNING: Current working directory: {Path.cwd()}", file=sys.stderr)
@@ -37,9 +35,8 @@ class LoggingConfig(BaseModel):
     format: str = "%(asctime)s - %(name)s - %(levelname)s - %(message)s"
 
 
-# --- 2. Define the Discriminated Union for the Database ---
-# Defines the different database connection types the application supports.
-# Pydantic will use the 'type' field to determine which model to use.
+# Define the discriminated union for database configurations.
+# Pydantic uses the 'type' field to select the correct model.
 
 
 class SQLiteConfig(BaseSettings):
@@ -56,19 +53,13 @@ class MSSQLConfig(BaseModel):
     trusted_connection: str = "yes"
 
 
-# Create a new type that can be ANY of the above configs
+# A type that can be any of the supported database configurations.
 DatabaseConfig = Union[SQLiteConfig, MSSQLConfig]
-
-
-# --- 3. Define the Main "Loader" (BaseSettings) ---
-# This is the main settings class that loads configuration from the TOML file.
-# It provides default values to prevent the application from crashing if the
-# config file is missing or incomplete.
 
 
 class AppSettings(BaseSettings):
     """
-    Loads all application settings from the TOML file.
+    Main settings class that loads configuration from various sources.
     Uses defaults if the file or keys are missing.
     """
 
@@ -89,13 +80,11 @@ class AppSettings(BaseSettings):
         file_secret_settings: SecretsSettingsSource,
     ) -> Tuple[Callable, ...]:
         """
-        Define the priority order for loading settings.
-        We are inserting our TOML file source right after
-        the initial settings.
+        Define the priority order for loading settings sources.
+        Our custom TOML file is inserted with high priority.
         """
         return (
             init_settings,
-            # Add our TOML file as a source
             TomlConfigSettingsSource(settings_cls, toml_file=TOML_PATH),
             # The rest are the default sources
             env_settings,
@@ -104,12 +93,8 @@ class AppSettings(BaseSettings):
         )
 
 
-# --- 4. Create the Singleton Instance ---
+# Create a singleton instance of the settings to be used throughout the app.
 try:
     settings = AppSettings()
-    # If you want to verify, uncomment this temporarily:
-    # print(f"--- DEBUG: Loading config from {TOML_PATH} ---")
-    # print(settings.model_dump_json(indent=2))
-    # print("-----------------------------------------------")
 except Exception as e:
     print(f"Failed to load configuration: {e}")

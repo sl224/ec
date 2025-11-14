@@ -1,7 +1,7 @@
 from sqlalchemy.orm import declarative_base, sessionmaker
 from etude_core.config import settings
 
-# --- Conditional Schema Logic ---
+# Conditionally set a default schema for MSSQL to keep tables organized.
 if settings.database.type == "mssql":
     DEFAULT_SCHEMA = "etude_core"
 
@@ -13,5 +13,5 @@ else:
     DEFAULT_SCHEMA = None
     Base = declarative_base()
 
-# --- Session Factory ---
+# A factory for creating new Session objects.
 SessionLocal = sessionmaker(autocommit=False, autoflush=False)

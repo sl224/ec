@@ -15,18 +15,15 @@ def parse_tmptr_dataframe(file_path: Path) -> pd.DataFrame:
     )
 
     for col, raw_col in [("temp_f", "temp_f_raw"), ("temp_c", "temp_c_raw")]:
-        # 1. Clean whitespace
+        # Clean whitespace
         s = df[raw_col].str.strip()
 
-        # 2. Filter: Keep only strings exactly length 4 (matches your 'if len(stoken) == 4')
-        #    and slice off the last character (the unit).
+        # Filter for valid format (e.g., '72F') and slice off the unit char.
         valid_mask = s.str.len() == 4
         numeric_part = s.where(valid_mask).str[:-1]
 
-        # 3. Convert to numeric, coercing errors (malformed numbers) to NaN
-        #    Int64 allows for integers mixed with NaN (pd.NA)
+        # Convert to a nullable integer type, coercing errors to NA.
         df[col] = pd.to_numeric(numeric_part, errors="coerce").astype("Int64")
-    # --- REFACTORED SECTION END ---
 
     date_str = df["date"].str.strip()
     time_str = df["time"].str.strip()

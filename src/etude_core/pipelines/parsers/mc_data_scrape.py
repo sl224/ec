@@ -1,16 +1,15 @@
 from pandas import DataFrame
 
 """
-Contains scraping strategies for the MCData file records
-See MC_Maintenance_Data_User_Guide_v2.11.pdf for data details
+Scraping functions for individual record types within an MCData file.
+See MC_Maintenance_Data_User_Guide_v2.11.pdf for details.
 """
 
 
 def scrape_nav_record(text):
     """
-    Parses a single NAV_DATA line record
-    The data field at index 15 of a data_tokens line is a character string
-    of booleans that need to be flattened
+    Parses a NAV_DATA line. The field at index 15 is a string of
+    boolean flags that must be flattened into separate columns.
 
     Sample nav_data_line:
     2,NAV_DATA:,,10/02/2018 20:24:21,NORMAL,-0.60,23.00,24.00,5.37,5.380,
@@ -23,7 +22,7 @@ def scrape_nav_record(text):
 
     flatten_idx = 15
     row = []
-    # Data starts from index 2 on
+    # Data starts from the 3rd comma-separated token.
     data = _split_filter_line(text[2:])
     assert len(data[flatten_idx]) == 16
     row.extend(data[:flatten_idx])
@@ -34,9 +33,9 @@ def scrape_nav_record(text):
 
 def scrape_rpcs_pres_record(text) -> DataFrame:
     def _filter_rpcs(token):
-        # Range of Pressure vals defined in the interface design document (IDD)
-        # E.g (0.0..99999999.9,CLR,INV)
-        # We transform to None and -1 as to fit the float datatype
+        # Map non-numeric pressure values from the spec to values that
+        # can be coerced into a float column (None for NULL, -1 for INV).
+        # E.g., (0.0..99999999.9, CLR, INV)
         str_map = {
             "CLR": None,
             "INV": "-1",
@@ -58,19 +57,7 @@ def scrape_rpcs_pres_record(text) -> DataFrame:
 
 def scrape_pfc_db_record(text):
     """
-    E.g:
-        "2,PFC_DB:,,,28421,RDR CH I/Q FAULT-CH 15 1929407492P,
-        10/02/2018 20:24:28,RADAR,NCI,,,,CONFIRMED_FALSE,PBIT,
-        39A4A1,,,NO_GRP,,1,false,true,,,,,false,MAINT,,,,,,,,,
-        false,TRUE,,,true,,,,,,,,,"
-
-    Data Fields:
-    1. Time Stamp � Time of fault processing.
-    2. Processed Fault Code � Numeric code.
-    3. Description: Str
-    4. Subsystem: Str
-    5. Mission Critical Result � Criticality of the fault.
-
+    Parses a PFC_DB line.
     """
     row = []
     tokens = text.split(",")
@@ -116,8 +103,6 @@ def scrape_rfc_db_record(text):
     keep_tokens = tokens[4:22]
     # print('keep_tokens', keep_tokens)
     data_tokens = [token for i, token in enumerate(keep_tokens) if i not in ignore_idxs]
-    # assert len(data_tokens) == 13
-    # print('data_tokens', data_tokens)
     row.extend(data_tokens)
     row[6] = row[2].split(" ")[0] + " " + row[6]
     return row
@@ -125,24 +110,13 @@ def scrape_rfc_db_record(text):
 
 def scrape_rpcs_record(text):
     """
-    E.g:
-
-    Data Fields:
-    1. Time Stamp � Time that parameters were recorded.
-    2. Humidity Sensor B � Reported Humidity.
-    3. Secondary High Pressure Sensor � Reported Pressure.
-    4. High Temperature Sensor � Reported Temperature
-    5. Delta Pressure Sensor � Reported Pressure.
-    6. Humidity Sensor A � Reported Humidity.
-    7. Manifold Pressure � Reported Pressure.
-    8. Primary High Pressure � Reported Pressure
+    Parses an RPCS line, which contains binary-encoded values that must be decoded.
     """
 
     def decode(ARINC, param_name):
         """
-        Decodes the binary values from the RPCS record in the MCData files
-        Constants are defined in the rpcs_parser.java
-        The java file was sent via email from Dominick Terrasi
+        Decodes binary values from the RPCS record.
+        Constants are derived from the original rpcs_parser.java implementation.
         """
         decode_map = {
             "HUM_B": (ARINC * 1.26) - 175,
@@ -157,13 +131,11 @@ def scrape_rpcs_record(text):
             raise ValueError(f"Param name {param_name} not handled")
         return decode_map[param_name]
 
-    # Append LogID, LineNumber
     row = []
     comma_split_tokens = text.split(",")
-    # Append datetime
-    row.append(comma_split_tokens[3])
+    row.append(comma_split_tokens[3])  # datetime
     BINARY_START_READ_IDX = 4
-    # Number of binary chars to traverse
+    # Number of tokens to traverse (7 pairs of param_name, binary_value)
     OFFSET = 14
     for i in range(BINARY_START_READ_IDX, BINARY_START_READ_IDX + OFFSET, 2):
         token = comma_split_tokens[i]
@@ -175,7 +147,9 @@ def scrape_rpcs_record(text):
 
 
 def scrape_rdr_state_record(text):
-    """ """
+    """
+    Parses an RDR_STATE line.
+    """
     row = []
     stripped = [token for token in text.split(",") if token and token != "\n"]
     assert len(stripped) == 25
@@ -185,7 +159,9 @@ def scrape_rdr_state_record(text):
 
 
 def scrape_rotoscan_record(text):
-    """ """
+    """
+    Parses a ROTOSCAN line.
+    """
     row = []
     stripped = [token.strip() for token in text.split(",") if token and token != "\n"]
     row.extend(stripped[2:])
@@ -194,20 +170,7 @@ def scrape_rotoscan_record(text):
 
 def scrape_lcs_temp_record(text: str):
     """
-    E.g:
-        "2,LCS_TEMP:,,12/02/2021 14:32:27,72.7,VALID,14:32:27
-         ,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,"
-
-     Data Fields:
-        1. Time Stamp: System Temp
-        2. LCS Temperature: degrees Fahrenheit
-        3. LCS Temp Status
-            INIT : Initial state
-            VALID : normal processing
-            STALE : the data was not updated by MUX FCI within the last 10
-                    seconds.
-        4. LCS Time: the time stamp when MUX FCI last recorded the
-                     LCS temperature
+    Parses an LCS_TEMP line.
     """
     row = []
     stripped = [token.strip() for token in text.split(",")]
@@ -218,65 +181,11 @@ def scrape_lcs_temp_record(text: str):
 
 def scrape_mc_in_discr(text):
     """
-    E.g.
-        query:
-
-        "SELECT [RawText] FROM [LcdDataMart].[dbo].[E2D_LogRecords]
-        WHERE [RawText] LIKE '%MC_In_DISCR%'"
-
-        Sample Line:
-        "1,MC_IN_DISCR:,,09/27/2018 11:35:21,AC_Stat,T,T,MC_CabEnv,14,23,
-        15,20,49,-6,MC_Airflow,F,T,F,F,PBT_Byt0,F,F,F,F,PBT_Byt1,F,F,F,F,F,F,F
-        ,F,,,,,,,,,,,,,,,,,"
-
-    Data Fields:
-        MC_IN_DISCR
-        ===========
-        01. Time Stamp - datetime
-
-        AC Stat
-        =======
-        02. MC Power On - bool
-        03. MC Cooling Air - bool
-
-        MC_CabEnv
-        =========
-        04. MC External Temperature Sensor - int
-        05. MC Internal Temperature Sensor 1 - int
-        06. MC Internal Temperature Sensor 2 - int
-        07. MC Internal Temperature Sensor 3 - int
-        08. MC External Relative Humidity - int
-        09. MC Dew Point - int
-
-        MC_Airflow
-        ==========
-        10. MC Air Valve Closed - bool
-        11. MC Air Valve Open - bool
-        12. MC Air Flow Enabled - bool
-        13. MC H Bridge Fault - bool
-
-        PBT_Byt0
-        ========
-        14. MC PBIT Byte 1 DPR R Fault - bool
-        15. MC PBIT Byte 1 DPR W Fault - bool
-        16. MC PBIT Byte 1 DPR WR Fault - bool
-        17. MC PBIT Byte 1 Air Valve Fault - bool
-
-        PBT_Byt1
-        ========
-        18. MC PBIT Byte 2 EXT H Fault - bool
-        19. MC PBIT Byte 2 EXT T Fault - bool
-        20. MC PBIT Byte 2 Valve Pos Fault - bool
-        21. MC PBIT Byte 2 OPC Fault - bool
-        22. MC PBIT Byte 2 INT T1 Fault - bool
-        23. MC PBIT Byte 2 INT T2 Fault - bool
-        24. MC PBIT Byte 2 INT T3 Fault - bool
-        25. MC PBIT Byte 2 NVSTORE Fault - bool
+    Parses an MC_IN_DISCR line by slicing tokens based on fixed positions.
     """
-    # tokenize
     text = text.split(",")
 
-    # organize
+    # Extract data segments by known index slices
     time_stamp = [text[3]]
     ac_stat = text[5:7]
     cab_env = text[8:14]
@@ -284,5 +193,5 @@ def scrape_mc_in_discr(text):
     byt_0 = text[20:24]
     byt_1 = text[25:33]
 
-    # append
+    # Combine and return all segments
     return time_stamp + ac_stat + cab_env + airflow + byt_0 + byt_1

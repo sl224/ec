@@ -4,7 +4,6 @@ from sqlalchemy.orm import relationship
 from etude_core.db.base_session import Base
 
 
-# --- Enums ---
 class StatusEnum(PyEnum):
     PENDING = "PENDING"
     RUNNING = "RUNNING"
@@ -14,29 +13,24 @@ class StatusEnum(PyEnum):
 
 class ProcessingSession(Base):
     """
-    Represents a single execution run (a "session") of the ETL process
-    against a specific FolderID.
+    Represents a single execution run of the ETL against a specific folder.
     """
 
     __tablename__ = "processing_sessions"
     id = Column(Integer, primary_key=True)
 
-    # The FolderID (from your external table) this session is processing
     folder_id = Column(Integer, nullable=False, index=True)
     git_hash = Column(String(40), nullable=True, index=True)
     user_name = Column(String(40), nullable=True)
     status = Column(Enum(StatusEnum), default="UNINITIALIZED")
     start_time = Column(DateTime, server_default=func.now())
     end_time = Column(DateTime, nullable=True)
-
-    # Python-only link to all child jobs
     jobs = relationship("ProcessingJob", back_populates="session", lazy="dynamic")
 
 
 class ProcessingJob(Base):
     """
-    Represents the processing of a single file for a single pipeline.
-    (e.g., running "VersionsSummaryHandler" on "abc_Versions.xml")
+    Represents a single unit of work, e.g., processing one table from one file.
     """
 
     __tablename__ = "processing_jobs"
@@ -44,7 +38,7 @@ class ProcessingJob(Base):
     session_id = Column(Integer, ForeignKey("processing_sessions.id"), nullable=False)
 
     job_name = Column(String(500))  # e.g., "VersionsSummaryHandler: abc_Versions.xml"
-    file_type = Column(String(50), index=True)  # Keep this for context
+    file_type = Column(String(50), index=True)
     pipeline_id = Column(String(255), nullable=True, index=True)
     rows_uploaded = Column(Integer, nullable=True)
     status = Column(Enum(StatusEnum), default=StatusEnum.PENDING, index=True)
@@ -66,18 +60,17 @@ class ProcessingJob(Base):
         index=True,
     )
 
-    # Python-only link back to the parent session
     session = relationship("ProcessingSession", back_populates="jobs")
 
     __table_args__ = (
         Index("ix_folder_status_type", "file_type", "status"),
-        # Index to find a specific job in a session
+        # Unique index to find a specific job within a session.
         Index(
             "ix_job_lookup",
             "session_id",
             "pipeline_id",
             "file_id",
-            "dataset_key",  # <-- THIS IS THE CRITICAL FIX
+            "dataset_key",
             unique=True,
         ),
         # Index to check for completed hashes across *all* sessions

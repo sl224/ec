@@ -18,12 +18,12 @@ from .rsm_mcdata import (
 )
 
 
-# Explicitly declare the public API of the 'models' package
+# Explicitly declare the public API of this package.
 __all__ = [
     "Base",
     "SessionLocal",
     "StatusEnum",
-    "FolderMetadata",  # <-- Added
+    "FolderMetadata",
     "FileHashRegistry",
     "FileMetadata",
     "ProcessingSession",

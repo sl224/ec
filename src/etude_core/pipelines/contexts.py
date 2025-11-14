@@ -11,7 +11,7 @@ logger = logging.getLogger(__name__)
 @runtime_checkable
 class JobContext(Protocol):
     """
-    A polymorphic contract for a job's context.
+    A protocol defining the context for a single processing job.
     """
 
     @property
@@ -25,7 +25,6 @@ class JobContext(Protocol):
     @property
     def hash_id(self) -> int | None: ...
 
-    # --- FIX: Add missing property to the protocol ---
     @property
     def dataset_key(self) -> str: ...
 
@@ -59,7 +58,7 @@ class ScanJobContext:
 
     @property
     def dataset_key(self) -> str:
-        return "Scan"  # This implementation is correct
+        return "Scan"
 
 
 class FileJobContext:
@@ -92,4 +91,4 @@ class FileJobContext:
 
     @property
     def dataset_key(self) -> str:
-        return self._table_name  # This implementation is correct
+        return self._table_name

@@ -10,11 +10,9 @@ from etude_core.services.zip_io import FileType
 logger = logging.getLogger(__name__)
 
 
-# --- Manager Classes ---
-
-
-# ... (JobManager class is unchanged) ...
 class JobManager:
+    """Manages the state of a single ProcessingJob in the database."""
+
     def __init__(self, eng, job_id: int):
         self.eng = eng
         self.job_id = job_id
@@ -74,7 +72,8 @@ class JobManager:
 
 
 class SessionManager:
-    # ... (__init__ and _create_session are unchanged) ...
+    """Manages a ProcessingSession and its associated jobs."""
+
     def __init__(self, eng, folder_id: int, git_hash: str = None, user_name=None):
         self.eng = eng
         self.Session = scoped_session(sessionmaker(bind=eng))
@@ -115,11 +114,11 @@ class SessionManager:
         dataset_key: str,  # <-- FIX: Add dataset_key back to signature
     ) -> JobManager:
         """
-        Idempotently gets or creates a job for a specific pipeline and file.
-        Returns a JobManager for it.
+        Idempotently gets an existing job or creates a new one for a specific
+        pipeline, file, and dataset. Returns a JobManager for it.
         """
         try:
-            # 1. Try to find an existing job *in this session*
+            # Try to find an existing job within the current session.
             existing_job = (
                 self._session.query(ProcessingJob)
                 .filter_by(
@@ -137,7 +136,7 @@ class SessionManager:
                 )
                 return JobManager(self.eng, existing_job.id)
 
-            # 2. Create a new job if not found
+            # Create a new job if one doesn't exist for this session.
             logger.info(f"Creating new job for {job_name}")
             new_job = ProcessingJob(
                 session_id=self.session_id,
@@ -167,9 +166,8 @@ class SessionManager:
         dataset_key: str,
     ) -> bool:
         """
-        (This function is already correct)
-        Checks if a COMPLETED job exists for this pipeline/hash/key combo
-        in *any* session.
+        Checks if a COMPLETED job exists for a given pipeline, content hash,
+        and dataset key across *any* previous session. Used for skipping work.
         """
         session = self.Session()
         try:
@@ -192,7 +190,9 @@ class SessionManager:
             session.close()
 
     def finalize_session(self):
-        # (This function is unchanged)
+        """
+        Finalizes the session, setting its status to COMPLETED or ERROR.
+        """
         session = self.Session()
         try:
             session_obj = session.query(ProcessingSession).get(self.session_id)

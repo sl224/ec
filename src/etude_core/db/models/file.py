@@ -3,11 +3,9 @@ from sqlalchemy.orm import relationship
 from etude_core.db.base_session import Base
 
 
-# --- 1. The Source (Folders) ---
 class FolderMetadata(Base):
     """
-    Represents a root-level folder (or zip) to be processed.
-    Maps legacy column names (FolderID) to Pythonic attributes (id).
+    Represents a root-level folder (or zip archive) being processed.
     """
 
     __tablename__ = "folder_metadata"
@@ -18,8 +16,8 @@ class FolderMetadata(Base):
 
 class FileHashRegistry(Base):
     """
-    Registry of unique file content.
-    Used for deduplication: many files can point to one Hash ID.
+    Registry of unique file content hashes (MD5). This allows for content-based
+    deduplication, where many file instances can point to one hash ID.
     """
 
     __tablename__ = "file_hash_registry"
@@ -30,15 +28,14 @@ class FileHashRegistry(Base):
 
 class FileMetadata(Base):
     """
-    The 'Rosetta Stone'.
-    Links a specific file instance (in a folder) to its content hash.
+    Links a specific file instance (by its path within a folder) to its
+    unique content hash in the `file_hash_registry`.
     """
 
     __tablename__ = "file_metadata"
 
     id = Column(Integer, primary_key=True)
 
-    # Link back to the source folder
     folder_id = Column(
         Integer,
         ForeignKey("folder_metadata.FolderID"),
@@ -46,7 +43,6 @@ class FileMetadata(Base):
         index=True,
     )
 
-    # Link to the unique content hash
     hash_id = Column(
         Integer,
         ForeignKey("file_hash_registry.id"),

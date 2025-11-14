@@ -14,7 +14,7 @@ from etude_core.orchestration.managers import JobManager
 logger = logging.getLogger(__name__)
 
 
-# This DTO is required by main.py and job_status_context_managers.py
+# DTO for a file that needs to be processed.
 class FileToProcess(NamedTuple):
     file_id: int
     hash_id: int
@@ -54,27 +54,24 @@ class MetadataScanHandler:
 
     def _upsert_metadata(self, files: List[Dict[str, Any]]):
         """
-        Orchestrates the DB updates using a clean 3-step process.
+        Orchestrates DB metadata updates via a 3-step process:
+        1. Resolve: Ensure all file hashes exist in the registry.
+        2. Diff: Detect new or changed files.
+        3. Execute: Commit inserts and updates to the database.
         """
         with self.eng.begin() as conn:
-            # Step 1: Resolution
-            # Ensure all hashes exist and get their IDs (Safe against race conditions)
             unique_md5s = list({f["md5"] for f in files})
             hash_map = self._ensure_hashes_exist(conn, unique_md5s)
 
-            # Step 2: Diffing
-            # Calculate what is new and what has changed
             to_insert, to_update = self._detect_changes(conn, files, hash_map)
 
-            # Step 3: Execution
-            # Perform the bulk writes
             self._commit_changes(conn, to_insert, to_update)
 
-    # --- HELPER 1: The "Safe" Hash Resolver ---
     def _ensure_hashes_exist(self, conn, unique_md5s: List[str]) -> Dict[str, int]:
         """
-        Guarantees all MD5s exist in the registry and returns {md5: id}.
-        Handles the 'Bulk-then-Iterative' fallback for race conditions.
+        Ensures all MD5 hashes exist in the `file_hash_registry` table
+        and returns a map of `{md5: id}`. Uses a bulk-then-iterative
+        insert pattern to handle potential race conditions safely.
         """
         # A. Filter out hashes we already have
         existing_rows = conn.execute(
@@ -87,12 +84,12 @@ class MetadataScanHandler:
         # B. Insert missing hashes (Optimistic Bulk -> Pessimistic Loop)
         if missing_hashes:
             try:
-                # Fast Path: Bulk Insert
+                # Fast path: bulk insert all missing hashes.
                 conn.execute(
                     insert(FileHashRegistry), [{"md5": h} for h in missing_hashes]
                 )
             except IntegrityError:
-                # Slow Path: Fallback to ensure non-colliding items get in
+                # Slow path: fallback to iterative inserts on collision.
                 logger.warning(
                     "Hash collision in batch. Switching to iterative insert."
                 )
@@ -100,9 +97,9 @@ class MetadataScanHandler:
                     try:
                         conn.execute(insert(FileHashRegistry).values(md5=h))
                     except IntegrityError:
-                        pass  # Harmless: It exists now.
+                        pass  # Another process inserted it; this is safe.
 
-        # C. Re-fetch ALL IDs (Now guaranteed to exist)
+        # C. Fetch all IDs, which are now guaranteed to exist.
         id_rows = conn.execute(
             select(FileHashRegistry.id, FileHashRegistry.md5).where(
                 FileHashRegistry.md5.in_(unique_md5s)
@@ -116,11 +113,9 @@ class MetadataScanHandler:
 
         return {row.md5: row.id for row in id_rows}
 
-    # --- HELPER 2: The Logic/Diffing Engine ---
     def _detect_changes(self, conn, files, hash_map) -> Tuple[List, List]:
         """
-        Compares scanned files against DB state.
-        Returns (rows_to_insert, rows_to_update).
+        Compares scanned files against DB state to find new or modified files.
         """
         # Fetch current state for this folder
         current_state = conn.execute(
@@ -148,7 +143,7 @@ class MetadataScanHandler:
             if path in existing_map:
                 db_id, db_hid = existing_map[path]
 
-                # SAFETY CHECK: The DB says the file is Hash A, but disk says Hash B.
+                # If file content has changed, update the hash_id.
                 if db_hid != new_hid:
                     logger.warning(
                         f"🚨 DATA MUTATION DETECTED 🚨\n"
@@ -182,9 +177,8 @@ class MetadataScanHandler:
 
         return to_insert, to_update
 
-    # --- HELPER 3: The Dumb Writer ---
     def _commit_changes(self, conn, to_insert, to_update):
-        """Just runs the SQL."""
+        """Executes bulk insert and update statements."""
         if to_insert:
             conn.execute(insert(FileMetadata), to_insert)
 
@@ -200,11 +194,9 @@ class MetadataScanHandler:
             )
             conn.execute(stmt, to_update)
 
-    # --- HELPER 4: Fetch Results ---
     def _fetch_existing_files(self) -> List[FileToProcess]:
         """
-        Query the DB to rebuild the list of files to process.
-        This acts as the 'return' for the entire pipeline step.
+        Queries the DB to get the list of all files associated with the folder.
         """
         with self.eng.connect() as conn:
             query = select(

@@ -4,13 +4,11 @@ from sqlalchemy.sql.sqltypes import DateTime
 from etude_core.db.base_session import Base
 
 
-# Helper for the DATETIME2 variant consistent with the user's example
+# DATETIME2 variant for MSSQL compatibility.
 DATETIME2_MS = DateTime().with_variant(DATETIME2(3), "mssql")
 
 
 class Rpcs(Base):
-    """Corresponds to RPCS: record_type in E2D_RPCS table."""
-
     __tablename__ = "mcdata_rpcs"
 
     hash_id = Column(Integer, ForeignKey("file_hash_registry.id"), primary_key=True)
@@ -26,8 +24,6 @@ class Rpcs(Base):
 
 
 class RpcsPres(Base):
-    """Corresponds to RPCS_PRES: record_type in E2D_RPCS_PRES table."""
-
     __tablename__ = "mcdata_rpcs_pres"
 
     hash_id = Column(Integer, ForeignKey("file_hash_registry.id"), primary_key=True)
@@ -35,7 +31,7 @@ class RpcsPres(Base):
     system_time_stamp = Column("System TimeStamp", DATETIME2_MS)
     dataset_time_stamp = Column("Dataset TimeStamp", DATETIME2_MS)
 
-    # Use a dictionary comprehension to generate the repeated columns cleanly
+    # Generate repeated pressure columns programmatically.
     _primary_high_pressure_cols = {
         f"primary_high_pressure_{i}": Column(f"Primary high pressure ({i})", Float)
         for i in range(1, 11)
@@ -49,15 +45,13 @@ class RpcsPres(Base):
         for i in range(1, 11)
     }
 
-    # Assign generated columns to the class
+    # Add generated columns to the class namespace.
     locals().update(_primary_high_pressure_cols)
     locals().update(_secondary_high_pressure_cols)
     locals().update(_manifold_pressure_cols)
 
 
 class NavData(Base):
-    """Corresponds to NAV_DATA: record_type in E2D_NAV_DATA table."""
-
     __tablename__ = "mcdata_nav_data"
 
     hash_id = Column(Integer, ForeignKey("file_hash_registry.id"), primary_key=True)
@@ -98,8 +92,6 @@ class NavData(Base):
 
 
 class RadarState(Base):
-    """Corresponds to RDR_STATE: record_type in E2D_RADAR_STATE table."""
-
     __tablename__ = "mcdata_radar_state"
 
     hash_id = Column(Integer, ForeignKey("file_hash_registry.id"), primary_key=True)
@@ -119,8 +111,6 @@ class RadarState(Base):
 
 
 class RotoScan(Base):
-    """Corresponds to ROTOSCAN: record_type in E2D_ROTOSCAN table."""
-
     __tablename__ = "mcdata_rotoscan"
 
     hash_id = Column(Integer, ForeignKey("file_hash_registry.id"), primary_key=True)
@@ -133,8 +123,6 @@ class RotoScan(Base):
 
 
 class GfcDb(Base):
-    """Corresponds to GFC_DB: record_type in E2D_GFC_DB table."""
-
     __tablename__ = "mcdata_gfc_db"
 
     hash_id = Column(Integer, ForeignKey("file_hash_registry.id"), primary_key=True)
@@ -152,8 +140,6 @@ class GfcDb(Base):
 
 
 class PfcDb(Base):
-    """Corresponds to PFC_DB: record_type in PFC_DB table."""
-
     __tablename__ = "mcdata_pfc_db"
 
     hash_id = Column(Integer, ForeignKey("file_hash_registry.id"), primary_key=True)
@@ -166,8 +152,6 @@ class PfcDb(Base):
 
 
 class RfcDb(Base):
-    """Corresponds to RFC_DB: record_type in E2D_RFC_DB table."""
-
     __tablename__ = "mcdata_rfc_db"
 
     hash_id = Column(Integer, ForeignKey("file_hash_registry.id"), primary_key=True)
@@ -189,8 +173,6 @@ class RfcDb(Base):
 
 
 class LcsTemp(Base):
-    """Corresponds to LCS_TEMP: record_type in E2D_LCS_TEMP table."""
-
     __tablename__ = "mcdata_lcs_temp"
 
     hash_id = Column(Integer, ForeignKey("file_hash_registry.id"), primary_key=True)
@@ -202,8 +184,6 @@ class LcsTemp(Base):
 
 
 class McInDiscr(Base):
-    """Corresponds to MC_IN_DISCR: record_type in E2D_MC_IN_DISCR table."""
-
     __tablename__ = "mcdata_mc_in_discr"
 
     hash_id = Column(Integer, ForeignKey("file_hash_registry.id"), primary_key=True)

@@ -3,7 +3,6 @@ import logging
 from typing import Dict, Type
 from datetime import datetime
 
-# Assuming Base is in base_session
 from etude_core.db.base_session import Base
 
 logger = logging.getLogger(__name__)
@@ -12,11 +11,10 @@ logger = logging.getLogger(__name__)
 def get_model_dtypes(model: Type[Base]) -> Dict[str, Type]:
     """
     Inspects an SQLAlchemy model and returns a map of
-    {column_name: python_type} for all non-primary-key columns.
+    `{column_name: python_type}` for all non-primary-key columns.
     """
     col_dtype = {}
     for col in model.__table__.columns:
-        # Skip primary keys (like hash_id, line_number) which are set by the handler
         if not col.primary_key:
             col_dtype[col.name] = col.type.python_type
     return col_dtype
@@ -25,12 +23,11 @@ def get_model_dtypes(model: Type[Base]) -> Dict[str, Type]:
 def clean_dataframe_from_model(df: pd.DataFrame, model: Type[Base]) -> pd.DataFrame:
     """
     Cleans a raw DataFrame using fast, vectorized pandas functions,
-    based on the datatypes defined in the SQLAlchemy model.
+    casting columns to the types defined in the SQLAlchemy model.
     """
     dtypes = get_model_dtypes(model)
 
-    # Create a copy to avoid SettingWithCopyWarning
-    df = df.copy()
+    df = df.copy()  # Avoid SettingWithCopyWarning
 
     for col_name, py_type in dtypes.items():
         if col_name not in df.columns:
@@ -40,22 +37,20 @@ def clean_dataframe_from_model(df: pd.DataFrame, model: Type[Base]) -> pd.DataFr
             continue
 
         try:
-            # Handle all numeric types (int, float, complex)
+            # Numeric types
             if py_type in (int, float, complex):
-                # errors='coerce' turns bad values (like "abc") into NaN
                 s = pd.to_numeric(df[col_name], errors="coerce")
 
-                # If the target is int, use pandas' nullable Int64 type.
-                # --- LINT FIX: Use 'is' for type comparison ---
+                # Use pandas' nullable Int64 for integer columns.
                 if py_type is int:
                     s = s.astype("Int64")
 
                 df[col_name] = s
 
-            # Handle datetime
+            # Datetime types
             elif py_type is datetime:
-                # --- FIX: Add explicit format to stop warnings ---
-                # Format from 169083_20250113_141336_825_MCData sample file
+                # Use explicit format to improve parsing speed and avoid warnings.
+                # This format is common in the MCData files.
                 datetime_format = "%m/%d/%Y %H:%M:%S"
 
                 df[col_name] = pd.to_datetime(
@@ -63,9 +58,8 @@ def clean_dataframe_from_model(df: pd.DataFrame, model: Type[Base]) -> pd.DataFr
                 )
 
             # Handle boolean
-            # --- LINT FIX: Use 'is' for type comparison ---
             elif py_type is bool:
-                # Use a map for robust boolean casting
+                # Map common string representations to boolean values.
                 bool_map = {
                     "true": True,
                     "1": True,
@@ -75,7 +69,7 @@ def clean_dataframe_from_model(df: pd.DataFrame, model: Type[Base]) -> pd.DataFr
                     "f": False,
                 }
 
-                # Coerce to string, lowercase, map, and use nullable BooleanDtype
+                # Coerce to string, lowercase, map, and use nullable BooleanDtype.
                 df[col_name] = (
                     df[col_name]
                     .astype(str)
@@ -84,15 +78,14 @@ def clean_dataframe_from_model(df: pd.DataFrame, model: Type[Base]) -> pd.DataFr
                     .astype("boolean")  # Use pandas' nullable boolean type
                 )
 
-            # Handle string
-            # --- LINT FIX: Use 'is' for type comparison ---
+            # String types
             elif py_type is str:
-                # Replace common string placeholders for nulls
+                # Replace common null placeholders and clean whitespace.
                 df[col_name] = (
                     df[col_name]
                     .replace(["None", "nan", ""], pd.NA)
-                    .astype(str)  # Ensure it's string
-                    .str.strip()  # Clean whitespace
+                    .astype(str)
+                    .str.strip()
                 )
                 # Handle edge case where 'astype' creates literal "None" or "nan"
                 df[col_name] = df[col_name].replace(["None", "nan"], pd.NA)

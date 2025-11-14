@@ -4,7 +4,7 @@ from typing import Protocol, runtime_checkable
 @runtime_checkable
 class PipelineJob(Protocol):
     """
-    Contract for any class that can be tracked by the job_scope context manager.
+    Protocol for any class that can be tracked by the job_scope context manager.
     It must identify itself with a PIPELINE_ID.
     """
 

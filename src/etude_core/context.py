@@ -7,12 +7,12 @@ import platform
 @dataclass(frozen=True)
 class EtlContext:
     user_name: str
-    git_hash: str
-    host_name: str  # Optional extra context
+    git_hash: str  # Current git commit hash
+    host_name: str  # Hostname of the machine running the ETL
 
     @classmethod
     def capture(cls):
-        """Factory to capture current system state."""
+        """Factory method to capture the current system state."""
         try:
             gh = (
                 subprocess.check_output(["git", "rev-parse", "HEAD"])

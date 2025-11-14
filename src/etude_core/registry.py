@@ -1,6 +1,5 @@
 from typing import Dict
 
-# --- REFACTOR: No DatasetKey enums needed ---
 from etude_core.pipelines.base import FileHandler
 from etude_core.db.models import (
     NavData,
@@ -16,24 +15,22 @@ from etude_core.db.models import (
 )
 from etude_core.services.zip_io import FileType
 
-# --- Parsers ---
 from etude_core.pipelines.parsers.tmptr import parse_tmptr_dataframe
 from etude_core.pipelines.parsers.mc_data import parse_mcdata
 
-# --- Registry ---
 
+# Maps a file type string to its corresponding FileHandler instance.
 HANDLER_REGISTRY: Dict[str, FileHandler] = {
-    # --- CASE 1: The "Simple" Parser ---
+    # A "simple" handler for a file type that maps to a single table.
     FileType.TMPTR_LOG.value: FileHandler(
         pipeline_id="tmptr_log",
         parser_func=parse_tmptr_dataframe,
         table_config=[TmptrData],
     ),
-    # --- CASE 2: The "Complex" Parser ---
+    # A "complex" handler for a file type that maps to multiple tables.
     FileType.MCDATA.value: FileHandler(
         pipeline_id="mcdata",
         parser_func=parse_mcdata,
-        # --- REFACTOR: Just provide a list of expected models ---
         table_config=[
             NavData,
             Rpcs,

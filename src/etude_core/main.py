@@ -6,14 +6,11 @@ from enum import Enum, auto
 from dataclasses import dataclass, field
 from typing import List, Tuple, Optional, Dict
 
-# --- Core ETL Imports ---
 from etude_core.orchestration.scopes import session_scope, job_scope
 from etude_core.services.zip_io import UnzipContext
 from etude_core.registry import HANDLER_REGISTRY
 from etude_core.context import EtlContext
 from etude_core.pipelines.scanner import MetadataScanHandler, FileToProcess
-
-# --- NEW IMPORTS ---
 from etude_core.pipelines.contexts import ScanJobContext, FileJobContext
 
 # --- Database & Utils ---
@@ -27,7 +24,6 @@ from etude_core.db.models import (
     FileMetadata,
 )
 
-# ... (logging, FolderState, WorkDelta, get_folder_work_delta are all correct) ...
 logging.basicConfig(
     level=logging.INFO, format="%(asctime)s - %(name)s - %(levelname)s - %(message)s"
 )
@@ -98,7 +94,6 @@ def process_zip(
     extract_to_dir: Path = None,
 ):
     # ... (Outer try/session/delta/unzip logic is correct) ...
-    logger.info(f"--- Starting processing for FolderID {folder_id} ---")
 
     try:
         with session_scope(
@@ -123,7 +118,7 @@ def process_zip(
                     f"[Session: {session_manager.session_id}] Files extracted to {extract_dir_path}"
                 )
 
-                # 3. Metadata Scan (This logic is correct)
+                # Metadata Scan
                 files_to_process: List[FileToProcess] = []
                 try:
                     scanner = MetadataScanHandler(
@@ -148,25 +143,16 @@ def process_zip(
                     )
                     return
 
-                # --- 4. FIX: File Dispatch Loop ---
-
-                # This map is all we need
+                # File Dispatch Loop
                 file_map: Dict[int, FileToProcess] = {
                     f.hash_id: f for f in files_to_process
                 }
-
-                # --- This block is the error. It's based on old Enum logic ---
-                # type_to_key_map: Dict[str, Dict[str, DatasetKey]] = {}
-                # for file_type, handler in HANDLER_REGISTRY.items():
-                #    type_to_key_map[file_type] = {
-                #        member.name: member for member in handler.DATASET_ENUM
-                #    }
-                # --- END OF BLOCK TO REMOVE ---
 
                 work_items_to_process: List[Tuple[int, str]] = []
 
                 if missing_items_lookup is None:
                     logger.info("New folder: processing all datasets for all files.")
+                    # For a new folder, create a work item for every dataset in every file.
                     for file in files_to_process:
                         handler = HANDLER_REGISTRY.get(file.file_type)
                         if handler:
@@ -185,7 +171,7 @@ def process_zip(
                     f"[Session: {session_manager.session_id}] Dispatching {len(work_items_to_process)} dataset jobs."
                 )
 
-                # --- The variable key_str is now table_name ---
+                # Process each work item (a single dataset from a single file).
                 for hash_id, table_name in tqdm(
                     work_items_to_process, desc=f"Folder {folder_id} Jobs"
                 ):
@@ -203,20 +189,12 @@ def process_zip(
                         )
                         continue
 
-                    # --- This logic is no longer needed ---
-                    # key_map = type_to_key_map.get(file.file_type, {})
-                    # key_enum = key_map.get(key_str)
-                    # if not key_enum:
-                    #    logger.warning(
-                    #        f"Skipping job for unknown key '{key_str}' in {handler.PIPELINE_ID}"
-                    #    )
-                    #    continue
-
-                    # B. Execute Job (one per dataset)
+                    # Execute Job (one per dataset)
                     try:
-                        # --- FIX: Pass the table_name (key_str) directly ---
+                        # Create a context object for this specific file/table job.
                         file_context = FileJobContext(handler, file, table_name)
 
+                        # The job_scope handles status tracking and skipping.
                         with job_scope(session_manager, context=file_context) as (
                             job_updater,
                             should_skip,
@@ -224,7 +202,6 @@ def process_zip(
                             if should_skip:
                                 continue
 
-                            # --- FIX: Pass the table_name (key_str) to run ---
                             handler.run(
                                 eng=eng,
                                 hash_id=file.hash_id,
@@ -243,12 +220,9 @@ def process_zip(
         logger.error(
             f"ETL process failed critically for FolderID {folder_id}: {e}",
             exc_info=True,
-        )
-    finally:
-        logger.info(f"--- Finished processing for FolderID {folder_id} ---")
+        )  # The session_scope will handle finalization.
 
 
-# --- Entry Point ---
 # (No changes to __main__)
 if __name__ == "__main__":
     logger.info(f"Connecting to database type: {settings.database.type}")

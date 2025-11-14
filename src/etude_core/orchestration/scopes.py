@@ -1,13 +1,8 @@
 import logging
 from contextlib import contextmanager
 
-# Core orchestration components for job status tracking
 from etude_core.orchestration.managers import SessionManager
-
-# Import type hints
 from etude_core.db.models import StatusEnum
-
-# --- NEW IMPORT ---
 from etude_core.pipelines.contexts import JobContext
 
 
@@ -18,11 +13,8 @@ logger.setLevel("DEBUG")
 @contextmanager
 def session_scope(eng, folder_id: int, git_hash: str, user_name: str):
     """
-    Manages the creation and finalization of a ProcessingSession.
-
-    (No changes to this function)
+    Context manager that creates and finalizes a `ProcessingSession`.
     """
-    logger.info(f"--- Opening Session for FolderID {folder_id} ---")
     session_manager = None
     try:
         session_manager = SessionManager(
@@ -38,26 +30,19 @@ def session_scope(eng, folder_id: int, git_hash: str, user_name: str):
     finally:
         if session_manager:
             session_manager.finalize_session()
-            logger.info(
-                f"--- Session {session_manager.session_id} finalized for FolderID {folder_id} ---"
-            )
 
 
 @contextmanager
 def job_scope(
     session_manager: SessionManager,
-    context: JobContext,  # <-- FIX: Use the new context object
+    context: JobContext,
 ):
     """
-    Manages the lifecycle of a single ProcessingJob (per file or folder).
-
-    Handles idempotency by checking for previously completed jobs.
-    It creates a job record, yields a JobUpdater, and guarantees that the
-    job status is set to COMPLETED or ERROR upon exit.
+    Manages the lifecycle of a single `ProcessingJob`. It handles idempotency
+    by checking for previously completed jobs, creates a job record, yields a
+    `JobManager`, and guarantees status updates (COMPLETED or ERROR) on exit.
     """
-
-    # --- Unpack parameters from context ---
-    # The if/else logic is gone, replaced by polymorphic calls
+    # Unpack parameters from the polymorphic context object.
     pipeline_id = context.handler_instance.PIPELINE_ID
     job_name = context.job_name
     file_type = context.file_type
@@ -69,7 +54,7 @@ def job_scope(
     should_skip = False  # Ensure it's defined
 
     try:
-        # --- SKIP LOGIC (No changes here) ---
+        # Skip logic: check if a completed job for this content hash already exists.
         if hash_id is None:
             logger.debug(f"Job {job_name} has no hash_id, will run.")
             is_already_completed = False
@@ -88,7 +73,7 @@ def job_scope(
             yield None, True  # Yield (updater=None, should_skip=True)
             return  # Exit context manager early
 
-        # 'Setup' logic
+        # Setup: Get or create the job record for this session.
         job_updater = session_manager.get_or_create_job(
             job_name=job_name,
             file_type=file_type,
@@ -113,14 +98,14 @@ def job_scope(
         yield job_updater, False
 
     except Exception as e:
-        # 'Error' logic
+        # Error handling: mark the job as failed.
         logger.error(f"Failed to process {job_name}: {e}", exc_info=True)
         if job_updater:
             job_updater.mark_failed(error_message=f"Failed: {e}")
         # Re-raise exception to be handled by the outer session scope
         raise
     else:
-        # 'Success' logic (no exception occurred)
+        # Success: mark the job as completed if it wasn't skipped.
         if job_updater and not should_skip:
             rows = getattr(job_updater, "_rows_uploaded_in_scope", None)
 
@@ -129,6 +114,6 @@ def job_scope(
                 rows=rows,
             )
     finally:
-        # 'Teardown' logic
+        # Teardown: close the job's database session.
         if job_updater:
             job_updater.close_session()

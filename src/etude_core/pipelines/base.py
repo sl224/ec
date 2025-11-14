@@ -21,22 +21,18 @@ from etude_core.db.models import Base  # Import your Base
 
 logger = logging.getLogger(__name__)
 
-# --- 1. TYPES & PROTOCOLS ---
-
 
 @runtime_checkable
 class HashVerifiableModel(Protocol):
+    """Protocol for SQLAlchemy models that are keyed by `hash_id`."""
+
     __tablename__: str
     __table__: Any
     hash_id: Any
 
 
 ParserResult: TypeAlias = Dict[Type[Base], pd.DataFrame]
-
-# --- FIX: The payload no longer needs the redundant table_name string ---
 PayloadType: TypeAlias = List[Tuple[Type[HashVerifiableModel], pd.DataFrame]]
-
-# --- 2. THE REFACTORED HANDLER ---
 
 
 class FileHandler:
@@ -104,7 +100,6 @@ class FileHandler:
         Converts the parser's {Model: df} map into the internal payload,
         while filtering for the table names this job is responsible for.
         """
-        # --- FIX: Use new PayloadType ---
         payload: PayloadType = []
         if not model_map:
             return []
@@ -121,7 +116,6 @@ class FileHandler:
             if keys_to_process and table_name not in keys_to_process:
                 continue
 
-            # --- FIX: Append the simpler tuple ---
             payload.append((model, df))
 
         return payload
@@ -131,7 +125,6 @@ class FileHandler:
         row_count_sum = sum(len(item[1]) for item in payload)  # <-- Index 1 for df
         job_updater.mark_running(f"Uploading {row_count_sum} rows...")
         with eng.begin() as conn:
-            # --- FIX: Unpack the simpler tuple ---
             for model, df in payload:
                 if df.empty:
                     continue

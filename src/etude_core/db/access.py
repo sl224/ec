@@ -59,15 +59,10 @@ def bulk_upload(
 ):
     """
     Uploads a DataFrame to a database table in chunks.
-
-    FIXED: Replaces np.array_split with pure pandas slicing to avoid
-    NumPy 2.0 'swapaxes' warnings on object columns.
     """
     if df.empty:
         return
 
-    # 1. Pure Python Chunking (Avoids np.array_split on DataFrames)
-    # This prevents NumPy from trying to inspect complex DataFrame types
     total_rows = len(df)
 
     with tqdm(
@@ -77,14 +72,11 @@ def bulk_upload(
         leave=leave,
         disable=not show_progress,
     ) as pbar:
-        # Iterate using standard range (Memory efficient view slicing)
+        # Iterate using iloc slicing for memory-efficient chunking.
         for start_idx in range(0, total_rows, chunksize):
-            # Create the chunk via slicing
             df_chunk = df.iloc[start_idx : start_idx + chunksize]
 
-            # 2. Sanitize ONLY the chunk
-            # .replace is generally safer/cleaner than .where(..., None)
-            # This converts NaNs/pd.NA -> None (SQL NULL) just before upload
+            # Sanitize chunk just before upload, converting pandas/numpy nulls to SQL NULL.
             clean_chunk = df_chunk.replace({np.nan: None, pd.NA: None})
 
             conn.execute(
