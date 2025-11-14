@@ -7,7 +7,7 @@ from etude_core.db.base_session import Base, schema_fkey
 
 
 # DATETIME2 variant for MSSQL compatibility.
-DATETIME2_MS = DateTime().with_variant(DATETIME2(3), "mssql")
+DATETIME2_MS = DateTime().with_variant(DATETIME2(0), "mssql")
 
 
 class Rpcs(Base):
