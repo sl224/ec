@@ -8,17 +8,9 @@ from etude_core.context import EtlContext
 # Renamed import:
 from etude_core.orchestration.workflow import process_zip
 
-# --- Model & DB Imports ---
-# 1. Import all models (populates Base.metadata)
-# import etude_core.db.models
-
-# 2. Import DB setup helpers and config
 from etude_core.db import access as sql_io
 from etude_core.config import settings
-
-# New location for setup helpers:
 from etude_core.db.setup import initialize_database, get_or_create_folder
-
 
 # --- Setup ---
 logging.basicConfig(
