@@ -14,7 +14,7 @@ logger = logging.getLogger(__name__)
 
 
 class JobManager:
-    """Manages the status of a SINGLE file processing job."""
+    """State machine style status management of a *single* file processing job."""
 
     def __init__(self, eng, job_id: int):
         self.eng = eng

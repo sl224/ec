@@ -21,17 +21,12 @@ dependencies = [
     "tqdm>=4.67.1",
 ]
 
-[project.optional-dependencies]
-# Standard PEP 621 format for dependency groups
-dev = [
-    "ipykernel>=7.1.0",
-    "pre-commit>=4.4.0",
-    "ruff>=0.14.4",
-]
-
 [dependency-groups]
 dev = [
     "pytest>=9.0.1",
+    "ipykernel>=7.1.0",
+    "pre-commit>=4.4.0",
+    "ruff>=0.14.4",
 ]
 
 [tool.ruff]

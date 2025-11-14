@@ -39,5 +39,5 @@ def test_zip_manager_file_not_found():
             pass  # This code should not be reached
 
 
-# if __name__ == "__main__":
-    # test_zip_manager_print_files()
+if __name__ == "__main__":
+    test_zip_manager_print_files()

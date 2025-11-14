@@ -2,7 +2,6 @@
 # Pydantic's discriminated union loader expects all keys
 # for the selected 'type' to be flat inside this section.
 [database]
-
 type = "sqlite3"
 db_location = "db.sqlite3"
 in_memory = false

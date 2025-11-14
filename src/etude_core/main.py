@@ -13,8 +13,7 @@ from etude_core.pipelines.scanner import MetadataScanHandler
 # --- Database & Utils ---
 from etude_core.db import access as sql_io
 from etude_core.config import settings
-from etude_core.db.base import Base
-from etude_core.db.models import FolderMetadata
+from etude_core.db.models import Base
 
 # --- Configuration ---
 # Configure logging to print to stdout
@@ -151,10 +150,6 @@ if __name__ == "__main__":
     # Captures Git Hash, User Name, and Hostname for auditing
     ctx = EtlContext.capture()
     logger.info(f"Execution Context: {ctx}")
-
-    # 4. Get Work List (Folders to Process)
-    # Using the declarative FolderMetadata model
-    query = sa.select(FolderMetadata.id, FolderMetadata.path)
 
     STATIC_ASSETS_ROOT = Path("tests/static_assets")
     test_zip = (

@@ -44,7 +44,7 @@ class LoggingConfig(BaseModel):
 
 class SQLiteConfig(BaseSettings):
     type: Literal["sqlite3"] = "sqlite3"
-    db_location: str = "db.sqlite3"
+    db_location: str = "etude_core.sqlite3"
     in_memory: bool = False
 
 
