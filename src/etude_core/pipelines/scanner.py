@@ -107,9 +107,9 @@ class MetadataScanHandler:
         ).fetchall()
 
         # After all inserts, the number of hashes in the DB must match our list
-        assert len(id_rows) == len(unique_md5s), (
-            "Hash resolution failed: count mismatch."
-        )
+        assert len(id_rows) == len(
+            unique_md5s
+        ), "Hash resolution failed: count mismatch."
 
         return {row.md5: row.id for row in id_rows}
 

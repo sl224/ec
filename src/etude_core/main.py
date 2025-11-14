@@ -48,7 +48,7 @@ if __name__ == "__main__":
         STATIC_ASSETS_ROOT / "zips/169069_20250203_004745_025_TransportRSM.fpkg.e2d.zip"
     )
     # Use a list of (folder_id, path_to_zip) tuples for deterministic ordering
-    id_paths = [(i, test_zip) for i in range(11)][-1:]
+    id_paths = [(i, test_zip) for i in range(11)]
     logger.info(f"Found {len(id_paths)} folders to process.")
 
     # 4. Main Processing Loop

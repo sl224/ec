@@ -12,7 +12,6 @@ from etude_core.context import EtlContext
 from etude_core.pipelines.scanner import MetadataScanHandler, FileToProcess
 from etude_core.pipelines.contexts import ScanJobContext, FileJobContext
 from etude_core.orchestration.state import get_folder_work_delta, FolderState
-from etude_core.db.models import FileMetadata  # Used for type hint
 
 logger = logging.getLogger(__name__)
 
