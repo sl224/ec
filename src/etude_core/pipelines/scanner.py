@@ -69,7 +69,7 @@ class MetadataScanHandler:
 
     def _ensure_hashes_exist(self, conn, unique_md5s: List[str]) -> Dict[str, int]:
         """
-        Ensures all MD5 hashes exist in the `file_hash_registry` table
+        Ensures all MD5 hashes exist in the `metadata_hash_registry` table
         and returns a map of `{md5: id}`. Uses a bulk-then-iterative
         insert pattern to handle potential race conditions safely.
         """

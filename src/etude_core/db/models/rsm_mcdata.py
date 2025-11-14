@@ -1,7 +1,8 @@
 from sqlalchemy import Column, Integer, Float, Boolean, String, ForeignKey
 from sqlalchemy.dialects.mssql import DATETIME2
 from sqlalchemy.sql.sqltypes import DateTime
-from etude_core.db.base_session import Base
+# Import Base AND the new schema_fkey helper
+from etude_core.db.base_session import Base, schema_fkey
 
 
 # DATETIME2 variant for MSSQL compatibility.
@@ -9,9 +10,10 @@ DATETIME2_MS = DateTime().with_variant(DATETIME2(3), "mssql")
 
 
 class Rpcs(Base):
-    __tablename__ = "mcdata_rpcs"
+    __tablename__ = "rsmdata_mc_rpcs"
 
-    hash_id = Column(Integer, ForeignKey("file_hash_registry.id"), primary_key=True)
+    # Use the helper here
+    hash_id = Column(Integer, ForeignKey(schema_fkey("metadata_hash_registry.id")), primary_key=True)
     line_number = Column("LineNumber", Integer, primary_key=True)
     system_time_stamp = Column("System TimeStamp", DATETIME2_MS)
     humidity_b = Column("Humidity B", Float)
@@ -24,9 +26,10 @@ class Rpcs(Base):
 
 
 class RpcsPres(Base):
-    __tablename__ = "mcdata_rpcs_pres"
+    __tablename__ = "rsmdata_mc_rpcs_pres"
 
-    hash_id = Column(Integer, ForeignKey("file_hash_registry.id"), primary_key=True)
+    # Use the helper here
+    hash_id = Column(Integer, ForeignKey(schema_fkey("metadata_hash_registry.id")), primary_key=True)
     line_number = Column("LineNumber", Integer, primary_key=True)
     system_time_stamp = Column("System TimeStamp", DATETIME2_MS)
     dataset_time_stamp = Column("Dataset TimeStamp", DATETIME2_MS)
@@ -52,9 +55,10 @@ class RpcsPres(Base):
 
 
 class NavData(Base):
-    __tablename__ = "mcdata_nav_data"
+    __tablename__ = "rsmdata_mc_nav_data"
 
-    hash_id = Column(Integer, ForeignKey("file_hash_registry.id"), primary_key=True)
+    # Use the helper here
+    hash_id = Column(Integer, ForeignKey(schema_fkey("metadata_hash_registry.id")), primary_key=True)
     line_number = Column("LineNumber", Integer, primary_key=True)
     system_time_stamp = Column("System TimeStamp", DATETIME2_MS)
     nav_mode = Column("Nav Mode", String(50))
@@ -92,9 +96,10 @@ class NavData(Base):
 
 
 class RadarState(Base):
-    __tablename__ = "mcdata_radar_state"
+    __tablename__ = "rsmdata_mc_radar_state"
 
-    hash_id = Column(Integer, ForeignKey("file_hash_registry.id"), primary_key=True)
+    # Use the helper here
+    hash_id = Column(Integer, ForeignKey(schema_fkey("metadata_hash_registry.id")), primary_key=True)
     line_number = Column("LineNumber", Integer, primary_key=True)
     system_time_stamp = Column("System TimeStamp", DATETIME2_MS)
     rscp_off_switch_state = Column("RSCP_OFF_Switch_State", String)
@@ -111,21 +116,24 @@ class RadarState(Base):
 
 
 class RotoScan(Base):
-    __tablename__ = "mcdata_rotoscan"
+    __tablename__ = "rsmdata_mc_rotoscan"
 
-    hash_id = Column(Integer, ForeignKey("file_hash_registry.id"), primary_key=True)
+    # Use the helper here
+    hash_id = Column(Integer, ForeignKey(schema_fkey("metadata_hash_registry.id")), primary_key=True)
     line_number = Column("LineNumber", Integer, primary_key=True)
     system_time_stamp = Column("System TimeStamp", DATETIME2_MS)
     scan_mode = Column("ScanMode", String)
     scan_rpm = Column("ScanRPM", Float)
     rpm_command = Column("RPM_Command", String)
+
     scan_time = Column("ScanTime", Float)
 
 
 class GfcDb(Base):
-    __tablename__ = "mcdata_gfc_db"
+    __tablename__ = "rsmdata_mc_gfc_db"
 
-    hash_id = Column(Integer, ForeignKey("file_hash_registry.id"), primary_key=True)
+    # Use the helper here
+    hash_id = Column(Integer, ForeignKey(schema_fkey("metadata_hash_registry.id")), primary_key=True)
     line_number = Column("LineNumber", Integer, primary_key=True)
     system_time_stamp = Column("System TimeStamp", DATETIME2_MS)
     time_stamp = Column("Time Stamp", String)
@@ -140,9 +148,10 @@ class GfcDb(Base):
 
 
 class PfcDb(Base):
-    __tablename__ = "mcdata_pfc_db"
+    __tablename__ = "rsmdata_mc_pfc_db"
 
-    hash_id = Column(Integer, ForeignKey("file_hash_registry.id"), primary_key=True)
+    # Use the helper here
+    hash_id = Column(Integer, ForeignKey(schema_fkey("metadata_hash_registry.id")), primary_key=True)
     line_number = Column("LineNumber", Integer, primary_key=True)
     system_time_stamp = Column("System TimeStamp", DATETIME2_MS)
     processed_fault_code = Column("Processed Fault Code", Integer)
@@ -152,9 +161,10 @@ class PfcDb(Base):
 
 
 class RfcDb(Base):
-    __tablename__ = "mcdata_rfc_db"
+    __tablename__ = "rsmdata_mc_rfc_db"
 
-    hash_id = Column(Integer, ForeignKey("file_hash_registry.id"), primary_key=True)
+    # Use the helper here
+    hash_id = Column(Integer, ForeignKey(schema_fkey("metadata_hash_registry.id")), primary_key=True)
     line_number = Column("LineNumber", Integer, primary_key=True)
     system_time_stamp = Column("System TimeStamp", DATETIME2_MS)
     fci_indicator = Column("FCI Indicator", String)
@@ -173,9 +183,10 @@ class RfcDb(Base):
 
 
 class LcsTemp(Base):
-    __tablename__ = "mcdata_lcs_temp"
+    __tablename__ = "rsmdata_mc_lcs_temp"
 
-    hash_id = Column(Integer, ForeignKey("file_hash_registry.id"), primary_key=True)
+    # Use the helper here
+    hash_id = Column(Integer, ForeignKey(schema_fkey("metadata_hash_registry.id")), primary_key=True)
     line_number = Column("LineNumber", Integer, primary_key=True)
     system_time_stamp = Column("System TimeStamp", DATETIME2_MS)
     lcs_temp_f = Column("LCS Temp F", String)
@@ -184,9 +195,10 @@ class LcsTemp(Base):
 
 
 class McInDiscr(Base):
-    __tablename__ = "mcdata_mc_in_discr"
+    __tablename__ = "rsmdata_mc_mc_in_discr"
 
-    hash_id = Column(Integer, ForeignKey("file_hash_registry.id"), primary_key=True)
+    # Use the helper here
+    hash_id = Column(Integer, ForeignKey(schema_fkey("metadata_hash_registry.id")), primary_key=True)
     line_number = Column("LineNumber", Integer, primary_key=True)
     system_time_stamp = Column("System TimeStamp", DATETIME2_MS)
     power_on = Column("Power On", Boolean)

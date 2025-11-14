@@ -1,7 +1,8 @@
 from enum import Enum as PyEnum
 from sqlalchemy import Column, Integer, String, ForeignKey, DateTime, Enum, func, Index
 from sqlalchemy.orm import relationship
-from etude_core.db.base_session import Base
+# Import Base AND the new schema_fkey helper
+from etude_core.db.base_session import Base, schema_fkey, DEFAULT_SCHEMA
 
 
 class StatusEnum(PyEnum):
@@ -34,8 +35,8 @@ class ProcessingJob(Base):
     """
 
     __tablename__ = "processing_jobs"
+    session_id = Column(Integer, ForeignKey(schema_fkey("processing_sessions.id")), nullable=False)
     id = Column(Integer, primary_key=True)
-    session_id = Column(Integer, ForeignKey("processing_sessions.id"), nullable=False)
 
     job_name = Column(String(500))  # e.g., "VersionsSummaryHandler: abc_Versions.xml"
     file_type = Column(String(50), index=True)
@@ -47,15 +48,17 @@ class ProcessingJob(Base):
     end_time = Column(DateTime, nullable=True)
     dataset_key = Column(String(50), nullable=True, index=True)
 
+    # Use the helper here
     file_id = Column(
         Integer,
-        ForeignKey("file_metadata.id"),
+        ForeignKey(schema_fkey("metadata_file.id")),
         nullable=True,
         index=True,
     )
+    # And here
     hash_id = Column(
         Integer,
-        ForeignKey("file_hash_registry.id"),
+        ForeignKey(schema_fkey("metadata_hash_registry.id")),
         nullable=True,
         index=True,
     )
@@ -75,4 +78,5 @@ class ProcessingJob(Base):
         ),
         # Index to check for completed hashes across *all* sessions
         Index("ix_hash_skip_lookup", "pipeline_id", "hash_id", "dataset_key", "status"),
+        {"schema": DEFAULT_SCHEMA}
     )

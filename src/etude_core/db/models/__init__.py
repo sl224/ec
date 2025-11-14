@@ -17,8 +17,6 @@ from .rsm_mcdata import (
     McInDiscr,
 )
 
-
-# Explicitly declare the public API of this package.
 __all__ = [
     "Base",
     "SessionLocal",

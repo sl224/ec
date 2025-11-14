@@ -16,7 +16,7 @@ from pydantic_settings import (
 
 # Define the absolute path to the config file.
 # This finds the directory where this file lives, then points to `global_config.toml`.
-BASE_DIR = Path(__file__).resolve().parent
+BASE_DIR = Path(__file__).resolve().parent.parent.parent
 TOML_PATH = BASE_DIR / "global_config.toml"
 
 # Add a debug check to warn if the config file is missing.

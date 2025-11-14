@@ -13,5 +13,19 @@ else:
     DEFAULT_SCHEMA = None
     Base = declarative_base()
 
+
+def schema_fkey(key: str) -> str:
+    """
+    Returns a schema-qualified foreign key string if a schema is defined,
+    otherwise returns the simple key.
+
+    - MSSQL: "etude_core.table.column"
+    - SQLite: "table.column"
+    """
+    if DEFAULT_SCHEMA:
+        return f"{DEFAULT_SCHEMA}.{key}"
+    return key
+
+
 # A factory for creating new Session objects.
 SessionLocal = sessionmaker(autocommit=False, autoflush=False)
