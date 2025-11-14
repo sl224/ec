@@ -62,7 +62,7 @@ def process_zip(
                         job_updater,
                         should_skip,
                     ):
-                        # scanner.run() returns the list of FileToProcess DTOs
+                        # scanner.run() -> list[FileToProcess]
                         files_to_process = scanner.run(job_updater, should_skip)
                 except Exception as e:
                     logger.error(
@@ -91,13 +91,11 @@ def process_zip(
                     for file in files_to_process:
                         handler = HANDLER_REGISTRY.get(file.file_type)
                         if handler:
-                            # Enumerate required models via handler.expected_models.
-                            # Aligns with state.py expectations.
+                            # Enumerate models from `handler.expected_models` to derive dataset keys (aligns with state.py).
                             for model in handler.expected_models:
                                 work_items_to_process.append(
                                     (file.hash_id, model.__tablename__)
                                 )
-                            # --- END FIX ---
                 else:
                     # Partial folder: only process the missing items
                     work_items_to_process = missing_items_lookup
@@ -110,7 +108,7 @@ def process_zip(
                 )
 
                 # 5. Process work items
-                # `dataset_key` is the job tracking key (replaces legacy 'table_name').
+                # `dataset_key`: job-tracking key (replaces legacy 'table_name').
                 for hash_id, dataset_key in tqdm(
                     work_items_to_process, desc=f"Folder {folder_id} Jobs"
                 ):
@@ -129,7 +127,7 @@ def process_zip(
                         continue
 
                     try:
-                        # The context object now uses the string-based dataset_key
+                        # Context uses string `dataset_key` for job identification.
                         file_context = FileJobContext(handler, file, dataset_key)
                         with job_scope(session_manager, context=file_context) as (
                             job_updater,
@@ -138,13 +136,15 @@ def process_zip(
                             if should_skip:
                                 continue
 
-                            # Tell the handler to *only* run this specific key
+                            # Restrict handler execution to the specified `dataset_key`.
                             handler.run(
                                 eng=eng,
                                 hash_id=file.hash_id,
                                 file_path=file.full_path,
                                 job_updater=job_updater,
-                                keys_to_process=[dataset_key],  # Pass the specific key
+                                keys_to_process=[
+                                    dataset_key
+                                ],  # Pass the specific dataset_key
                             )
 
                     except Exception as e:
