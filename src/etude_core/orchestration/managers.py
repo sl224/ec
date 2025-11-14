@@ -181,7 +181,10 @@ class SessionManager:
             raise
 
     def check_for_completed_job(
-        self, pipeline_id: str, hash_id: int, dataset_key: str  # <-- FIX: Add
+        self,
+        pipeline_id: str,
+        hash_id: int,
+        dataset_key: str,  # <-- FIX: Add
     ) -> bool:
         """
         Checks if a COMPLETED job exists for this pipeline/hash/key combo

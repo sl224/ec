@@ -1,7 +1,7 @@
 from enum import Enum as PyEnum
 from sqlalchemy import Column, Integer, String, ForeignKey, DateTime, Enum, func, Index
 from sqlalchemy.orm import relationship
-from etude_core.db.models import Base, DEFAULT_SCHEMA
+from etude_core.db.models import Base
 
 
 # --- Enums ---
@@ -41,9 +41,7 @@ class ProcessingJob(Base):
 
     __tablename__ = "processing_jobs"
     id = Column(Integer, primary_key=True)
-    session_id = Column(
-        Integer, ForeignKey("processing_sessions.id"), nullable=False
-    )
+    session_id = Column(Integer, ForeignKey("processing_sessions.id"), nullable=False)
 
     job_name = Column(String(500))  # e.g., "VersionsSummaryHandler: abc_Versions.xml"
     file_type = Column(String(50), index=True)  # Keep this for context

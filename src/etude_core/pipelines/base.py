@@ -45,7 +45,9 @@ class StandardDataset(DatasetKey):
 
 
 # --- FIX: The PayloadType alias was incorrect. It must include the key. ---
-PayloadType: TypeAlias = List[Tuple[DatasetKey, Type[HashVerifiableModel], pd.DataFrame]]
+PayloadType: TypeAlias = List[
+    Tuple[DatasetKey, Type[HashVerifiableModel], pd.DataFrame]
+]
 
 # Parser returns either a specific Dict of Datasets, or a single DataFrame
 ParserResult: TypeAlias = Union[Dict[DatasetKey, pd.DataFrame], pd.DataFrame]
@@ -134,9 +136,7 @@ class FileHandler:
         # Filter the payload to *only* the keys this job is responsible for.
         if keys_to_process:
             payload = [
-                (key, model, df)
-                for key, model, df in payload
-                if key in keys_to_process
+                (key, model, df) for key, model, df in payload if key in keys_to_process
             ]
         # --- END FIX ---
 

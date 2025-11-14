@@ -1,6 +1,6 @@
 from sqlalchemy import Column, Integer, String, ForeignKey
 from sqlalchemy.orm import relationship
-from etude_core.db.models import Base, DEFAULT_SCHEMA
+from etude_core.db.models import Base
 
 
 # --- 1. The Source (Folders) ---

@@ -99,9 +99,8 @@ class E2D_DataPipeline:
         top=None,
         src_server_name=sql_io.AI_DEV_SERVER,
         dest_server_name=sql_io.AI_DEV_SERVER,
-        db_name=sql_io.AI_PROD_DB
+        db_name=sql_io.AI_PROD_DB,
     ):
-
         self.scrape_func = scrape_func
         self.record_type = sa_config.record_type
         self.table_name = sa_config.Table.name
@@ -208,7 +207,7 @@ class E2D_DataPipeline:
             print(f"Trying to read {self.table_name} from feather")
             try:
                 df = read_feather(file_name)
-                df.drop('index', inplace=True, errors='ignore')
+                df.drop("index", inplace=True, errors="ignore")
             except Exception:
                 print("Could not read from feather, reading from sql")
                 df = self.get_unparsed_records()
@@ -226,7 +225,7 @@ class E2D_DataPipeline:
 
 def get_upstream():
     query = "select FolderID, LineNumber from E2D_MC_IN_DISCR"
-    eng = sql_io.get_engine(sql_io.AI_DEV_SERVER, sql_io.AI_PROD_DB) 
+    eng = sql_io.get_engine(sql_io.AI_DEV_SERVER, sql_io.AI_PROD_DB)
     return read_sql(query, eng)
 
 
@@ -236,9 +235,7 @@ if __name__ == "__main__":
     pipelines_dict = pipeline_factory(read_all_records=False, multi_process=True)
     # sync_table.drop_table()
     # %%
-    pipelines_dict["PFC_DB"].sync(show_progress=True, 
-                                  use_cache=False)
-
+    pipelines_dict["PFC_DB"].sync(show_progress=True, use_cache=False)
 
 
 # %%

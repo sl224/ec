@@ -1,4 +1,5 @@
 from sqlalchemy.orm import declarative_base, sessionmaker
+
 # --- NEW IMPORT ---
 from etude_core.config import settings
 
@@ -57,7 +58,7 @@ __all__ = [
     "Base",
     "SessionLocal",
     "StatusEnum",
-    "FolderMetadata", # <-- Added
+    "FolderMetadata",  # <-- Added
     "FileHashRegistry",
     "FileMetadata",
     "ProcessingSession",

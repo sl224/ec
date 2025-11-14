@@ -19,7 +19,7 @@ logger.setLevel("DEBUG")
 def session_scope(eng, folder_id: int, git_hash: str, user_name: str):
     """
     Manages the creation and finalization of a ProcessingSession.
-    
+
     (No changes to this function)
     """
     logger.info(f"--- Opening Session for FolderID {folder_id} ---")
@@ -67,7 +67,7 @@ def job_scope(
 
     job_updater = None  # Ensure it's defined in all paths
     should_skip = False  # Ensure it's defined
-    
+
     try:
         # --- SKIP LOGIC (No changes here) ---
         if hash_id is None:

@@ -4,7 +4,6 @@ from typing import Protocol, runtime_checkable
 from etude_core.pipelines.protocols import PipelineJob
 from etude_core.pipelines.scanner import MetadataScanHandler, FileToProcess
 from etude_core.pipelines.base import FileHandler, DatasetKey
-from etude_core.services.zip_io import FileType
 
 logger = logging.getLogger(__name__)
 
@@ -13,7 +12,7 @@ logger = logging.getLogger(__name__)
 class JobContext(Protocol):
     """
     A polymorphic contract for a job's context.
-    
+
     This object provides all necessary details to the `job_scope`
     manager, removing the need for `if/else` logic within the scope.
     """
@@ -97,7 +96,9 @@ class FileJobContext:
 
     @property
     def job_name(self) -> str:
-        return f"{self._handler.PIPELINE_ID}: {self._file.relative_path} [{self._key_str}]"
+        return (
+            f"{self._handler.PIPELINE_ID}: {self._file.relative_path} [{self._key_str}]"
+        )
 
     @property
     def file_type(self) -> str:

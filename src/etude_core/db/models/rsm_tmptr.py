@@ -1,6 +1,6 @@
 from sqlalchemy import Column, Integer, String, ForeignKey, DateTime
 from sqlalchemy.dialects.mssql import DATETIME2
-from etude_core.db.models import Base, DEFAULT_SCHEMA
+from etude_core.db.models import Base
 
 
 class TmptrData(Base):
@@ -12,12 +12,10 @@ class TmptrData(Base):
     __tablename__ = "tmptr"
 
     # Primary Key is the HashID + Line Number
-    hash_id = Column(
-        Integer, ForeignKey("file_hash_registry.id"), primary_key=True
-    )
+    hash_id = Column(Integer, ForeignKey("file_hash_registry.id"), primary_key=True)
     # 2. The dataset within that file
     dataset_key = Column(String, primary_key=True)
-    
+
     # 3. The line within that dataset
     line_number = Column(Integer, primary_key=True)
 

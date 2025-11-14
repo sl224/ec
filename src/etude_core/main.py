@@ -20,7 +20,13 @@ from etude_core.pipelines.contexts import ScanJobContext, FileJobContext
 # --- Database & Utils ---
 from etude_core.db import access as sql_io
 from etude_core.config import settings
-from etude_core.db.models import Base, ProcessingJob, ProcessingSession, StatusEnum, FileMetadata
+from etude_core.db.models import (
+    Base,
+    ProcessingJob,
+    ProcessingSession,
+    StatusEnum,
+    FileMetadata,
+)
 
 
 # (No changes to logging, FolderState, WorkDelta, or get_folder_work_delta)
@@ -104,7 +110,6 @@ def process_zip(
         with session_scope(
             eng, folder_id, context.git_hash, context.user_name
         ) as session_manager:
-            
             work_delta = get_folder_work_delta(eng, folder_id)
             missing_items_lookup = None
 
@@ -133,12 +138,12 @@ def process_zip(
 
                     # --- FIX: Create ScanJobContext ---
                     scan_context = ScanJobContext(scanner)
-                    
+
                     # Pass the context object directly
-                    with job_scope(
-                        session_manager, 
-                        context=scan_context
-                    ) as (job_updater, should_skip):
+                    with job_scope(session_manager, context=scan_context) as (
+                        job_updater,
+                        should_skip,
+                    ):
                         files_to_process = scanner.run(job_updater, should_skip)
 
                 except Exception as e:
@@ -185,36 +190,42 @@ def process_zip(
                 logger.info(
                     f"[Session: {session_manager.session_id}] Dispatching {len(work_items_to_process)} dataset jobs."
                 )
-                
-                for hash_id, key_str in tqdm(work_items_to_process, desc=f"Folder {folder_id} Jobs"):
-                    
+
+                for hash_id, key_str in tqdm(
+                    work_items_to_process, desc=f"Folder {folder_id} Jobs"
+                ):
                     file = file_map.get(hash_id)
                     if not file:
-                        logger.warning(f"Skipping job for missing hash_id {hash_id} ({key_str})")
+                        logger.warning(
+                            f"Skipping job for missing hash_id {hash_id} ({key_str})"
+                        )
                         continue
-                        
+
                     handler = HANDLER_REGISTRY.get(file.file_type)
                     if not handler:
-                        logger.warning(f"Skipping job for missing handler {file.file_type} ({key_str})")
+                        logger.warning(
+                            f"Skipping job for missing handler {file.file_type} ({key_str})"
+                        )
                         continue
-                        
+
                     key_map = type_to_key_map.get(file.file_type, {})
                     key_enum = key_map.get(key_str)
                     if not key_enum:
-                        logger.warning(f"Skipping job for unknown key '{key_str}' in {handler.PIPELINE_ID}")
+                        logger.warning(
+                            f"Skipping job for unknown key '{key_str}' in {handler.PIPELINE_ID}"
+                        )
                         continue
-                        
+
                     # B. Execute Job (one per dataset)
                     try:
                         # --- FIX: Create FileJobContext ---
                         file_context = FileJobContext(handler, file, key_enum)
-                        
-                        # Pass the context object directly
-                        with job_scope(
-                            session_manager,
-                            context=file_context
-                        ) as (job_updater, should_skip):
 
+                        # Pass the context object directly
+                        with job_scope(session_manager, context=file_context) as (
+                            job_updater,
+                            should_skip,
+                        ):
                             if should_skip:
                                 continue
 
@@ -223,14 +234,14 @@ def process_zip(
                                 hash_id=file.hash_id,
                                 file_path=file.full_path,
                                 job_updater=job_updater,
-                                keys_to_process=[key_enum]
+                                keys_to_process=[key_enum],
                             )
 
                     except Exception as e:
                         logger.error(
                             f"Handler {handler.PIPELINE_ID} failed for FileID {file.file_id} / Key {key_str}: {e}"
                         )
-                        pass # job_scope will mark as ERROR
+                        pass  # job_scope will mark as ERROR
 
     except Exception as e:
         logger.error(
