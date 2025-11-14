@@ -1,5 +1,6 @@
 import pandas as pd
 from pathlib import Path
+from etude_core.db.models import TmptrData
 
 
 def parse_tmptr_dataframe(file_path: Path) -> pd.DataFrame:
@@ -38,4 +39,4 @@ def parse_tmptr_dataframe(file_path: Path) -> pd.DataFrame:
     df["datetime"] = pd.to_datetime(datetime_full, format="%Y%m%d %H:%M:%S.%f")
     df["line_number"] = df.index + 1
 
-    return df.drop(columns=["date", "time", "temp_f_raw", "temp_c_raw"])
+    return {TmptrData: df.drop(columns=["date", "time", "temp_f_raw", "temp_c_raw"])}

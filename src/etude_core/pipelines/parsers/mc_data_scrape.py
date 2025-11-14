@@ -1,5 +1,4 @@
 from pandas import DataFrame
-from functools import wraps
 
 """
 Contains scraping strategies for the MCData file records
@@ -7,16 +6,6 @@ See MC_Maintenance_Data_User_Guide_v2.11.pdf for data details
 """
 
 
-def prepend_primary_key(scrape_func):
-    @wraps(scrape_func)
-    def pk_prepend(table_row):
-        pk = [table_row.FolderID, table_row.LineNumber]
-        return pk + scrape_func(table_row.RawText)
-
-    return pk_prepend
-
-
-@prepend_primary_key
 def scrape_nav_record(text):
     """
     Parses a single NAV_DATA line record
@@ -43,7 +32,6 @@ def scrape_nav_record(text):
     return row
 
 
-@prepend_primary_key
 def scrape_rpcs_pres_record(text) -> DataFrame:
     def _filter_rpcs(token):
         # Range of Pressure vals defined in the interface design document (IDD)
@@ -68,7 +56,6 @@ def scrape_rpcs_pres_record(text) -> DataFrame:
     return row
 
 
-@prepend_primary_key
 def scrape_pfc_db_record(text):
     """
     E.g:
@@ -96,7 +83,6 @@ def scrape_pfc_db_record(text):
     return row
 
 
-@prepend_primary_key
 def scrape_rfc_db_record(text):
     """
     E.g
@@ -137,7 +123,6 @@ def scrape_rfc_db_record(text):
     return row
 
 
-@prepend_primary_key
 def scrape_rpcs_record(text):
     """
     E.g:
@@ -189,7 +174,6 @@ def scrape_rpcs_record(text):
     return row
 
 
-@prepend_primary_key
 def scrape_rdr_state_record(text):
     """ """
     row = []
@@ -200,7 +184,6 @@ def scrape_rdr_state_record(text):
     return row
 
 
-@prepend_primary_key
 def scrape_rotoscan_record(text):
     """ """
     row = []
@@ -209,7 +192,6 @@ def scrape_rotoscan_record(text):
     return row
 
 
-@prepend_primary_key
 def scrape_lcs_temp_record(text: str):
     """
     E.g:
@@ -234,7 +216,6 @@ def scrape_lcs_temp_record(text: str):
     return row
 
 
-@prepend_primary_key
 def scrape_mc_in_discr(text):
     """
     E.g.

@@ -1,16 +1,14 @@
 import logging
-from enum import Enum, auto
 from pathlib import Path
 from typing import (
     Any,
     Callable,
     Dict,
-    List,  # <-- IMPORT
+    List,
     Protocol,
     Tuple,
     Type,
     TypeAlias,
-    Union,
     runtime_checkable,
 )
 
@@ -19,6 +17,7 @@ import sqlalchemy as sa
 
 from etude_core.orchestration.managers import JobManager
 from etude_core.db import access as sql_io
+from etude_core.db.models import Base  # Import your Base
 
 logger = logging.getLogger(__name__)
 
@@ -27,127 +26,68 @@ logger = logging.getLogger(__name__)
 
 @runtime_checkable
 class HashVerifiableModel(Protocol):
-    """Protocol for Tables that support Hash-Centric Deduplication."""
-
     __tablename__: str
     __table__: Any
     hash_id: Any
 
 
-# RENAMED: Represents a logical grouping of data returned by the parser
-class DatasetKey(Enum):
-    pass
+ParserResult: TypeAlias = Dict[Type[Base], pd.DataFrame]
 
+# --- FIX: The payload no longer needs the redundant table_name string ---
+PayloadType: TypeAlias = List[Tuple[Type[HashVerifiableModel], pd.DataFrame]]
 
-# RENAMED: The default key for single-table parsers
-class StandardDataset(DatasetKey):
-    PRIMARY = auto()
-
-
-# --- FIX: The PayloadType alias was incorrect. It must include the key. ---
-PayloadType: TypeAlias = List[
-    Tuple[DatasetKey, Type[HashVerifiableModel], pd.DataFrame]
-]
-
-# Parser returns either a specific Dict of Datasets, or a single DataFrame
-ParserResult: TypeAlias = Union[Dict[DatasetKey, pd.DataFrame], pd.DataFrame]
-
-
-# --- 2. THE HANDLER ---
+# --- 2. THE REFACTORED HANDLER ---
 
 
 class FileHandler:
-    """
-    Generic ETL Handler.
-
-    Binds a 'Parser' (which produces Datasets) to 'Target Tables'.
-    """
-
+    # ... (__init__ is unchanged) ...
     def __init__(
         self,
         pipeline_id: str,
         parser_func: Callable[[Path], ParserResult],
-        # Config: Map logical Datasets to physical Tables
-        table_config: Union[
-            Type[HashVerifiableModel], Dict[DatasetKey, Type[HashVerifiableModel]]
-        ],
-        # Optional: The Enum Class used for validation in complex mode
-        dataset_enum: Type[DatasetKey] = None,
+        table_config: List[Type[HashVerifiableModel]],
     ):
         self.PIPELINE_ID = pipeline_id
-        self._parser_func = parser_func
 
-        # --- NORMALIZATION LOGIC ---
-        if isinstance(table_config, dict):
-            # Complex Mode (Multi-Dataset)
-            if not dataset_enum:
-                raise ValueError(
-                    f"[{pipeline_id}] Multi-table config requires 'dataset_enum' for validation."
-                )
-            self.TABLE_MAPPING = table_config
-            self.DATASET_ENUM = dataset_enum
-            self._is_simple_mode = False
-        else:
-            # Simple Mode (Single Dataset)
-            self.TABLE_MAPPING = {StandardDataset.PRIMARY: table_config}
-            self.DATASET_ENUM = StandardDataset
-            self._is_simple_mode = True
+        if not table_config:
+            raise ValueError(f"[{pipeline_id}] 'table_config' list cannot be empty.")
 
-        # --- STARTUP VALIDATION ---
-        # Ensure every logical dataset defined in the contract is mapped to a table
-        if not self._is_simple_mode:
-            defined_datasets = set(self.DATASET_ENUM)
-            mapped_datasets = set(self.TABLE_MAPPING.keys())
+        self.expected_models = table_config
 
-            missing = defined_datasets - mapped_datasets
-            if missing:
-                raise ValueError(
-                    f"[{pipeline_id}] CONFIG ERROR: Parser defines datasets {missing} which are NOT mapped to tables."
+        self.model_map: Dict[str, Type[Base]] = {
+            model.__tablename__: model for model in table_config
+        }
+
+        self._parser = parser_func
+
+        for model in self.expected_models:
+            if not hasattr(model, "hash_id"):
+                logger.warning(
+                    f"[{pipeline_id}] Model {model.__name__} is missing required 'hash_id' column."
                 )
 
-            extra = mapped_datasets - defined_datasets
-            if extra:
-                raise ValueError(
-                    f"[{pipeline_id}] CONFIG ERROR: Config maps datasets {extra} which are NOT defined in the parser contract."
-                )
-
+    # ... (run is unchanged) ...
     def run(
         self,
         eng: sa.Engine,
         hash_id: int,
         file_path: Path,
         job_updater: JobManager,
-        keys_to_process: List[DatasetKey] = None,  # <-- FIX: ADDED
+        keys_to_process: List[str] = None,
     ):
         logger.info(
             f"[{self.PIPELINE_ID}] Processing HashID {hash_id} for keys: {keys_to_process or 'ALL'}"
         )
-
-        # 1. PARSE
         try:
-            raw_data = self._parser_func(file_path)
+            model_to_df_map = self._parser(file_path)
         except Exception:
             raise
-
-        # 2. NORMALIZE
-        payload = self._normalize_payload(raw_data)
-
-        # --- FIX: NEW FILTERING LOGIC ---
-        # Filter the payload to *only* the keys this job is responsible for.
-        if keys_to_process:
-            payload = [
-                (key, model, df) for key, model, df in payload if key in keys_to_process
-            ]
-        # --- END FIX ---
-
+        payload = self._normalize_and_filter(model_to_df_map, keys_to_process)
         if not payload:
             logger.info(f"[{self.PIPELINE_ID}] No data found for specified keys.")
             job_updater._rows_uploaded_in_scope = 0
             return
-
-        # 3. UPLOAD
         try:
-            # 'payload' is now pre-filtered
             total_rows = self._atomic_upload(eng, hash_id, payload, job_updater)
             job_updater._rows_uploaded_in_scope = total_rows
             logger.info(f"[{self.PIPELINE_ID}] Complete. Total rows: {total_rows}")
@@ -155,65 +95,51 @@ class FileHandler:
             logger.error(f"[{self.PIPELINE_ID}] Upload failed: {e}", exc_info=True)
             raise
 
-    def _normalize_payload(self, raw_data: ParserResult) -> PayloadType:
-        payload: PayloadType = []  # Explicitly type
-
-        # Case A: Simple Mode (DataFrame -> StandardDataset)
-        if isinstance(raw_data, pd.DataFrame):
-            if not self._is_simple_mode:
-                raise ValueError(
-                    f"[{self.PIPELINE_ID}] Parser returned DataFrame, but Handler expects Dict[{self.DATASET_ENUM.__name__}]."
-                )
-
-            target_table = self.TABLE_MAPPING[StandardDataset.PRIMARY]
-            payload.append((StandardDataset.PRIMARY, target_table, raw_data))
-            return payload
-
-        # Case B: Complex Mode (Dict -> Mapped Keys)
-        if isinstance(raw_data, dict):
-            for key, df in raw_data.items():
-                # Type Check
-                if not isinstance(key, self.DATASET_ENUM):
-                    if self._is_simple_mode:
-                        raise ValueError(
-                            f"[{self.PIPELINE_ID}] Parser returned Dict, but Handler is configured for single-table."
-                        )
-                    logger.warning(
-                        f"[{self.PIPELINE_ID}] Invalid key {key}. Expected {self.DATASET_ENUM}."
-                    )
-                    continue
-
-                target_table = self.TABLE_MAPPING[key]
-                payload.append((key, target_table, df))
-            return payload
-
-        if raw_data is None:
+    def _normalize_and_filter(
+        self,
+        model_map: ParserResult,
+        keys_to_process: List[str],  # List of table names
+    ) -> PayloadType:
+        """
+        Converts the parser's {Model: df} map into the internal payload,
+        while filtering for the table names this job is responsible for.
+        """
+        # --- FIX: Use new PayloadType ---
+        payload: PayloadType = []
+        if not model_map:
             return []
 
-        raise TypeError(
-            f"[{self.PIPELINE_ID}] Unexpected parser return type: {type(raw_data)}"
-        )
+        for model, df in model_map.items():
+            table_name = model.__tablename__
+
+            if table_name not in self.model_map:
+                logger.warning(
+                    f"[{self.PIPELINE_ID}] Parser returned Model {model.__name__} which was not in 'table_config'."
+                )
+                continue
+
+            if keys_to_process and table_name not in keys_to_process:
+                continue
+
+            # --- FIX: Append the simpler tuple ---
+            payload.append((model, df))
+
+        return payload
 
     def _atomic_upload(self, eng, hash_id, payload: PayloadType, job_updater) -> int:
-        # Standard Atomic Logic
         total_rows = 0
-        row_count_sum = sum(len(item[2]) for item in payload)
+        row_count_sum = sum(len(item[1]) for item in payload)  # <-- Index 1 for df
         job_updater.mark_running(f"Uploading {row_count_sum} rows...")
         with eng.begin() as conn:
-            for data_key, table_model, df in payload:
+            # --- FIX: Unpack the simpler tuple ---
+            for model, df in payload:
                 if df.empty:
                     continue
                 df = df.copy()
                 df["hash_id"] = hash_id
-                # --- FIX: Use .name to store the string representation ---
-                df["dataset_key"] = data_key.name
-                conn.execute(
-                    table_model.__table__.delete().where(
-                        table_model.hash_id == hash_id,
-                        # --- FIX: Ensure delete is also per-key ---
-                        table_model.dataset_key == data_key.name,
-                    )
-                )
-                sql_io.bulk_upload(df, conn, table_model.__table__)
+
+                conn.execute(model.__table__.delete().where(model.hash_id == hash_id))
+
+                sql_io.bulk_upload(df, conn, model.__table__)
                 total_rows += len(df)
         return total_rows

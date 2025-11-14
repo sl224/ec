@@ -1,7 +1,7 @@
 from enum import Enum as PyEnum
 from sqlalchemy import Column, Integer, String, ForeignKey, DateTime, Enum, func, Index
 from sqlalchemy.orm import relationship
-from etude_core.db.models import Base
+from etude_core.db.base_session import Base
 
 
 # --- Enums ---
@@ -77,14 +77,9 @@ class ProcessingJob(Base):
             "session_id",
             "pipeline_id",
             "file_id",
-            "dataset_key",
+            "dataset_key",  # <-- THIS IS THE CRITICAL FIX
             unique=True,
         ),
         # Index to check for completed hashes across *all* sessions
         Index("ix_hash_skip_lookup", "pipeline_id", "hash_id", "dataset_key", "status"),
-    )
-    __table_args__ = (
-        Index("ix_folder_status_type", "file_type", "status"),
-        Index("ix_job_lookup", "session_id", "pipeline_id", "file_id", unique=True),
-        Index("ix_hash_skip_lookup", "pipeline_id", "hash_id", "status"),
     )

@@ -1,6 +1,6 @@
 from sqlalchemy import Column, Integer, String, ForeignKey
 from sqlalchemy.orm import relationship
-from etude_core.db.models import Base
+from etude_core.db.base_session import Base
 
 
 # --- 1. The Source (Folders) ---

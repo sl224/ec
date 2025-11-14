@@ -1,23 +1,21 @@
 from sqlalchemy import Column, Integer, String, ForeignKey, DateTime
 from sqlalchemy.dialects.mssql import DATETIME2
-from etude_core.db.models import Base
+from etude_core.db.base_session import Base
 
 
 class TmptrData(Base):
     """
     Example RSM Zip derived table.
-    Keyed by HashID
+    Keyed by HashID and LineNumber.
     """
 
     __tablename__ = "tmptr"
 
-    # Primary Key is the HashID + Line Number
+    # --- FIX: The Primary Key is just hash_id + line_number ---
     hash_id = Column(Integer, ForeignKey("file_hash_registry.id"), primary_key=True)
-    # 2. The dataset within that file
-    dataset_key = Column(String, primary_key=True)
-
-    # 3. The line within that dataset
     line_number = Column(Integer, primary_key=True)
+
+    # --- The dataset_key column is GONE ---
 
     datetime = Column(DateTime().with_variant(DATETIME2(3), "mssql"))
     category = Column(String)

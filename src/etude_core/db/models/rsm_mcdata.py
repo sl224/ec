@@ -1,9 +1,8 @@
-from sqlalchemy import Column, Integer, Float, Boolean, String
+from sqlalchemy import Column, Integer, Float, Boolean, String, ForeignKey
 from sqlalchemy.dialects.mssql import DATETIME2
 from sqlalchemy.sql.sqltypes import DateTime
-from etude_core.db.models import Base
-# Assume 'Base' is imported from your canonical location (e.g., models.__init__)
-# from models import Base
+from etude_core.db.base_session import Base
+
 
 # Helper for the DATETIME2 variant consistent with the user's example
 DATETIME2_MS = DateTime().with_variant(DATETIME2(3), "mssql")
@@ -12,9 +11,9 @@ DATETIME2_MS = DateTime().with_variant(DATETIME2(3), "mssql")
 class Rpcs(Base):
     """Corresponds to RPCS: record_type in E2D_RPCS table."""
 
-    __tablename__ = "E2D_RPCS"
+    __tablename__ = "mcdata_rpcs"
 
-    log_id = Column("LogID", Integer, primary_key=True)
+    hash_id = Column(Integer, ForeignKey("file_hash_registry.id"), primary_key=True)
     line_number = Column("LineNumber", Integer, primary_key=True)
     system_time_stamp = Column("System TimeStamp", DATETIME2_MS)
     humidity_b = Column("Humidity B", Float)
@@ -29,9 +28,9 @@ class Rpcs(Base):
 class RpcsPres(Base):
     """Corresponds to RPCS_PRES: record_type in E2D_RPCS_PRES table."""
 
-    __tablename__ = "E2D_RPCS_PRES"
+    __tablename__ = "mcdata_rpcs_pres"
 
-    log_id = Column("LogID", Integer, primary_key=True)
+    hash_id = Column(Integer, ForeignKey("file_hash_registry.id"), primary_key=True)
     line_number = Column("LineNumber", Integer, primary_key=True)
     system_time_stamp = Column("System TimeStamp", DATETIME2_MS)
     dataset_time_stamp = Column("Dataset TimeStamp", DATETIME2_MS)
@@ -59,9 +58,9 @@ class RpcsPres(Base):
 class NavData(Base):
     """Corresponds to NAV_DATA: record_type in E2D_NAV_DATA table."""
 
-    __tablename__ = "E2D_NAV_DATA"
+    __tablename__ = "mcdata_nav_data"
 
-    log_id = Column("LogID", Integer, primary_key=True)
+    hash_id = Column(Integer, ForeignKey("file_hash_registry.id"), primary_key=True)
     line_number = Column("LineNumber", Integer, primary_key=True)
     system_time_stamp = Column("System TimeStamp", DATETIME2_MS)
     nav_mode = Column("Nav Mode", String(50))
@@ -101,9 +100,9 @@ class NavData(Base):
 class RadarState(Base):
     """Corresponds to RDR_STATE: record_type in E2D_RADAR_STATE table."""
 
-    __tablename__ = "E2D_RADAR_STATE"
+    __tablename__ = "mcdata_radar_state"
 
-    log_id = Column("LogID", Integer, primary_key=True)
+    hash_id = Column(Integer, ForeignKey("file_hash_registry.id"), primary_key=True)
     line_number = Column("LineNumber", Integer, primary_key=True)
     system_time_stamp = Column("System TimeStamp", DATETIME2_MS)
     rscp_off_switch_state = Column("RSCP_OFF_Switch_State", String)
@@ -122,9 +121,9 @@ class RadarState(Base):
 class RotoScan(Base):
     """Corresponds to ROTOSCAN: record_type in E2D_ROTOSCAN table."""
 
-    __tablename__ = "E2D_ROTOSCAN"
+    __tablename__ = "mcdata_rotoscan"
 
-    log_id = Column("LogID", Integer, primary_key=True)
+    hash_id = Column(Integer, ForeignKey("file_hash_registry.id"), primary_key=True)
     line_number = Column("LineNumber", Integer, primary_key=True)
     system_time_stamp = Column("System TimeStamp", DATETIME2_MS)
     scan_mode = Column("ScanMode", String)
@@ -136,9 +135,9 @@ class RotoScan(Base):
 class GfcDb(Base):
     """Corresponds to GFC_DB: record_type in E2D_GFC_DB table."""
 
-    __tablename__ = "E2D_GFC_DB"
+    __tablename__ = "mcdata_gfc_db"
 
-    log_id = Column("LogID", Integer, primary_key=True)
+    hash_id = Column(Integer, ForeignKey("file_hash_registry.id"), primary_key=True)
     line_number = Column("LineNumber", Integer, primary_key=True)
     system_time_stamp = Column("System TimeStamp", DATETIME2_MS)
     time_stamp = Column("Time Stamp", String)
@@ -155,9 +154,9 @@ class GfcDb(Base):
 class PfcDb(Base):
     """Corresponds to PFC_DB: record_type in PFC_DB table."""
 
-    __tablename__ = "PFC_DB"
+    __tablename__ = "mcdata_pfc_db"
 
-    folder_id = Column("FolderID", Integer, primary_key=True)
+    hash_id = Column(Integer, ForeignKey("file_hash_registry.id"), primary_key=True)
     line_number = Column("LineNumber", Integer, primary_key=True)
     system_time_stamp = Column("System TimeStamp", DATETIME2_MS)
     processed_fault_code = Column("Processed Fault Code", Integer)
@@ -169,9 +168,9 @@ class PfcDb(Base):
 class RfcDb(Base):
     """Corresponds to RFC_DB: record_type in E2D_RFC_DB table."""
 
-    __tablename__ = "E2D_RFC_DB"
+    __tablename__ = "mcdata_rfc_db"
 
-    log_id = Column("LogID", Integer, primary_key=True)
+    hash_id = Column(Integer, ForeignKey("file_hash_registry.id"), primary_key=True)
     line_number = Column("LineNumber", Integer, primary_key=True)
     system_time_stamp = Column("System TimeStamp", DATETIME2_MS)
     fci_indicator = Column("FCI Indicator", String)
@@ -192,9 +191,9 @@ class RfcDb(Base):
 class LcsTemp(Base):
     """Corresponds to LCS_TEMP: record_type in E2D_LCS_TEMP table."""
 
-    __tablename__ = "E2D_LCS_TEMP"
+    __tablename__ = "mcdata_lcs_temp"
 
-    log_id = Column("LogID", Integer, primary_key=True)
+    hash_id = Column(Integer, ForeignKey("file_hash_registry.id"), primary_key=True)
     line_number = Column("LineNumber", Integer, primary_key=True)
     system_time_stamp = Column("System TimeStamp", DATETIME2_MS)
     lcs_temp_f = Column("LCS Temp F", String)
@@ -205,9 +204,9 @@ class LcsTemp(Base):
 class McInDiscr(Base):
     """Corresponds to MC_IN_DISCR: record_type in E2D_MC_IN_DISCR table."""
 
-    __tablename__ = "E2D_MC_IN_DISCR"
+    __tablename__ = "mcdata_mc_in_discr"
 
-    log_id = Column("LogID", Integer, primary_key=True)
+    hash_id = Column(Integer, ForeignKey("file_hash_registry.id"), primary_key=True)
     line_number = Column("LineNumber", Integer, primary_key=True)
     system_time_stamp = Column("System TimeStamp", DATETIME2_MS)
     power_on = Column("Power On", Boolean)
