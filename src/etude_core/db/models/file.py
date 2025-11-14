@@ -41,7 +41,7 @@ class FileMetadata(Base):
     # Link back to the source folder
     folder_id = Column(
         Integer,
-        ForeignKey(f"{DEFAULT_SCHEMA}.folder_metadata.FolderID"),
+        ForeignKey("folder_metadata.FolderID"),
         nullable=False,
         index=True,
     )
@@ -49,7 +49,7 @@ class FileMetadata(Base):
     # Link to the unique content hash
     hash_id = Column(
         Integer,
-        ForeignKey(f"{DEFAULT_SCHEMA}.file_hash_registry.id"),
+        ForeignKey("file_hash_registry.id"),
         nullable=False,
         index=True,
     )

@@ -42,7 +42,7 @@ class ProcessingJob(Base):
     __tablename__ = "processing_jobs"
     id = Column(Integer, primary_key=True)
     session_id = Column(
-        Integer, ForeignKey(f"{DEFAULT_SCHEMA}.processing_sessions.id"), nullable=False
+        Integer, ForeignKey("processing_sessions.id"), nullable=False
     )
 
     job_name = Column(String(500))  # e.g., "VersionsSummaryHandler: abc_Versions.xml"
@@ -57,13 +57,13 @@ class ProcessingJob(Base):
 
     file_id = Column(
         Integer,
-        ForeignKey(f"{DEFAULT_SCHEMA}.file_metadata.id"),
+        ForeignKey("file_metadata.id"),
         nullable=True,
         index=True,
     )
     hash_id = Column(
         Integer,
-        ForeignKey(f"{DEFAULT_SCHEMA}.file_hash_registry.id"),
+        ForeignKey("file_hash_registry.id"),
         nullable=True,
         index=True,
     )

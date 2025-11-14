@@ -13,8 +13,12 @@ class TmptrData(Base):
 
     # Primary Key is the HashID + Line Number
     hash_id = Column(
-        Integer, ForeignKey(f"{DEFAULT_SCHEMA}.file_hash_registry.id"), primary_key=True
+        Integer, ForeignKey("file_hash_registry.id"), primary_key=True
     )
+    # 2. The dataset within that file
+    dataset_key = Column(String, primary_key=True)
+    
+    # 3. The line within that dataset
     line_number = Column(Integer, primary_key=True)
 
     datetime = Column(DateTime().with_variant(DATETIME2(3), "mssql"))

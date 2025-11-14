@@ -5,7 +5,7 @@ from typing import (
     Any,
     Callable,
     Dict,
-    List,
+    List,  # <-- IMPORT
     Protocol,
     Tuple,
     Type,
@@ -44,7 +44,8 @@ class StandardDataset(DatasetKey):
     PRIMARY = auto()
 
 
-PayloadType: TypeAlias = List[Tuple[Type[HashVerifiableModel], pd.DataFrame]]
+# --- FIX: The PayloadType alias was incorrect. It must include the key. ---
+PayloadType: TypeAlias = List[Tuple[DatasetKey, Type[HashVerifiableModel], pd.DataFrame]]
 
 # Parser returns either a specific Dict of Datasets, or a single DataFrame
 ParserResult: TypeAlias = Union[Dict[DatasetKey, pd.DataFrame], pd.DataFrame]
@@ -109,9 +110,16 @@ class FileHandler:
                 )
 
     def run(
-        self, eng: sa.Engine, hash_id: int, file_path: Path, job_updater: JobManager
+        self,
+        eng: sa.Engine,
+        hash_id: int,
+        file_path: Path,
+        job_updater: JobManager,
+        keys_to_process: List[DatasetKey] = None,  # <-- FIX: ADDED
     ):
-        logger.info(f"[{self.PIPELINE_ID}] Processing HashID {hash_id}")
+        logger.info(
+            f"[{self.PIPELINE_ID}] Processing HashID {hash_id} for keys: {keys_to_process or 'ALL'}"
+        )
 
         # 1. PARSE
         try:
@@ -122,13 +130,24 @@ class FileHandler:
         # 2. NORMALIZE
         payload = self._normalize_payload(raw_data)
 
+        # --- FIX: NEW FILTERING LOGIC ---
+        # Filter the payload to *only* the keys this job is responsible for.
+        if keys_to_process:
+            payload = [
+                (key, model, df)
+                for key, model, df in payload
+                if key in keys_to_process
+            ]
+        # --- END FIX ---
+
         if not payload:
-            logger.info(f"[{self.PIPELINE_ID}] No data found.")
+            logger.info(f"[{self.PIPELINE_ID}] No data found for specified keys.")
             job_updater._rows_uploaded_in_scope = 0
             return
 
         # 3. UPLOAD
         try:
+            # 'payload' is now pre-filtered
             total_rows = self._atomic_upload(eng, hash_id, payload, job_updater)
             job_updater._rows_uploaded_in_scope = total_rows
             logger.info(f"[{self.PIPELINE_ID}] Complete. Total rows: {total_rows}")
@@ -137,7 +156,7 @@ class FileHandler:
             raise
 
     def _normalize_payload(self, raw_data: ParserResult) -> PayloadType:
-        payload = []
+        payload: PayloadType = []  # Explicitly type
 
         # Case A: Simple Mode (DataFrame -> StandardDataset)
         if isinstance(raw_data, pd.DataFrame):
@@ -175,7 +194,7 @@ class FileHandler:
             f"[{self.PIPELINE_ID}] Unexpected parser return type: {type(raw_data)}"
         )
 
-    def _atomic_upload(self, eng, hash_id, payload, job_updater) -> int:
+    def _atomic_upload(self, eng, hash_id, payload: PayloadType, job_updater) -> int:
         # Standard Atomic Logic
         total_rows = 0
         row_count_sum = sum(len(item[2]) for item in payload)
@@ -186,9 +205,14 @@ class FileHandler:
                     continue
                 df = df.copy()
                 df["hash_id"] = hash_id
-                df["dataset_key"] = data_key
+                # --- FIX: Use .name to store the string representation ---
+                df["dataset_key"] = data_key.name
                 conn.execute(
-                    table_model.__table__.delete().where(table_model.hash_id == hash_id)
+                    table_model.__table__.delete().where(
+                        table_model.hash_id == hash_id,
+                        # --- FIX: Ensure delete is also per-key ---
+                        table_model.dataset_key == data_key.name,
+                    )
                 )
                 sql_io.bulk_upload(df, conn, table_model.__table__)
                 total_rows += len(df)

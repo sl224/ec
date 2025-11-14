@@ -14,8 +14,7 @@ logger = logging.getLogger(__name__)
 
 
 class JobManager:
-    """State machine style status management of a *single* file processing job."""
-
+    # ... (NO CHANGES TO JobManager) ...
     def __init__(self, eng, job_id: int):
         self.eng = eng
         self.job_id = job_id
@@ -91,8 +90,7 @@ class JobManager:
 
 
 class SessionManager:
-    """Manages the OVERALL session and creates individual file jobs."""
-
+    # ... (NO CHANGES TO __init__ or _create_session) ...
     def __init__(self, eng, folder_id: int, git_hash: str = None, user_name=None):
         self.eng = eng
         # Use a scoped_session for thread-safety and consistency
@@ -132,6 +130,7 @@ class SessionManager:
         pipeline_id: str,
         file_id: int,
         hash_id: int,
+        dataset_key: str,  # <-- This is already correct (accepts string)
     ) -> JobManager:
         """
         Idempotently gets or creates a job for a specific pipeline and file.
@@ -142,14 +141,17 @@ class SessionManager:
             existing_job = (
                 self._session.query(ProcessingJob)
                 .filter_by(
-                    session_id=self.session_id, pipeline_id=pipeline_id, file_id=file_id
+                    session_id=self.session_id,
+                    pipeline_id=pipeline_id,
+                    file_id=file_id,
+                    dataset_key=dataset_key,  # <-- FIX: Find by key too
                 )
                 .first()
             )
 
             if existing_job:
                 logger.debug(
-                    f"Found existing job {existing_job.id} for {pipeline_id} / FileID {file_id}"
+                    f"Found existing job {existing_job.id} for {pipeline_id} / FileID {file_id} / Key {dataset_key}"
                 )
                 # Return a JobManager for the *existing* job
                 return JobManager(self.eng, existing_job.id)
@@ -164,6 +166,7 @@ class SessionManager:
                 status=StatusEnum.PENDING,
                 file_id=file_id,
                 hash_id=hash_id,
+                dataset_key=dataset_key,  # <-- This is already correct (stores string)
             )
             self._session.add(new_job)
             self._session.commit()
@@ -177,9 +180,11 @@ class SessionManager:
             logger.error(f"Failed to get or create job {job_name}: {e}", exc_info=True)
             raise
 
-    def check_for_completed_job(self, pipeline_id: str, hash_id: int) -> bool:
+    def check_for_completed_job(
+        self, pipeline_id: str, hash_id: int, dataset_key: str  # <-- FIX: Add
+    ) -> bool:
         """
-        Checks if a COMPLETED job exists for this pipeline/hash combo
+        Checks if a COMPLETED job exists for this pipeline/hash/key combo
         in *any* session.
         """
         # Use a fresh session for this check
@@ -192,6 +197,8 @@ class SessionManager:
                 .filter(
                     ProcessingJob.pipeline_id == pipeline_id,
                     ProcessingJob.hash_id == hash_id,
+                    # --- FIX: Add dataset_key to the check ---
+                    ProcessingJob.dataset_key == dataset_key,
                     ProcessingJob.status == StatusEnum.COMPLETED,
                 )
                 .first()
@@ -206,10 +213,14 @@ class SessionManager:
             session.close()
 
     def finalize_session(self):
+        # ... (NO CHANGES to finalize_session) ...
         """Updates the parent session status based on all child jobs."""
         session = self.Session()  # Use a fresh session for finalization
         try:
             session_obj = session.query(ProcessingSession).get(self.session_id)
+            if not session_obj:
+                logger.error(f"Session {self.session_id} not found during finalize.")
+                return
 
             # Check for any failed jobs in this session
             failed_jobs = (

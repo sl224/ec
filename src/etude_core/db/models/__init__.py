@@ -1,12 +1,25 @@
 from sqlalchemy.orm import declarative_base, sessionmaker
+# --- NEW IMPORT ---
+from etude_core.config import settings
 
-DEFAULT_SCHEMA = "etude_core"
-DEFAULT_SCHEMA = ""
+# --- FIX: Conditional Schema Logic ---
+# Check the database type from your settings
+# This assumes your settings.database.type is 'mssql' for MSSQL
+# and 'sqlite3' (or similar) for SQLite.
+if settings.database.type == "mssql":
+    DEFAULT_SCHEMA = "etude_core"
+else:
+    # For SQLite, the schema must be None.
+    # An empty string "" is what caused the invalid ".table.column" paths.
+    DEFAULT_SCHEMA = None
+# --- END FIX ---
 
 
 # 1. Define a class with the desired defaults (including schema)
 class EtudeCoreBase:
     # This attribute will be inherited by all models
+    # It will now be {"schema": "etude_core"} for MSSQL
+    # and {"schema": None} for SQLite, which is correct for both.
     __table_args__ = {"schema": DEFAULT_SCHEMA}
 
 
@@ -19,7 +32,8 @@ SessionLocal = sessionmaker(autocommit=False, autoflush=False)
 
 # --- Model Exports ---
 # Make all models available for import from etude_core.db.models
-from .file import FileHashRegistry, FileMetadata
+# (Added FolderMetadata to the list)
+from .file import FileHashRegistry, FileMetadata, FolderMetadata
 from .manager import ProcessingJob, ProcessingSession, StatusEnum
 
 # Example derived tables
@@ -43,6 +57,7 @@ __all__ = [
     "Base",
     "SessionLocal",
     "StatusEnum",
+    "FolderMetadata", # <-- Added
     "FileHashRegistry",
     "FileMetadata",
     "ProcessingSession",
