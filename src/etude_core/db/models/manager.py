@@ -1,9 +1,8 @@
-
 from enum import Enum as PyEnum
-from sqlalchemy import (Column, Integer, String, 
-    ForeignKey, DateTime, Enum, func, Index)
+from sqlalchemy import Column, Integer, String, ForeignKey, DateTime, Enum, func, Index
 from sqlalchemy.orm import relationship
 from etude_core.db.models import Base, DEFAULT_SCHEMA
+
 
 # --- Enums ---
 class StatusEnum(PyEnum):
@@ -42,7 +41,9 @@ class ProcessingJob(Base):
 
     __tablename__ = "processing_jobs"
     id = Column(Integer, primary_key=True)
-    session_id = Column(Integer, ForeignKey(f"{DEFAULT_SCHEMA}.processing_sessions.id"), nullable=False)
+    session_id = Column(
+        Integer, ForeignKey(f"{DEFAULT_SCHEMA}.processing_sessions.id"), nullable=False
+    )
 
     job_name = Column(String(500))  # e.g., "VersionsSummaryHandler: abc_Versions.xml"
     file_type = Column(String(50), index=True)  # Keep this for context
@@ -52,10 +53,19 @@ class ProcessingJob(Base):
     message = Column(String, nullable=True)
     start_time = Column(DateTime, nullable=True)
     end_time = Column(DateTime, nullable=True)
+    dataset_key = Column(String(50), nullable=True, index=True)
 
-    file_id = Column(Integer, ForeignKey(f"{DEFAULT_SCHEMA}.file_metadata.id"), nullable=True, index=True)
+    file_id = Column(
+        Integer,
+        ForeignKey(f"{DEFAULT_SCHEMA}.file_metadata.id"),
+        nullable=True,
+        index=True,
+    )
     hash_id = Column(
-        Integer, ForeignKey(f"{DEFAULT_SCHEMA}.file_hash_registry.id"), nullable=True, index=True
+        Integer,
+        ForeignKey(f"{DEFAULT_SCHEMA}.file_hash_registry.id"),
+        nullable=True,
+        index=True,
     )
 
     # Python-only link back to the parent session
@@ -64,7 +74,19 @@ class ProcessingJob(Base):
     __table_args__ = (
         Index("ix_folder_status_type", "file_type", "status"),
         # Index to find a specific job in a session
-        Index("ix_job_lookup", "session_id", "pipeline_id", "file_id", unique=True),
+        Index(
+            "ix_job_lookup",
+            "session_id",
+            "pipeline_id",
+            "file_id",
+            "dataset_key",
+            unique=True,
+        ),
         # Index to check for completed hashes across *all* sessions
+        Index("ix_hash_skip_lookup", "pipeline_id", "hash_id", "dataset_key", "status"),
+    )
+    __table_args__ = (
+        Index("ix_folder_status_type", "file_type", "status"),
+        Index("ix_job_lookup", "session_id", "pipeline_id", "file_id", unique=True),
         Index("ix_hash_skip_lookup", "pipeline_id", "hash_id", "status"),
     )

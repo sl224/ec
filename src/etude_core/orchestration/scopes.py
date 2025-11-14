@@ -11,6 +11,7 @@ from etude_core.db.models import StatusEnum
 
 
 logger = logging.getLogger(__name__)
+logger.setLevel('DEBUG')
 
 
 @contextmanager

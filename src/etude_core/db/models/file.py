@@ -2,6 +2,7 @@ from sqlalchemy import Column, Integer, String, ForeignKey
 from sqlalchemy.orm import relationship
 from etude_core.db.models import Base, DEFAULT_SCHEMA
 
+
 # --- 1. The Source (Folders) ---
 class FolderMetadata(Base):
     """
@@ -14,11 +15,13 @@ class FolderMetadata(Base):
     path = Column("FolderPath", String(500), nullable=False)
     files = relationship("FileMetadata", back_populates="folder")
 
+
 class FileHashRegistry(Base):
     """
     Registry of unique file content.
     Used for deduplication: many files can point to one Hash ID.
     """
+
     __tablename__ = "file_hash_registry"
 
     id = Column(Integer, primary_key=True)
@@ -45,7 +48,10 @@ class FileMetadata(Base):
 
     # Link to the unique content hash
     hash_id = Column(
-        Integer, ForeignKey(f"{DEFAULT_SCHEMA}.file_hash_registry.id"), nullable=False, index=True
+        Integer,
+        ForeignKey(f"{DEFAULT_SCHEMA}.file_hash_registry.id"),
+        nullable=False,
+        index=True,
     )
 
     relative_path = Column(String(500), nullable=False)

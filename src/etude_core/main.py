@@ -2,6 +2,9 @@ import logging
 from tqdm import tqdm
 from pathlib import Path
 import sqlalchemy as sa
+from enum import Enum, auto
+from dataclasses import dataclass, field
+from typing import List, Tuple, Optional
 
 # --- Core ETL Imports ---
 from etude_core.orchestration.scopes import session_scope, job_scope
@@ -13,7 +16,10 @@ from etude_core.pipelines.scanner import MetadataScanHandler
 # --- Database & Utils ---
 from etude_core.db import access as sql_io
 from etude_core.config import settings
-from etude_core.db.models import Base
+from etude_core.db.models import Base, ProcessingJob,ProcessingSession, StatusEnum, FileMetadata
+
+
+
 
 # --- Configuration ---
 # Configure logging to print to stdout
@@ -22,8 +28,80 @@ logging.basicConfig(
 )
 logger = logging.getLogger(__name__)
 
-# --- Orchestration Logic ---
+class FolderState(Enum):
+    UP_TO_DATE = auto()   # Folder in DB, all jobs done
+    PARTIAL = auto()      # Folder in DB, work remaining
 
+@dataclass
+class WorkDelta:
+    status: FolderState
+    # List of (hash_id, dataset_key) that need processing
+    missing_items: List[Tuple[int, str]] = field(default_factory=list)
+def get_folder_work_delta(eng: sa.Engine, folder_id: int) -> Optional[WorkDelta]:
+    """
+    Determines the processing state of a folder.
+    - Returns None if the folder has never been successfully scanned.
+    - Returns WorkDelta if the folder has been scanned.
+    """
+    
+    with eng.connect() as conn:
+        
+        # 1. CHECK SCAN STATUS
+        # Has the MetadataScanHandler *ever* completed for this folder?
+        scan_complete = conn.execute(
+            sa.select(ProcessingJob.id)
+            .join(ProcessingSession, ProcessingJob.session_id == ProcessingSession.id)
+            .where(
+                ProcessingSession.folder_id == folder_id,
+                ProcessingJob.pipeline_id == MetadataScanHandler.PIPELINE_ID,
+                ProcessingJob.status == StatusEnum.COMPLETED
+            )
+            .limit(1)
+        ).scalar()
+
+        if not scan_complete:
+            # If no scan has ever completed, we MUST treat it as NEW.
+            # Return None to signal the caller to perform the scan.
+            return None
+
+        # --- If we are here, a scan IS complete. We can trust FileMetadata ---
+
+        # 2. GET ACTUAL STATE (What data jobs are done?)
+        actual_stmt = (
+            sa.select(ProcessingJob.hash_id, ProcessingJob.dataset_key)
+            .join(FileMetadata, ProcessingJob.file_id == FileMetadata.id)
+            .where(
+                FileMetadata.folder_id == folder_id,
+                ProcessingJob.status == StatusEnum.COMPLETED,
+            )
+        )
+        actual_work = set(conn.execute(actual_stmt).fetchall())
+
+        # 3. GET EXPECTED STATE (What files did the scan find?)
+        expected_work = set()
+
+        files = conn.execute(
+            sa.select(FileMetadata.hash_id, FileMetadata.file_type).where(
+                FileMetadata.folder_id == folder_id
+            )
+        ).fetchall()
+
+        # If `files` is empty, this loop is skipped.
+        for hash_id, file_type in files:
+            handler = HANDLER_REGISTRY.get(file_type)
+            if handler:
+                for key in handler.declared_datasets:
+                    expected_work.add((hash_id, key))
+
+        # 4. CALCULATE DELTA
+        missing_items = list(expected_work - actual_work)
+
+        if not missing_items:
+            # If `files` was empty, `expected_work` is {}, `actual_work` is {}.
+            # `missing_items` is []. This correctly returns UP_TO_DATE.
+            return WorkDelta(status=FolderState.UP_TO_DATE)
+
+        return WorkDelta(status=FolderState.PARTIAL, missing_items=missing_items)
 
 def process_zip(
     eng: sa.Engine,
@@ -49,6 +127,21 @@ def process_zip(
         with session_scope(
             eng, folder_id, context.git_hash, context.user_name
         ) as session_manager:
+            # A. Check Work Delta
+            work_delta = get_folder_work_delta(eng, folder_id)
+            missing_items_lookup = None
+
+            if work_delta is None:
+                logger.info("New folder detected. Proceeding to Unzip & Scan.")
+            elif work_delta.status is FolderState.UP_TO_DATE:
+                logger.info("Folder is 100% complete. Skipping.")
+                return
+            else:
+                logger.info(
+                    f"Folder partially complete. Processing {len(work_delta.missing_items)} missing datasets."
+                )
+                missing_items_lookup = work_delta.missing_items
+
             # 2. Unzip
             # UnzipContext handles creation and auto-cleanup of the temp directory
             with UnzipContext(zip_path) as extract_dir_path:
@@ -93,8 +186,18 @@ def process_zip(
                     # A. Lookup Handler in Registry
                     handler = HANDLER_REGISTRY.get(file.file_type)
                     if not handler:
-                        # logger.debug(f"No handler for type {file.file_type}")
+                        logger.debug(f"No handler for type {file.file_type}")
                         continue
+
+                    # OPTIMIZATION:
+                    # Only run the specific keys that were identified as missing
+                    keys_needed = []
+                    if missing_items_lookup:
+                        keys_needed = [k for (h, k) in missing_items_lookup if h == file.hash_id]
+
+                    if missing_items_lookup is not None and not keys_needed:
+                        logger.info("No keys needed. Skipping...")
+                        continue  # Skip file
 
                     # B. Execute Job
                     try:
@@ -104,7 +207,9 @@ def process_zip(
                             handler_instance=handler,
                             file_to_process=file,
                         ) as (job_updater, should_skip):
+
                             if should_skip:
+                                logger.info("Skipping...")
                                 continue
 
                             handler.run(
@@ -155,7 +260,8 @@ if __name__ == "__main__":
     test_zip = (
         STATIC_ASSETS_ROOT / "zips/169069_20250203_004745_025_TransportRSM.fpkg.e2d.zip"
     )
-    id_paths = [(-i, test_zip) for i in range(10)]
+
+    id_paths = [(-i, test_zip) for i in range(10)][-1: ]
 
     logger.info(f"Found {len(id_paths)} folders to process.")
 

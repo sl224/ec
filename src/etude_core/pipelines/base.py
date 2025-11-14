@@ -147,7 +147,7 @@ class FileHandler:
                 )
 
             target_table = self.TABLE_MAPPING[StandardDataset.PRIMARY]
-            payload.append((target_table, raw_data))
+            payload.append((StandardDataset.PRIMARY, target_table, raw_data))
             return payload
 
         # Case B: Complex Mode (Dict -> Mapped Keys)
@@ -165,7 +165,7 @@ class FileHandler:
                     continue
 
                 target_table = self.TABLE_MAPPING[key]
-                payload.append((target_table, df))
+                payload.append((key, target_table, df))
             return payload
 
         if raw_data is None:
@@ -178,14 +178,15 @@ class FileHandler:
     def _atomic_upload(self, eng, hash_id, payload, job_updater) -> int:
         # Standard Atomic Logic
         total_rows = 0
-        row_count_sum = sum(len(item[1]) for item in payload)
+        row_count_sum = sum(len(item[2]) for item in payload)
         job_updater.mark_running(f"Uploading {row_count_sum} rows...")
         with eng.begin() as conn:
-            for table_model, df in payload:
+            for data_key, table_model, df in payload:
                 if df.empty:
                     continue
                 df = df.copy()
                 df["hash_id"] = hash_id
+                df["dataset_key"] = data_key
                 conn.execute(
                     table_model.__table__.delete().where(table_model.hash_id == hash_id)
                 )

@@ -1,12 +1,14 @@
 from sqlalchemy.orm import declarative_base, sessionmaker
 
-DEFAULT_SCHEMA = 'etude_core' 
-DEFAULT_SCHEMA = '' 
+DEFAULT_SCHEMA = "etude_core"
+DEFAULT_SCHEMA = ""
+
 
 # 1. Define a class with the desired defaults (including schema)
 class EtudeCoreBase:
     # This attribute will be inherited by all models
-    __table_args__ = {'schema': DEFAULT_SCHEMA}
+    __table_args__ = {"schema": DEFAULT_SCHEMA}
+
 
 # 2. The Single Source of Truth for all Models
 Base = declarative_base(cls=EtudeCoreBase)
@@ -23,7 +25,16 @@ from .manager import ProcessingJob, ProcessingSession, StatusEnum
 # Example derived tables
 from .rsm_tmptr import TmptrData
 from .rsm_mcdata import (
-    Rpcs, RpcsPres, NavData, RadarState, RotoScan, GfcDb, PfcDb, RfcDb, LcsTemp, McInDiscr
+    Rpcs,
+    RpcsPres,
+    NavData,
+    RadarState,
+    RotoScan,
+    GfcDb,
+    PfcDb,
+    RfcDb,
+    LcsTemp,
+    McInDiscr,
 )
 
 
@@ -37,6 +48,14 @@ __all__ = [
     "ProcessingSession",
     "ProcessingJob",
     "TmptrData",
-    "Rpcs", "RpcsPres", "NavData", "RadarState", "RotoScan",
-    "GfcDb", "PfcDb", "RfcDb", "LcsTemp", "McInDiscr",
+    "Rpcs",
+    "RpcsPres",
+    "NavData",
+    "RadarState",
+    "RotoScan",
+    "GfcDb",
+    "PfcDb",
+    "RfcDb",
+    "LcsTemp",
+    "McInDiscr",
 ]

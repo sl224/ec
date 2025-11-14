@@ -15,24 +15,24 @@ from multiprocessing import Pool
 from tqdm import tqdm
 from typing import List, Dict
 from pandas import DataFrame, read_feather, read_sql
-import utils.sql_io as sql_io
-from utils.clean import filtercast_df
+from etude_core.db import access as sql_io
+# from utils.clean import filtercast_df # This function seems to be project-specific and not in etude_core
 
-from MCData.sa_tables import (
-    LCS_TEMP_CONFIG,
-    NAV_DATA_CONFIG,
-    RPCS_PRES_CONFIG,
-    RFC_DB_CONFIG,
-    PFC_DB_CONFIG,
-    RPCS_CONFIG,
-    RADAR_STATE_CONFIG,
-    ROTOSCAN_CONFIG,
-    MC_IN_DISCR_CONFIG,
+from etude_core.db.models import (
+    LcsTemp,
+    NavData,
+    RpcsPres,
+    RfcDb,
+    PfcDb,
+    Rpcs,
+    RadarState,
+    RotoScan,
+    McInDiscr,
 )
 
 from sqlalchemy import inspect
 
-from MCData.scrape import (
+from etude_core.pipelines.parsers.mc_data_scrape import (
     scrape_nav_record,
     scrape_rdr_state_record,
     scrape_rfc_db_record,
@@ -59,19 +59,17 @@ def multi_process_rows(scrape_func, records, chunksize=1) -> List:
 
 def pipeline_factory(**kwargs) -> Dict:
     pipelines = {}
-    # config_parser_bundles = [
-    #     (NAV_DATA_CONFIG, scrape_nav_record),
-    #     (RPCS_PRES_CONFIG, scrape_rpcs_pres_record),
-    #     (RADAR_STATE_CONFIG, scrape_rdr_state_record),
-    #     (ROTOSCAN_CONFIG, scrape_rotoscan_record),
-    #     (RPCS_CONFIG, scrape_rpcs_record),
-    #     (RFC_DB_CONFIG, scrape_rfc_db_record),
-    #     (PFC_DB_CONFIG, scrape_pfc_db_record),
-    #     (LCS_TEMP_CONFIG, scrape_lcs_temp_record),
-    #     (MC_IN_DISCR_CONFIG, scrape_mc_in_discr),
-    # ]
+    # Pair the correct SQLAlchemy Model with its corresponding parser function
     config_parser_bundles = [
-        (PFC_DB_CONFIG, scrape_pfc_db_record),
+        (NavData, scrape_nav_record),
+        (RpcsPres, scrape_rpcs_pres_record),
+        (RadarState, scrape_rdr_state_record),
+        (RotoScan, scrape_rotoscan_record),
+        (Rpcs, scrape_rpcs_record),
+        (RfcDb, scrape_rfc_db_record),
+        (PfcDb, scrape_pfc_db_record),
+        (LcsTemp, scrape_lcs_temp_record),
+        (McInDiscr, scrape_mc_in_discr),
     ]
 
     for config, parser in config_parser_bundles:
