@@ -3,7 +3,7 @@ from collections import defaultdict
 from pathlib import Path
 from typing import Dict, Type
 
-# Assuming Base is in base_session
+# --- FIX: Import Base from base_session, not models ---
 from etude_core.db.base_session import Base
 
 # Import the models this parser produces
@@ -19,7 +19,7 @@ from etude_core.db.models import (
     McInDiscr,
 )
 
-# Import the new cleaning helper
+# --- FIX: Import the new vectorized cleaning function ---
 from etude_core.pipelines.cleaning import clean_dataframe_from_model
 
 # Import the scrape functions
@@ -35,7 +35,8 @@ from etude_core.pipelines.parsers.mc_data_scrape import (
     scrape_rpcs_record,
 )
 
-# This map links the file's string key to the Model and Scrape function
+# --- 2. Update Parser Map ---
+# (This map is correct as-is)
 parser_map = {
     "RPCS:": (Rpcs, scrape_rpcs_record),
     "RPCS_PRES:": (RpcsPres, scrape_rpcs_pres_record),
@@ -54,35 +55,66 @@ def parse_mcdata(file_path: Path) -> Dict[Type[Base], pd.DataFrame]:
     Parses an MCData file, scrapes each line, builds DataFrames,
     and cleans them according to their SQLAlchemy model definitions.
     """
-    with open(file_path, "r") as f:
+    with open(file_path, "r", encoding="utf-8", errors="ignore") as f:
         lines = f.readlines()
 
+    # Create a defaultdict to hold lists of raw row data
     data = defaultdict(list)
 
     for i, line in enumerate(lines):
         try:
-            message_type_str = line.split(",", maxsplit=2)[1]
+            # The 2nd token is the message type
+            tokens = line.split(",", maxsplit=2)
+            if len(tokens) < 2:
+                continue  # Skip blank lines
+            message_type_str = tokens[1]
 
             if message_type_str in parser_map:
-                _, scrape_func = parser_map[message_type_str]
+                model, scrape_func = parser_map[message_type_str]
 
-                row = [i]
-                row.extend(scrape_func(line))
+                # 1. Scrape the data-part of the line
+                scraped_data = scrape_func(line)
+
+                # 2. Assemble the full row: (line_number) + data columns
+                # --- FIX: Your models use 'line_number', not 'log_id' ---
+                row = [i] + scraped_data
 
                 data[message_type_str].append(row)
-        except IndexError:
+        except Exception:
+            # Skip blank or malformed lines
             continue
 
     ret_payload: Dict[Type[Base], pd.DataFrame] = {}
 
     for str_key, model_tuple in parser_map.items():
         model, _ = model_tuple
-        columns = ["line_number"]
-        model_cols = [c.name for c in model.__table__.columns if not c.primary_key]
-        columns.extend(model_cols)
+
+        # --- FIX: This logic was flawed ---
+
+        # 1. Get *all* column names from the model's table
+        all_model_cols = [c.name for c in model.__table__.columns]
+
+        # 2. Create the list of columns for the DataFrame
+        # We must put LineNumber first, as it's the first item in our 'row'
+        columns = []
+        if "LineNumber" in all_model_cols:
+            columns.append("LineNumber")
+
+        # 3. Add all other non-PK columns
+        # (This skips hash_id and LineNumber, which is correct)
+        data_cols = [c.name for c in model.__table__.columns if not c.primary_key]
+        columns.extend(data_cols)
+
+        # Get the raw data for this model
         raw_rows = data[str_key]
+
+        # Create the raw (string) DataFrame
+        # Ensure correct columns, even if no data was found
         df = pd.DataFrame(raw_rows, columns=columns)
+
+        # --- FIX: Clean the DataFrame using the new function ---
         clean_df = clean_dataframe_from_model(df, model)
+
         ret_payload[model] = clean_df
 
     return ret_payload

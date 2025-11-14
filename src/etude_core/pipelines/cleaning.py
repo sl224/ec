@@ -46,7 +46,7 @@ def clean_dataframe_from_model(df: pd.DataFrame, model: Type[Base]) -> pd.DataFr
                 s = pd.to_numeric(df[col_name], errors="coerce")
 
                 # If the target is int, use pandas' nullable Int64 type.
-                # --- FIX: Use 'is' for type comparison ---
+                # --- LINT FIX: Use 'is' for type comparison ---
                 if py_type is int:
                     s = s.astype("Int64")
 
@@ -54,12 +54,16 @@ def clean_dataframe_from_model(df: pd.DataFrame, model: Type[Base]) -> pd.DataFr
 
             # Handle datetime
             elif py_type is datetime:
-                # pd.to_datetime is robust and will handle formats
-                # like '01/13/2025 15:36:00' from your sample file.
-                df[col_name] = pd.to_datetime(df[col_name], errors="coerce")
+                # --- FIX: Add explicit format to stop warnings ---
+                # Format from 169083_20250113_141336_825_MCData sample file
+                datetime_format = "%m/%d/%Y %H:%M:%S"
+
+                df[col_name] = pd.to_datetime(
+                    df[col_name], errors="coerce", format=datetime_format
+                )
 
             # Handle boolean
-            # --- FIX: Use 'is' for type comparison ---
+            # --- LINT FIX: Use 'is' for type comparison ---
             elif py_type is bool:
                 # Use a map for robust boolean casting
                 bool_map = {
@@ -81,7 +85,7 @@ def clean_dataframe_from_model(df: pd.DataFrame, model: Type[Base]) -> pd.DataFr
                 )
 
             # Handle string
-            # --- FIX: Use 'is' for type comparison ---
+            # --- LINT FIX: Use 'is' for type comparison ---
             elif py_type is str:
                 # Replace common string placeholders for nulls
                 df[col_name] = (
