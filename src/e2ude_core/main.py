@@ -11,6 +11,7 @@ from e2ude_core.orchestration.workflow import process_zip
 from e2ude_core.db import access as sql_io
 from e2ude_core.config import settings
 from e2ude_core.db.setup import initialize_database, get_or_create_folder
+from sqlalchemy import text
 
 # --- Setup ---
 logging.basicConfig(
@@ -20,6 +21,21 @@ logger = logging.getLogger(__name__)
 
 
 # --- Entry Point ---
+def get_data(eng):
+    # 3. Setup Test Data: Pull from the Database Table
+    query = """
+    SELECT [FolderID], [FolderPath]
+    FROM [AnalyticsDataMart].[E2D_METADATA].[FOLDER]
+    ORDER BY [FolderDatetime] DESC
+    """
+
+    # We only need FolderID and FolderPath for the processing loop
+    with eng.connect() as conn:
+        id_paths = conn.execute(text(query)).fetchall()
+
+    logger.info(f"Found {len(id_paths)} folders to process via DB query.")
+    return id_paths
+
 
 if __name__ == "__main__":
     logger.info(f"Connecting to database type: {settings.database.type}")
@@ -35,16 +51,7 @@ if __name__ == "__main__":
     logger.info(f"Execution Context: {ctx}")
 
     # 3. Setup Test Data
-    STATIC_ASSETS_ROOT = Path(
-        r"C:\\Users\\J68531\\workspace\\E2D_ETL\\tests\\static_assets"
-    )
-    test_zip = (
-        STATIC_ASSETS_ROOT / "zips/169069_20250203_004745_025_TransportRSM.fpkg.e2d.zip"
-    )
-
-    # Use a list of (folder_id, path_to_zip) tuples for deterministic ordering
-    id_paths = [(i, p) for i, p in enumerate(STATIC_ASSETS_ROOT.glob("**/zips/*.zip"))]
-    logger.info(f"Found {len(id_paths)} folders to process.")
+    id_paths = get_data(eng)
 
     # 4. Main Processing Loop
     for folder_id, zip_path_str in tqdm(id_paths, desc="Overall Progress"):
