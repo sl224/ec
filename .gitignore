@@ -31,3 +31,6 @@ tests/static_assets/
 
 # DB
 *.sqlite*
+
+#Scratch
+*nocheckin*

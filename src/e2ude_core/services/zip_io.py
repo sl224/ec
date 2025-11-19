@@ -1,70 +1,11 @@
 from zipfile import ZipFile
 import tempfile
 import shutil
-from typing import List
 from enum import StrEnum
 from pathlib import Path
 
 import logging
-from typing import Tuple, Union
-
-
-class UnzipContext:
-    """
-    Context manager to recursively unzip an archive to a temporary
-    directory, identify all contained files, and auto-cleanup on exit.
-    """
-
-    def __init__(self, zip_path: Union[str, Path]):
-        self.zip_path = Path(zip_path)
-        if not self.zip_path.exists():
-            raise FileNotFoundError(f"Zip file not found: {self.zip_path}")
-
-        self.temp_dir: str = None
-        self.file_list: List[Tuple[Path, Union[FileType, str]]] = []
-
-    def __enter__(self):
-        """Create temp dir, unzip, and build file list."""
-        self.temp_dir = Path(tempfile.mkdtemp())
-        temp_dir_path = self.temp_dir
-        logging.info(f"Extracting '{self.zip_path.name}' to {self.temp_dir}")
-
-        # 1. Unzip all files recursively
-        recursive_unzip(self.temp_dir, self.zip_path)
-
-        # 2. Walk all files and categorize them
-        for file_path in temp_dir_path.rglob("*"):
-            if not file_path.is_file():
-                continue
-
-            # Get path relative to the /temp_dir
-            relative_path = file_path.relative_to(temp_dir_path)
-
-            found_type = "UNKNOWN"
-
-            # 3. Check against patterns
-            # We use relative_path.match() which works with glob patterns
-            # like '**/file' and 'file'
-            for file_type, pattern in file_type_patterns.items():
-                if relative_path.match(pattern):
-                    found_type = file_type  # Store the Enum object
-                    break  # Stop at first match
-
-            self.file_list.append((found_type, file_path))
-
-        # Return the 'self' object to be used after 'as'
-        return self
-
-    def __exit__(self, exc_type, exc_value, traceback):
-        """Clean up the temporary directory."""
-        if self.temp_dir and Path(self.temp_dir).exists():
-            logging.info(f"Cleaning up temp dir: {self.temp_dir}")
-            try:
-                shutil.rmtree(self.temp_dir)
-            except Exception as e:
-                logging.error(f"Failed to delete temp dir {self.temp_dir}: {e}")
-
-        # Allow exceptions to propagate.
+from typing import Union
 
 
 class FileType(StrEnum):
@@ -150,6 +91,63 @@ file_type_patterns = {
     FileType.DIA_MAINT_DETAIL: "*_RSM_RawArchive/DIA_MAINTENANCE/*_maintenance_data/*_detailed_data.txt",
     FileType.DIA_MAINT_STATUS: "*_RSM_RawArchive/DIA_MAINTENANCE/*_maintenance_data/system_snapshot_fault_status.txt",
 }
+
+
+class UnzipContext:
+    """
+    Context manager to recursively unzip an archive to a temporary
+    directory, identify all contained files, and auto-cleanup on exit.
+    """
+
+    def __init__(self, zip_path: Union[str, Path]):
+        self.zip_path = Path(zip_path)
+        if not self.zip_path.exists():
+            raise FileNotFoundError(f"Zip file not found: {self.zip_path}")
+
+        self.temp_dir: str = None
+        # self.file_list: List[Tuple[Path, Union[FileType, str]]] = []
+
+    def __enter__(self):
+        """Create temp dir, unzip, and build file list."""
+        self.temp_dir = Path(tempfile.mkdtemp())
+        logging.info(f"Extracting '{self.zip_path.name}' to {self.temp_dir}")
+
+        # 1. Unzip all files recursively
+        recursive_unzip(self.temp_dir, self.zip_path)
+
+        # # 2. Walk all files and categorize them
+        # for file_path in temp_dir_path.rglob("*"):
+        #     if not file_path.is_file():
+        #         continue
+
+        #     # Get path relative to the /temp_dir
+        #     relative_path = file_path.relative_to(temp_dir_path)
+
+        #     found_type = "UNKNOWN"
+
+        #     # 3. Check against patterns
+        #     # We use relative_path.match() which works with glob patterns
+        #     # like '**/file' and 'file'
+        #     for file_type, pattern in file_type_patterns.items():
+        #         if relative_path.match(pattern):
+        #             found_type = file_type  # Store the Enum object
+        #             break  # Stop at first match
+
+        #     self.file_list.append((found_type, file_path))
+
+        # Return the 'self' object to be used after 'as'
+        return self
+
+    def __exit__(self, exc_type, exc_value, traceback):
+        """Clean up the temporary directory."""
+        if self.temp_dir and Path(self.temp_dir).exists():
+            logging.info(f"Cleaning up temp dir: {self.temp_dir}")
+            try:
+                shutil.rmtree(self.temp_dir)
+            except Exception as e:
+                logging.error(f"Failed to delete temp dir {self.temp_dir}: {e}")
+
+        # Allow exceptions to propagate.
 
 
 def recursive_unzip(extract_dir, zip_path):

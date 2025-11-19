@@ -41,6 +41,7 @@ if __name__ == "__main__":
     logger.info(f"Connecting to database type: {settings.database.type}")
     eng = sql_io.get_engine(settings.database)
 
+    # ************************************************************************
     # 1. Initialize DB
     # We set reset_tables=True because this is a dev/test script.
     # For production, this would be `reset_tables=False`.
@@ -61,15 +62,19 @@ if __name__ == "__main__":
             logger.warning(f"Zip path does not exist, skipping: {zip_path}")
             continue
 
-        # Ensure the parent folder exists before processing
-        if not get_or_create_folder(eng, folder_id, str(zip_path)):
-            logger.warning(f"Skipping folder {folder_id} due to parent creation error.")
+        # Ensure the parent folder exists in the new table and get its new ID.
+        new_folder_id = get_or_create_folder(eng, zip_path)
+        if not new_folder_id:
+            logger.warning(
+                f"Skipping folder for path {zip_path} due to parent creation error."
+            )
             continue
 
         # Call the main orchestration logic
+        # Pass the NEW folder_id from the `metadata_folder` table.
         process_zip(
             eng=eng,
-            folder_id=folder_id,
+            folder_id=new_folder_id,
             zip_path=zip_path,
             context=ctx,
         )

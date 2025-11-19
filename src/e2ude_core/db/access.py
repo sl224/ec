@@ -72,6 +72,7 @@ def bulk_upload(
         leave=leave,
         disable=not show_progress,
     ) as pbar:
+        sa_table.create(conn, checkfirst=True)
         # Slice via `iloc` for memory-efficient chunking.
         for start_idx in range(0, total_rows, chunksize):
             df_chunk = df.iloc[start_idx : start_idx + chunksize]

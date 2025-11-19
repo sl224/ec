@@ -7,7 +7,7 @@ from enum import StrEnum
 logger = logging.getLogger(__name__)
 
 
-def calculate_md5(file_path: Path, chunk_size=4096) -> str:
+def calculate_md5(file_path: Path, chunk_size=4096) -> bytes:
     """
     Calculates the MD5 hash of a file.
     """
@@ -19,7 +19,7 @@ def calculate_md5(file_path: Path, chunk_size=4096) -> str:
     except Exception as e:
         logger.error(f"Failed to calculate MD5 for {file_path}: {e}")
         return "error"
-    return hash_md5.hexdigest()
+    return hash_md5.digest()
 
 
 def scan_directory(

@@ -4,6 +4,7 @@ from contextlib import contextmanager
 from e2ude_core.orchestration.managers import SessionManager
 from e2ude_core.db.models import StatusEnum
 from e2ude_core.pipelines.contexts import JobContext
+from e2ude_core.context import EtlContext
 
 
 logger = logging.getLogger(__name__)
@@ -11,15 +12,13 @@ logger.setLevel("DEBUG")
 
 
 @contextmanager
-def session_scope(eng, folder_id: int, git_hash: str, user_name: str):
+def session_scope(eng, folder_id: int, ctx: EtlContext):
     """
     Context manager that creates and finalizes a `ProcessingSession`.
     """
     session_manager = None
     try:
-        session_manager = SessionManager(
-            eng=eng, folder_id=folder_id, git_hash=git_hash, user_name=user_name
-        )
+        session_manager = SessionManager(eng=eng, folder_id=folder_id, ctx=ctx)
         yield session_manager
     except Exception as e:
         logger.error(

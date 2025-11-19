@@ -3,7 +3,7 @@ from sqlalchemy import Column, Integer, String, ForeignKey, DateTime, Enum, func
 from sqlalchemy.orm import relationship
 
 # Import Base AND the new schema_fkey helper
-from e2ude_core.db.base_session import Base, schema_fkey, DEFAULT_SCHEMA
+from e2ude_core.db.base_session import Base, schema_fkey, DEFAULT_SCHEMA, E2UDE_DATETIME
 
 
 class StatusEnum(PyEnum):
@@ -24,9 +24,10 @@ class ProcessingSession(Base):
     folder_id = Column(Integer, nullable=False, index=True)
     git_hash = Column(String(40), nullable=True, index=True)
     user_name = Column(String(40), nullable=True)
+    host_name = Column(String(40), nullable=True)
     status = Column(Enum(StatusEnum), default="UNINITIALIZED")
-    start_time = Column(DateTime, server_default=func.now())
-    end_time = Column(DateTime, nullable=True)
+    start_time = Column(E2UDE_DATETIME, server_default=func.now())
+    end_time = Column(E2UDE_DATETIME, nullable=True)
     jobs = relationship("ProcessingJob", back_populates="session", lazy="dynamic")
 
 

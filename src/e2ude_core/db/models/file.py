@@ -1,8 +1,8 @@
-from sqlalchemy import Column, Integer, String, ForeignKey
+from sqlalchemy import Column, Integer, String, ForeignKey, Index, VARBINARY
 from sqlalchemy.orm import relationship
 
 # Import Base AND the new schema_fkey helper
-from e2ude_core.db.base_session import Base, schema_fkey
+from e2ude_core.db.base_session import Base, schema_fkey, DEFAULT_SCHEMA, E2UDE_DATETIME
 
 
 class FolderMetadata(Base):
@@ -11,9 +11,16 @@ class FolderMetadata(Base):
     """
 
     __tablename__ = "metadata_folder"
-    id = Column("FolderID", Integer, primary_key=True)
-    path = Column("FolderPath", String(500), nullable=False)
+    id = Column("id", Integer, primary_key=True)
+    buno = Column("buno", String(6), nullable=False)
+    folder_datetime = Column("folder_datetime", E2UDE_DATETIME, nullable=False)
+    path = Column("path", String(500), unique=True, nullable=False)
     files = relationship("FileMetadata", back_populates="folder")
+
+    __table_args__ = (
+        Index("ix_unique_zip", "buno", "folder_datetime"),
+        {"schema": DEFAULT_SCHEMA},
+    )
 
 
 class FileHashRegistry(Base):
@@ -25,7 +32,7 @@ class FileHashRegistry(Base):
     __tablename__ = "metadata_hash_registry"
 
     id = Column(Integer, primary_key=True)
-    md5 = Column(String(32), unique=True, nullable=False, index=True)
+    md5 = Column(VARBINARY(16), unique=True, nullable=False, index=True)
 
 
 class FileMetadata(Base):
@@ -41,7 +48,7 @@ class FileMetadata(Base):
     # Use `schema_fkey` to reference schema-qualified columns for foreign keys.
     folder_id = Column(
         Integer,
-        ForeignKey(schema_fkey("metadata_folder.FolderID")),
+        ForeignKey(schema_fkey("metadata_folder.id")),
         nullable=False,
         index=True,
     )

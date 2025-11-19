@@ -17,6 +17,11 @@ from .rsm_mcdata import (
     McInDiscr,
 )
 
+from sqlalchemy.dialects.mssql import DATETIME2
+from sqlalchemy.sql.sqltypes import DateTime
+
+E2UDE_DATETIME = DateTime().with_variant(DATETIME2(0), "mssql")
+
 __all__ = [
     "Base",
     "SessionLocal",

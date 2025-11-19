@@ -1,6 +1,9 @@
 import logging
 import sqlalchemy as sa
 from sqlalchemy.schema import CreateSchema
+import re
+from datetime import datetime
+from pathlib import Path
 
 from e2ude_core.config import settings
 from e2ude_core.db.base_session import Base
@@ -44,27 +47,53 @@ def initialize_database(eng: sa.Engine, reset_tables: bool = False):
         Base.metadata.create_all(eng)
 
 
-def get_or_create_folder(eng: sa.Engine, folder_id: int, folder_path: str) -> bool:
+def get_or_create_folder(eng: sa.Engine, zip_path: Path) -> int | None:
     """
     Ensures the parent FolderMetadata row exists before processing.
-    Returns True on success, False on failure.
+    Returns the folder's ID on success, None on failure.
     """
+    match = re.search(r"([0-9]+)_([0-9]{8}_[0-9]{6})", zip_path.name)
+    if not match:
+        logging.warning(f"Could not strip info from {zip_path}")
+        return None, None
+    buno, dt_str = match.groups()
+    dt = datetime.strptime(dt_str, "%Y%m%d_%H%M%S")
     with eng.connect() as conn:
         try:
-            conn.execute(
-                FolderMetadata.__table__.insert(),
-                # Use model column names for insert: 'FolderID' and 'FolderPath'
-                {"FolderID": folder_id, "FolderPath": folder_path},
+            # First, try to find the existing folder by its unique buno/datetime combination.
+            existing_id = conn.execute(
+                sa.select(FolderMetadata.id).where(
+                    FolderMetadata.buno == buno, FolderMetadata.folder_datetime == dt
+                )
+            ).scalar_one_or_none()
+
+            if existing_id:
+                logger.debug(
+                    f"Folder for buno '{buno}' at '{dt}' already exists with ID {existing_id}."
+                )
+                return existing_id
+
+            # If it doesn't exist, insert it and get the new ID.
+            result = conn.execute(
+                sa.insert(FolderMetadata).values(
+                    path=str(zip_path), buno=buno, folder_datetime=dt
+                )
             )
             conn.commit()
-            logger.debug(f"Created new FolderID {folder_id}")
-            return True
-        except sa.exc.IntegrityError:
-            # This handles the case where the folder already exists.
+            new_id = result.inserted_primary_key[0]
+            logger.debug(f"Created new FolderMetadata record with ID {new_id}")
+            return new_id
+        except sa.exc.IntegrityError:  # Catches unique constraint violations
+            # This handles a race condition where another process inserted it.
             conn.rollback()
-            logger.debug(f"FolderID {folder_id} already exists.")
-            return True
+            logger.warning(
+                f"Race condition on insert for path '{zip_path}', re-querying."
+            )
+            return get_or_create_folder(eng, zip_path)
         except Exception as e:
-            logger.error(f"Failed to create FolderID {folder_id} in database: {e}")
+            logger.error(
+                f"Failed to get or create FolderMetadata for path '{zip_path}': {e}",
+                exc_info=True,
+            )
             conn.rollback()
-            return False
+            return None

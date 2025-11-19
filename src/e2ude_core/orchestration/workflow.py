@@ -27,9 +27,7 @@ def process_zip(
     Orchestrates the ETL workflow for a single zipped folder.
     """
     try:
-        with session_scope(
-            eng, folder_id, context.git_hash, context.user_name
-        ) as session_manager:
+        with session_scope(eng, folder_id, context) as session_manager:
             # 1. Calculate State
             work_delta = get_folder_work_delta(eng, folder_id)
             missing_items_lookup: Optional[List[Tuple[int, str]]] = None
@@ -46,17 +44,15 @@ def process_zip(
                 missing_items_lookup = work_delta.missing_items
 
             # 2. Unzip
-            with UnzipContext(zip_path) as extract_dir_path:
+            with UnzipContext(zip_path) as uc:
                 logger.info(
-                    f"[Session: {session_manager.session_id}] Files extracted to {extract_dir_path}"
+                    f"[Session: {session_manager.session_id}] Files extracted to {uc.temp_dir}"
                 )
 
                 # 3. Metadata Scan
                 files_to_process: List[FileToProcess] = []
                 try:
-                    scanner = MetadataScanHandler(
-                        eng, folder_id, extract_dir_path.temp_dir
-                    )
+                    scanner = MetadataScanHandler(eng, folder_id, uc.temp_dir)
                     scan_context = ScanJobContext(scanner)
                     with job_scope(session_manager, context=scan_context) as (
                         job_updater,

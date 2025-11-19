@@ -6,6 +6,7 @@ from sqlalchemy import (
 from sqlalchemy.orm import scoped_session, sessionmaker
 from e2ude_core.db.models import StatusEnum, ProcessingJob, ProcessingSession
 from e2ude_core.services.zip_io import FileType
+from e2ude_core.context import EtlContext
 
 logger = logging.getLogger(__name__)
 
@@ -74,11 +75,16 @@ class JobManager:
 class SessionManager:
     """Manages a ProcessingSession and its associated jobs."""
 
-    def __init__(self, eng, folder_id: int, git_hash: str = None, user_name=None):
+    def __init__(self, eng, folder_id: int, ctx: EtlContext = None):
+        if ctx is None:
+            user = host = gh = None
+        else:
+            user = host = gh = ctx.user_name, ctx.host_name, ctx.git_hash
         self.eng = eng
         self.Session = scoped_session(sessionmaker(bind=eng))
-        self.git_hash = git_hash
-        self.user_name = user_name
+        self.git_hash = gh
+        self.user_name = user
+        self.host_name = host
         self.session_id = self._create_session(folder_id)
         self._session = self.Session()
 
@@ -90,6 +96,7 @@ class SessionManager:
                 status=StatusEnum.RUNNING,
                 folder_id=folder_id,
                 user_name=self.user_name,
+                host_name=self.host_name,
             )
             session.add(new_session)
             session.commit()
@@ -111,7 +118,7 @@ class SessionManager:
         pipeline_id: str,
         file_id: int,
         hash_id: int,
-        dataset_key: str,  # <-- FIX: Add dataset_key back to signature
+        dataset_key: str,
     ) -> JobManager:
         """
         Idempotently gets an existing job or creates a new one for a specific
@@ -125,7 +132,7 @@ class SessionManager:
                     session_id=self.session_id,
                     pipeline_id=pipeline_id,
                     file_id=file_id,
-                    dataset_key=dataset_key,  # <-- FIX: Filter by key
+                    dataset_key=dataset_key,
                 )
                 .first()
             )
@@ -146,7 +153,7 @@ class SessionManager:
                 status=StatusEnum.PENDING,
                 file_id=file_id,
                 hash_id=hash_id,
-                dataset_key=dataset_key,  # <-- FIX: Add key to new job
+                dataset_key=dataset_key,
             )
             self._session.add(new_job)
             self._session.commit()

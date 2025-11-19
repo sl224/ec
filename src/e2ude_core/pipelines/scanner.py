@@ -59,15 +59,18 @@ class MetadataScanHandler:
         2. Diff: Detect new or changed files.
         3. Execute: Commit inserts and updates to the database.
         """
-        with self.eng.begin() as conn:
-            unique_md5s = list({f["md5"] for f in files})
-            hash_map = self._ensure_hashes_exist(conn, unique_md5s)
+        try:
+            with self.eng.begin() as conn:
+                unique_md5s = list({f["md5"] for f in files})
+                hash_map = self._ensure_hashes_exist(conn, unique_md5s)
 
-            to_insert, to_update = self._detect_changes(conn, files, hash_map)
+                to_insert, to_update = self._detect_changes(conn, files, hash_map)
+                self._commit_changes(conn, to_insert, to_update)
+        except Exception:
+            logger.error("Failed to upsert metadata.", exc_info=True)
+            raise
 
-            self._commit_changes(conn, to_insert, to_update)
-
-    def _ensure_hashes_exist(self, conn, unique_md5s: List[str]) -> Dict[str, int]:
+    def _ensure_hashes_exist(self, conn, unique_md5s: List[bytes]) -> Dict[str, int]:
         """
         Ensures all MD5 hashes exist in the `metadata_hash_registry` table
         and returns a map of `{md5: id}`. Uses a bulk-then-iterative
@@ -192,6 +195,7 @@ class MetadataScanHandler:
                     file_size_bytes=bindparam("b_file_size"),
                 )
             )
+
             conn.execute(stmt, to_update)
 
     def _fetch_existing_files(self) -> List[FileToProcess]:
