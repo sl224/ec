@@ -20,7 +20,7 @@ from pydantic_settings import (
 class LoggingConfig(BaseModel):
     level: str = "INFO"
     log_to_file: bool = False
-    log_file: str = "scan_job.log"
+    log_file: str = "e2ude_core.log"
     rotation_size_mb: int = 10
     rotation_backup_count: int = 5
     format: str = "%(asctime)s - %(name)s - %(levelname)s - %(message)s"
@@ -38,6 +38,7 @@ class MSSQLConfig(BaseModel):
     db_name: str = "AnalyticsDataMart"
     driver: str = "ODBC Driver 17 for SQL Server"
     trusted_connection: str = "yes"
+    schema_name: str = "e2ude_core_dev"
 
 
 DatabaseConfig = Union[SQLiteConfig, MSSQLConfig]
@@ -51,15 +52,15 @@ class AppSettings(BaseSettings):
 
     Defaults are defined in the model classes above.
     Overrides are loaded from (in order of priority):
-    1. Environment Variables (prefix: APP_)
-    2. TOML Config File (global_config.toml)
+    1. Environment Variables (prefix: E2UDE_)
+    2. TOML Config File (e2ude_config.toml)
     """
 
     logging: LoggingConfig = LoggingConfig()
     database: DatabaseConfig = Field(default=SQLiteConfig(), discriminator="type")
 
     model_config = SettingsConfigDict(
-        env_prefix="APP_",
+        env_prefix="E2UDE_",
         env_nested_delimiter="__",
         extra="ignore",
     )
@@ -78,7 +79,7 @@ class AppSettings(BaseSettings):
         # Locate User Config
         # Default: Look in current working directory
         # Override: Set E2UDE_CONFIG_PATH env var
-        user_config_path = os.getenv("E2UDE_CONFIG_PATH", "global_config.toml")
+        user_config_path = os.getenv("E2UDE_CONFIG_PATH", "e2ude_config.toml")
         user_config = Path(user_config_path)
 
         if user_config.is_file():

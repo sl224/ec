@@ -74,7 +74,7 @@ Generic orchestrators trigger based on "Events" or "Time". Our system triggers b
     ```
 
 4.  **Configure the Application:**
-    Create a `global_config.toml` in the project root (copy from provided example).
+    Create a `e2ude_config.toml` in the project root (copy from provided example).
     * **Database:** Configure your connection string.
     * **Schema:** Set `schema_name = "e2ude_core_dev"` for Blue/Green deployment support.
 

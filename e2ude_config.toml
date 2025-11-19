@@ -7,14 +7,15 @@ db_location = "db.sqlite3"
 in_memory = false
 
 # type = "mssql"
-# server_name = "RSSC30-DB0140" # AI_DEV_SERVER
-# db_name = "AnalyticsDataMart" # AI_PROD_DB
+# server_name = "RSSC30-DB0140"
+# db_name = "AnalyticsDataMart"
 # driver = "ODBC Driver 17 for SQL Server"
 # trusted_connection = "yes"
+# schema_name = "e2ude_core_dev"
 
 # --- Logging Settings ---
 [logging]
-level = "INFO"
+level = "DEBUG"
 log_to_file = true
 log_file = "main.log"
 rotation_size_mb = 10

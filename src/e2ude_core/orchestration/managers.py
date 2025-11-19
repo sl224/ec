@@ -162,7 +162,7 @@ class SessionManager:
                 file_id=spec.file_id,
                 target_name=spec.target_name,
                 handler_version=spec.handler_version,
-                file_type=spec.file_type,  # <--- POPULATING THE COLUMN
+                file_type=spec.file_type,
             )
             self._session.add(new_job)
             self._session.commit()

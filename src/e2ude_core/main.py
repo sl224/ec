@@ -1,7 +1,5 @@
 import logging
 import multiprocessing
-import gc
-import warnings
 from pathlib import Path
 from typing import Tuple, List, Any
 
@@ -60,6 +58,10 @@ def worker_task(args: Tuple[Any, str, int, Path, EtlContext]):
         process_zip(
             eng=worker_eng, folder_id=folder_id, zip_path=zip_path, context=context
         )
+    except KeyboardInterrupt:
+        # Workers should generally ignore SIGINT and let the parent terminate them,
+        # but catching it here prevents ugly tracebacks from every single worker.
+        pass
     except Exception as e:
         # Catch-all to ensure the worker doesn't crash silently
         # We use the root logger (via worker_configurer) which sends to queue
@@ -75,19 +77,9 @@ def main():
     Main entry point.
     """
     # 1. Enforce 'spawn' for safety with SQLAlchemy/ODBC
-    try:
-        multiprocessing.set_start_method("spawn", force=True)
-    except RuntimeError:
-        pass  # Already set
-
-    # Filter the noisy resource_tracker warning that occurs on shutdown
-    # with multiprocessing.Manager queues on macOS/Linux.
-    warnings.filterwarnings(
-        "ignore", category=UserWarning, module="multiprocessing.resource_tracker"
-    )
+    multiprocessing.set_start_method("spawn", force=True)
 
     # 2. Setup Centralized Logging Queue via Manager
-    # Manual manager control to ensure clean shutdown order
     manager = multiprocessing.Manager()
 
     try:
@@ -112,6 +104,7 @@ def main():
         worker_configurer(log_queue, settings.logging.level)
 
         # --- Main Logic ---
+        pool = None
         try:
             logger.info(
                 f"Starting E2UDE Core [Multiprocessing]. DB: {settings.database.type}"
@@ -141,7 +134,7 @@ def main():
 
                 logger.info("Pre-registering folders in database...")
                 for _, zip_path_obj in source_data:
-                    # Ensure it's a Path object (your get_data returns Path, but DB returns strings)
+                    # Ensure it's a Path object
                     zip_path = Path(zip_path_obj)
 
                     if not zip_path.exists():
@@ -165,26 +158,45 @@ def main():
                             )
                         )
 
-                # Close main engine before forking workers to be safe
                 main_eng.dispose()
 
                 # 6. Launch Multiprocessing Pool
                 if not work_items:
                     logger.info("No valid work items prepared.")
                 else:
-                    # Leave 2 CPUs free (1 for OS, 1 for Log Listener/Main)
                     cpu_count = multiprocessing.cpu_count()
-                    num_workers = max(1, cpu_count - 4)
+                    num_workers = max(1, cpu_count - 2)
+                    num_workers = 1
 
                     logger.info(
                         f"Dispatching {len(work_items)} jobs to {num_workers} workers."
                     )
 
-                    # Use map (blocks until all done) or imap (lazy)
-                    with multiprocessing.Pool(processes=num_workers) as pool:
-                        pool.map(worker_task, work_items)
+                    # Use context manager for Pool, but manage lifecycle for interrupt safety
+                    pool = multiprocessing.Pool(processes=num_workers)
+
+                    # Use map_async to allow the main thread to remain responsive to signals
+                    # Standard map() blocks completely and can swallow KeyboardInterrupt on some platforms
+                    result = pool.map_async(worker_task, work_items)
+
+                    # Wait for results with a timeout loop to allow signal processing
+                    # OR just use .get() which blocks but on Python 3 should handle SIGINT.
+                    # However, the safest way to handle Ctrl+C in pools is to catch it around the wait.
+                    result.get(timeout=None)
+
+                    pool.close()
+                    pool.join()
 
                     logger.info("All workers finished.")
+
+        except KeyboardInterrupt:
+            logger.debug(
+                "\n[Manual Interrupt] Interrupted by user. Terminating workers..."
+            )
+            if pool:
+                pool.terminate()
+                pool.join()
+            logger.warning("Processing interrupted by user.")
 
         except Exception as e:
             logger.critical(f"Main process terminated unexpectedly: {e}", exc_info=True)
@@ -195,18 +207,13 @@ def main():
             # 7. Cleanup Logging
             logger.info("Shutting down logging listener...")
             log_queue.put(None)
-
             listener.join()
 
-            # Explicitly delete the proxy and force GC to avoid resource_tracker warnings
-            del log_queue
-            gc.collect()
-
     finally:
-        # 8. Shutdown Manager EXPLICITLY after listener is dead
         manager.shutdown()
 
 
 if __name__ == "__main__":
+    # Freeze support is needed for Windows executables, but good practice generally
     multiprocessing.freeze_support()
     main()

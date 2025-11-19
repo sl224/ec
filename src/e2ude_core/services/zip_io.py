@@ -156,14 +156,23 @@ class RecursiveZipScanner:
 
             # Check if it's a nested zip
             if name.lower().endswith(".zip"):
-                # For nested zips, we must extract to a temp file to open with zipfile module
-                with tempfile.NamedTemporaryFile() as tmp_zip:
-                    tmp_zip.write(zf.read(name))
-                    tmp_zip.flush()
+                # Windows-safe nested zip handling:
+                # 1. Write to temp file
+                # 2. CLOSE the file handle explicitly (crucial for Windows locking)
+                # 3. Open with ZipFile
+                # 4. Manually delete
+
+                tmp_zip_path = None
+                try:
+                    # Create with delete=False so we can close it and re-open it
+                    with tempfile.NamedTemporaryFile(delete=False) as tmp_zip:
+                        tmp_zip.write(zf.read(name))
+                        tmp_zip_path = Path(tmp_zip.name)
+
+                    # Now that it is closed, we can open it for reading
                     try:
-                        with ZipFile(tmp_zip.name, "r") as nested_zf:
-                            # Mimic recursive_unzip behavior: nested zip contents go into folder named after stem
-                            # e.g. 'inner.zip' contents map to 'inner/file.txt'
+                        with ZipFile(tmp_zip_path, "r") as nested_zf:
+                            # Use stem for virtual folder name (e.g. nested.zip -> nested/)
                             zip_stem = Path(name).stem
                             new_parent = relative_parent / zip_stem
                             self._scan_zip(nested_zf, new_parent)
@@ -171,6 +180,17 @@ class RecursiveZipScanner:
                         logger.warning(
                             f"Failed to scan nested zip {current_rel_path}: {e}"
                         )
+
+                finally:
+                    # Ensure cleanup happens
+                    if tmp_zip_path and tmp_zip_path.exists():
+                        try:
+                            tmp_zip_path.unlink()
+                        except OSError as e:
+                            logger.warning(
+                                f"Failed to cleanup temp zip {tmp_zip_path}: {e}"
+                            )
+
                 continue
 
             # Identify File Type
@@ -227,16 +247,9 @@ def extract_specific_files(
 ):
     """
     Lazily extracts ONLY the requested files from the zip (handling nested zips).
-
-    Args:
-        root_zip_path: Path to the main zip file.
-        target_files: List of relative paths to extract (e.g. ["folder/data.csv", "nested/inner/file.txt"]).
-                      These paths MUST match the structure produced by recursive_unzip
-                      (i.e., nested zips are treated as folders).
-        output_dir: Physical directory to extract files into.
     """
     targets = set(str(Path(t)) for t in target_files)
-    logger.info(f"Lazy extracting {len(targets)} specific files...")
+    # logger.info(f"Lazy extracting {len(targets)} specific files...")
 
     _extract_layer(root_zip_path, Path(""), targets, output_dir)
 
@@ -249,38 +262,24 @@ def _extract_layer(
 ):
     """
     Recursive helper for lazy extraction.
-
-    Args:
-        zip_path: Physical path to the current zip file we are reading.
-        current_offset: The virtual path prefix this zip represents (e.g. "subfolder/nested").
-        targets: Full set of target paths we are looking for.
-        output_root: The base directory where files should eventually land.
     """
     with ZipFile(zip_path, "r") as zf:
         for name in zf.namelist():
             if name.endswith("/"):
                 continue
 
-            # Determine the relative path this member represents in the final structure
             member_path = Path(name)
-
-            # If member is "folder/file.txt", full virtual path is "offset/folder/file.txt"
-            # If offset is empty, it's just "folder/file.txt"
             full_virtual_path = current_offset / member_path
             full_virtual_str = str(full_virtual_path)
 
             # Case 1: It's a Nested Zip
             if name.lower().endswith(".zip"):
-                # Calculate the virtual folder this zip represents
-                # e.g. "data.zip" -> "data"
                 zip_virtual_folder = (
                     current_offset / member_path.parent / member_path.stem
                 )
                 zip_virtual_str = str(zip_virtual_folder)
 
-                # Optimization: Do any targets start with this prefix?
-                # We check if any target is inside this zip folder.
-                # e.g. target "data/config.xml" starts with "data"
+                # Check if any target is inside this zip folder
                 needed = False
                 for t in targets:
                     if t.startswith(zip_virtual_str):
@@ -288,26 +287,30 @@ def _extract_layer(
                         break
 
                 if needed:
-                    # Extract the nested zip to a temp file, process it, then delete it
-                    with tempfile.NamedTemporaryFile(
-                        suffix=".zip", delete=False
-                    ) as tmp_zip:
-                        tmp_zip.write(zf.read(name))
-                        tmp_zip_path = tmp_zip.name
-
+                    # Windows-safe extraction for nested zip
+                    tmp_zip_path = None
                     try:
+                        with tempfile.NamedTemporaryFile(
+                            suffix=".zip", delete=False
+                        ) as tmp_zip:
+                            tmp_zip.write(zf.read(name))
+                            tmp_zip_path = Path(tmp_zip.name)
+
+                        # Recursive call using the closed temp file path
                         _extract_layer(
                             tmp_zip_path, zip_virtual_folder, targets, output_root
                         )
+
                     finally:
-                        Path(tmp_zip_path).unlink(missing_ok=True)
+                        if tmp_zip_path and tmp_zip_path.exists():
+                            try:
+                                tmp_zip_path.unlink()
+                            except OSError:
+                                pass
 
             # Case 2: It's a regular file
             else:
-                # Check for exact match
                 if full_virtual_str in targets:
-                    # Extract!
-                    # We must calculate the physical destination
                     dest_path = output_root / full_virtual_path
                     dest_path.parent.mkdir(parents=True, exist_ok=True)
 

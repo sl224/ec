@@ -49,7 +49,7 @@ def setup_logging(settings: AppSettings) -> None:
                 "level": "WARNING",
                 "propagate": True,
             },
-            # Your application code
+            # e2ude_core application code
             "e2ude_core": {
                 "handlers": ["console"],
                 "level": cfg.level.upper(),

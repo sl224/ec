@@ -61,12 +61,13 @@ def get_folder_work_delta(
             .where(
                 ProcessingSession.folder_id == folder_id,
                 ProcessingJob.pipeline_id == MetadataScanHandler.PIPELINE_ID,
+                # ProcessingJob.handler_version == scan_version,
                 ProcessingJob.status == StatusEnum.COMPLETED,
             )
             .order_by(ProcessingJob.handler_version.desc())  # Get best version
             .limit(1)
         ).fetchone()
-
+        logger.debug(f"Found prexisting scan job {scan_job_row}")
         if not scan_job_row:
             # Never scanned
             return None
