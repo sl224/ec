@@ -2,7 +2,12 @@ import logging
 from dataclasses import dataclass
 from sqlalchemy import func
 from sqlalchemy.orm import scoped_session, sessionmaker
-from e2ude_core.db.models import StatusEnum, ProcessingJob, ProcessingSession, FileMetadata
+from e2ude_core.db.models import (
+    StatusEnum,
+    ProcessingJob,
+    ProcessingSession,
+    FileMetadata,
+)
 from e2ude_core.context import EtlContext
 from typing import TYPE_CHECKING, Optional
 
@@ -76,6 +81,7 @@ class JobManager:
 @dataclass
 class JobControl:
     """Yielded by job_scope to allow clean conditional execution."""
+
     manager: Optional["JobManager"]
     active: bool
 
@@ -87,7 +93,9 @@ class SessionManager:
         if ctx is None:
             user = host = gh = None
         else:
-            user = host = gh = ctx.user_name, ctx.host_name, ctx.git_hash
+            user = ctx.user_name
+            host = ctx.host_name
+            gh = ctx.git_hash
         self.eng = eng
         self.Session = scoped_session(sessionmaker(bind=eng))
         self.git_hash = gh
@@ -165,7 +173,9 @@ class SessionManager:
 
         except Exception as e:
             self._session.rollback()
-            logger.error(f"Failed to get or create job {spec.job_name}: {e}", exc_info=True)
+            logger.error(
+                f"Failed to get or create job {spec.job_name}: {e}", exc_info=True
+            )
             raise
 
     def check_for_completed_job(
@@ -177,8 +187,8 @@ class SessionManager:
     ) -> bool:
         """
         Checks if a COMPLETED job exists for a given pipeline, content hash,
-        and target name across *any* previous session. 
-        
+        and target name across *any* previous session.
+
         Used for skipping work (Semantic Invalidation).
         Returns True ONLY if work exists for this hash/target WITH a version >= required_version.
         """
@@ -196,10 +206,10 @@ class SessionManager:
                 )
                 .scalar()
             )
-            
+
             if best_existing_version is None:
-                return False # Never processed
-            
+                return False  # Never processed
+
             # Professional Semantic Invalidation:
             # If we have processed v2, and we are asking for v2, SKIP (True).
             # If we have processed v1, and we are asking for v2, RUN (False).

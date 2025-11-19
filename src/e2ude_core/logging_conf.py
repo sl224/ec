@@ -6,13 +6,14 @@ from typing import Any, Dict
 
 from e2ude_core.config import AppSettings
 
+
 def setup_logging(settings: AppSettings) -> None:
     """
     Configures logging using Python's dictConfig.
     This ensures file rotation, correct formatting, and granular control over libraries.
     """
     cfg = settings.logging
-    
+
     # Ensure log directory exists if we are logging to a file
     if cfg.log_to_file:
         log_path = Path(cfg.log_file)
@@ -80,9 +81,9 @@ def setup_logging(settings: AppSettings) -> None:
             "formatter": "standard",
             "encoding": "utf8",
         }
-        
+
         logging_config["handlers"]["file_rotate"] = file_handler_config
-        
+
         # Attach file handler to relevant loggers
         logging_config["loggers"][""]["handlers"].append("file_rotate")
         logging_config["loggers"]["e2ude_core"]["handlers"].append("file_rotate")

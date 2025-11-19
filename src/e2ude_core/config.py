@@ -16,6 +16,7 @@ from pydantic_settings import (
 
 # --- Configuration Models ---
 
+
 class LoggingConfig(BaseModel):
     level: str = "INFO"
     log_to_file: bool = False
@@ -24,10 +25,12 @@ class LoggingConfig(BaseModel):
     rotation_backup_count: int = 5
     format: str = "%(asctime)s - %(name)s - %(levelname)s - %(message)s"
 
+
 class SQLiteConfig(BaseModel):
     type: Literal["sqlite3"] = "sqlite3"
     db_location: str = "e2ude_core.sqlite3"
     in_memory: bool = False
+
 
 class MSSQLConfig(BaseModel):
     type: Literal["mssql"] = "mssql"
@@ -36,25 +39,28 @@ class MSSQLConfig(BaseModel):
     driver: str = "ODBC Driver 17 for SQL Server"
     trusted_connection: str = "yes"
 
+
 DatabaseConfig = Union[SQLiteConfig, MSSQLConfig]
 
 # --- The Settings Manager ---
 
+
 class AppSettings(BaseSettings):
     """
     Application Configuration.
-    
+
     Defaults are defined in the model classes above.
     Overrides are loaded from (in order of priority):
     1. Environment Variables (prefix: APP_)
     2. TOML Config File (global_config.toml)
     """
+
     logging: LoggingConfig = LoggingConfig()
     database: DatabaseConfig = Field(default=SQLiteConfig(), discriminator="type")
 
     model_config = SettingsConfigDict(
         env_prefix="APP_",
-        env_nested_delimiter="__", 
+        env_nested_delimiter="__",
         extra="ignore",
     )
 
@@ -67,7 +73,6 @@ class AppSettings(BaseSettings):
         dotenv_settings: DotEnvSettingsSource,
         file_secret_settings: SecretsSettingsSource,
     ) -> Tuple[Callable, ...]:
-        
         sources = [init_settings, env_settings, dotenv_settings]
 
         # Locate User Config
@@ -75,16 +80,22 @@ class AppSettings(BaseSettings):
         # Override: Set E2UDE_CONFIG_PATH env var
         user_config_path = os.getenv("E2UDE_CONFIG_PATH", "global_config.toml")
         user_config = Path(user_config_path)
-        
+
         if user_config.is_file():
             # Load TOML if it exists
-            sources.append(TomlConfigSettingsSource(settings_cls, toml_file=user_config))
+            sources.append(
+                TomlConfigSettingsSource(settings_cls, toml_file=user_config)
+            )
         elif "E2UDE_CONFIG_PATH" in os.environ:
             # Warn only if the user explicitly asked for a config file that is missing
-            print(f"WARNING: Config file specified but not found: {user_config}", file=sys.stderr)
+            print(
+                f"WARNING: Config file specified but not found: {user_config}",
+                file=sys.stderr,
+            )
 
         sources.append(file_secret_settings)
         return tuple(sources)
+
 
 # Singleton Instance
 try:

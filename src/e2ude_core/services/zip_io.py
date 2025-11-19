@@ -9,6 +9,7 @@ from typing import Union, List, Dict, Any, Set
 
 logger = logging.getLogger(__name__)
 
+
 class FileType(StrEnum):
     UNKNOWN = "UNKNOWN"
     # --- Existing Types ---
@@ -135,38 +136,41 @@ class RecursiveZipScanner:
     Scans a zip file recursively in memory (extracting nested zips to temp only when needed),
     calculating hashes and identifying file types without full extraction.
     """
+
     def __init__(self, root_zip_path: Path):
         self.root_zip_path = root_zip_path
         self.files_found: List[Dict[str, Any]] = []
 
     def scan(self) -> List[Dict[str, Any]]:
-        with ZipFile(self.root_zip_path, 'r') as zf:
+        with ZipFile(self.root_zip_path, "r") as zf:
             self._scan_zip(zf, Path(""))
         return self.files_found
 
     def _scan_zip(self, zf: ZipFile, relative_parent: Path):
         for name in zf.namelist():
             # Skip directories
-            if name.endswith('/'):
+            if name.endswith("/"):
                 continue
-                
+
             current_rel_path = relative_parent / name
-            
+
             # Check if it's a nested zip
-            if name.lower().endswith('.zip'):
+            if name.lower().endswith(".zip"):
                 # For nested zips, we must extract to a temp file to open with zipfile module
                 with tempfile.NamedTemporaryFile() as tmp_zip:
                     tmp_zip.write(zf.read(name))
                     tmp_zip.flush()
                     try:
-                        with ZipFile(tmp_zip.name, 'r') as nested_zf:
+                        with ZipFile(tmp_zip.name, "r") as nested_zf:
                             # Mimic recursive_unzip behavior: nested zip contents go into folder named after stem
                             # e.g. 'inner.zip' contents map to 'inner/file.txt'
                             zip_stem = Path(name).stem
                             new_parent = relative_parent / zip_stem
                             self._scan_zip(nested_zf, new_parent)
                     except Exception as e:
-                        logger.warning(f"Failed to scan nested zip {current_rel_path}: {e}")
+                        logger.warning(
+                            f"Failed to scan nested zip {current_rel_path}: {e}"
+                        )
                 continue
 
             # Identify File Type
@@ -175,18 +179,20 @@ class RecursiveZipScanner:
                 if current_rel_path.match(pattern):
                     f_type = ftype
                     break
-            
+
             # Calculate Hash
             with zf.open(name) as f_stream:
                 md5 = calculate_stream_md5(f_stream)
                 size = zf.getinfo(name).file_size
 
-            self.files_found.append({
-                "relative_path": str(current_rel_path),
-                "file_type": f_type.value,
-                "file_size_bytes": size,
-                "md5": md5
-            })
+            self.files_found.append(
+                {
+                    "relative_path": str(current_rel_path),
+                    "file_type": f_type.value,
+                    "file_size_bytes": size,
+                    "md5": md5,
+                }
+            )
 
 
 def recursive_unzip(extract_dir, zip_path):
@@ -207,7 +213,7 @@ def recursive_unzip(extract_dir, zip_path):
         extract_dir.mkdir(exist_ok=True)
         with ZipFile(zip_path, "r") as zip_ref:
             zip_ref.extractall(extract_dir)
-        zip_path.unlink() # Delete the zip file after extraction
+        zip_path.unlink()  # Delete the zip file after extraction
         for new_zip_path in extract_dir.glob("*.zip"):
             to_unzip.append(Path(new_zip_path))
         nesting += 1
@@ -216,51 +222,60 @@ def recursive_unzip(extract_dir, zip_path):
             raise Exception("ERROR: hit max nesting limit")
 
 
-def extract_specific_files(root_zip_path: Path, target_files: List[str], output_dir: Path):
+def extract_specific_files(
+    root_zip_path: Path, target_files: List[str], output_dir: Path
+):
     """
     Lazily extracts ONLY the requested files from the zip (handling nested zips).
-    
+
     Args:
         root_zip_path: Path to the main zip file.
         target_files: List of relative paths to extract (e.g. ["folder/data.csv", "nested/inner/file.txt"]).
-                      These paths MUST match the structure produced by recursive_unzip 
+                      These paths MUST match the structure produced by recursive_unzip
                       (i.e., nested zips are treated as folders).
         output_dir: Physical directory to extract files into.
     """
     targets = set(str(Path(t)) for t in target_files)
     logger.info(f"Lazy extracting {len(targets)} specific files...")
-    
+
     _extract_layer(root_zip_path, Path(""), targets, output_dir)
 
 
-def _extract_layer(zip_path: Union[Path, str], current_offset: Path, targets: Set[str], output_root: Path):
+def _extract_layer(
+    zip_path: Union[Path, str],
+    current_offset: Path,
+    targets: Set[str],
+    output_root: Path,
+):
     """
     Recursive helper for lazy extraction.
-    
+
     Args:
         zip_path: Physical path to the current zip file we are reading.
         current_offset: The virtual path prefix this zip represents (e.g. "subfolder/nested").
         targets: Full set of target paths we are looking for.
         output_root: The base directory where files should eventually land.
     """
-    with ZipFile(zip_path, 'r') as zf:
+    with ZipFile(zip_path, "r") as zf:
         for name in zf.namelist():
-            if name.endswith('/'): 
+            if name.endswith("/"):
                 continue
 
             # Determine the relative path this member represents in the final structure
             member_path = Path(name)
-            
+
             # If member is "folder/file.txt", full virtual path is "offset/folder/file.txt"
             # If offset is empty, it's just "folder/file.txt"
             full_virtual_path = current_offset / member_path
             full_virtual_str = str(full_virtual_path)
 
             # Case 1: It's a Nested Zip
-            if name.lower().endswith('.zip'):
+            if name.lower().endswith(".zip"):
                 # Calculate the virtual folder this zip represents
                 # e.g. "data.zip" -> "data"
-                zip_virtual_folder = current_offset / member_path.parent / member_path.stem
+                zip_virtual_folder = (
+                    current_offset / member_path.parent / member_path.stem
+                )
                 zip_virtual_str = str(zip_virtual_folder)
 
                 # Optimization: Do any targets start with this prefix?
@@ -271,15 +286,19 @@ def _extract_layer(zip_path: Union[Path, str], current_offset: Path, targets: Se
                     if t.startswith(zip_virtual_str):
                         needed = True
                         break
-                
+
                 if needed:
                     # Extract the nested zip to a temp file, process it, then delete it
-                    with tempfile.NamedTemporaryFile(suffix=".zip", delete=False) as tmp_zip:
+                    with tempfile.NamedTemporaryFile(
+                        suffix=".zip", delete=False
+                    ) as tmp_zip:
                         tmp_zip.write(zf.read(name))
                         tmp_zip_path = tmp_zip.name
-                    
+
                     try:
-                        _extract_layer(tmp_zip_path, zip_virtual_folder, targets, output_root)
+                        _extract_layer(
+                            tmp_zip_path, zip_virtual_folder, targets, output_root
+                        )
                     finally:
                         Path(tmp_zip_path).unlink(missing_ok=True)
 
@@ -291,6 +310,6 @@ def _extract_layer(zip_path: Union[Path, str], current_offset: Path, targets: Se
                     # We must calculate the physical destination
                     dest_path = output_root / full_virtual_path
                     dest_path.parent.mkdir(parents=True, exist_ok=True)
-                    
-                    with dest_path.open('wb') as f_out:
+
+                    with dest_path.open("wb") as f_out:
                         f_out.write(zf.read(name))

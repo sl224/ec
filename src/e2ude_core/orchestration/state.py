@@ -34,16 +34,18 @@ class WorkDelta:
 # --- State Calculation Function ---
 
 
-def get_folder_work_delta(eng: sa.Engine, folder_id: int, scan_version: int = 1) -> Optional[WorkDelta]:
+def get_folder_work_delta(
+    eng: sa.Engine, folder_id: int, scan_version: int = 1
+) -> Optional[WorkDelta]:
     """
     Determines the processing state of a folder by comparing the
     'Actual' completed jobs against the 'Expected' registry requirements.
-    
+
     Args:
         eng: Database engine.
         folder_id: The folder to check.
         scan_version: The required version of the MetadataScanHandler.
-                      If the last successful scan was older than this, 
+                      If the last successful scan was older than this,
                       returns None (forcing a re-scan).
 
     Returns:
@@ -51,7 +53,7 @@ def get_folder_work_delta(eng: sa.Engine, folder_id: int, scan_version: int = 1)
         WorkDelta if scan is valid (status UP_TO_DATE or PARTIAL).
     """
     with eng.connect() as conn:
-        # 1. Check if the folder has ever been successfully scanned 
+        # 1. Check if the folder has ever been successfully scanned
         #    AND if that scan meets the current version requirement.
         scan_job_row = conn.execute(
             sa.select(ProcessingJob.handler_version)
@@ -61,22 +63,24 @@ def get_folder_work_delta(eng: sa.Engine, folder_id: int, scan_version: int = 1)
                 ProcessingJob.pipeline_id == MetadataScanHandler.PIPELINE_ID,
                 ProcessingJob.status == StatusEnum.COMPLETED,
             )
-            .order_by(ProcessingJob.handler_version.desc()) # Get best version
+            .order_by(ProcessingJob.handler_version.desc())  # Get best version
             .limit(1)
         ).fetchone()
 
         if not scan_job_row:
             # Never scanned
             return None
-        
+
         last_scan_version = scan_job_row[0]
         if last_scan_version < scan_version:
-            logger.info(f"Folder {folder_id} scan outdated (v{last_scan_version} < v{scan_version}). Re-scanning.")
+            logger.info(
+                f"Folder {folder_id} scan outdated (v{last_scan_version} < v{scan_version}). Re-scanning."
+            )
             return None
 
         # 2. Get ACTUAL state (all completed jobs)
-        # Note: We might want to check versions here too, but typically 
-        # semantic invalidation happens at the job_scope level. 
+        # Note: We might want to check versions here too, but typically
+        # semantic invalidation happens at the job_scope level.
         # Here we just check "Is it done?".
         actual_stmt = (
             sa.select(ProcessingJob.hash_id, ProcessingJob.target_name)

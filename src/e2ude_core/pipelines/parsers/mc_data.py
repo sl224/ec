@@ -4,6 +4,7 @@ from pathlib import Path
 from typing import Dict, Type
 
 from e2ude_core.db.base_session import Base
+
 # Import the models this parser produces
 from e2ude_core.db.models import (
     Rpcs,
@@ -28,7 +29,8 @@ from e2ude_core.pipelines.parsers.mc_data_scrape import (
     scrape_rpcs_pres_record,
     scrape_rpcs_record,
 )
-# Maps message type strings from the log file to their corresponding model and scrape function.
+
+# Maps message type strings to a model and scrape function.
 parser_map = {
     "RPCS:": (Rpcs, scrape_rpcs_record),
     "RPCS_PRES:": (RpcsPres, scrape_rpcs_pres_record),
@@ -44,18 +46,16 @@ parser_map = {
 
 def parse_mcdata(file_path: Path) -> Dict[Type[Base], pd.DataFrame]:
     """
-    Parses an MCData file, scrapes each line, builds DataFrames,
-    and cleans them according to their SQLAlchemy model definitions.
+    Parses an MCData file, scrapes each line, and builds cleaned DataFrames
+    for each message type.
     """
     with open(file_path, "r", encoding="utf-8", errors="ignore") as f:
         lines = f.readlines()
 
-    # Group raw row data by message type
     data = defaultdict(list)
 
     for i, line in enumerate(lines):
         try:
-            # The 2nd token is the message type
             tokens = line.split(",", maxsplit=2)
             if len(tokens) < 2:
                 continue  # Skip blank lines
@@ -63,10 +63,10 @@ def parse_mcdata(file_path: Path) -> Dict[Type[Base], pd.DataFrame]:
 
             if message_type_str in parser_map:
                 model, scrape_func = parser_map[message_type_str]
-                
+
                 row_dict = scrape_func(line)
                 row_dict["LineNumber"] = i
-                
+
                 data[message_type_str].append(row_dict)
         except Exception:
             continue
@@ -83,11 +83,9 @@ def parse_mcdata(file_path: Path) -> Dict[Type[Base], pd.DataFrame]:
             clean_df = clean_dataframe_from_model(df, model)
             ret_payload[model] = clean_df
         else:
-            # Create an empty DataFrame with the correct columns if no data was found
+            # Create an empty DataFrame with correct columns if no data was found.
             cols = [c.name for c in model.__table__.columns]
-            # Remove columns that are auto-generated or not expected from the parser
-            cols_to_keep = [c for c in cols if c not in ('id', 'hash_id')]
+            cols_to_keep = [c for c in cols if c not in ("id", "hash_id")]
             ret_payload[model] = pd.DataFrame(columns=cols_to_keep)
-
 
     return ret_payload

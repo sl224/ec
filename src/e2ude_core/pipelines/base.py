@@ -27,6 +27,7 @@ logger = logging.getLogger(__name__)
 @runtime_checkable
 class HashVerifiableModel(Protocol):
     """Protocol for SQLAlchemy models that are keyed by `hash_id`."""
+
     __tablename__: str
     __table__: Any
     hash_id: Any
@@ -41,6 +42,7 @@ class BaseHandler(ABC):
     Abstract Base Class for all ETL Handlers.
     Enforces the contract that the Orchestrator relies on.
     """
+
     PIPELINE_ID: str
     VERSION: int = 1
     expected_models: List[Type[Base]]
@@ -82,9 +84,7 @@ class FileHandler(BaseHandler):
             raise ValueError(f"[{pipeline_id}] 'table_config' list cannot be empty.")
 
         self.expected_models = table_config
-        self.model_map = {
-            model.__tablename__: model for model in table_config
-        }
+        self.model_map = {model.__tablename__: model for model in table_config}
 
         for model in self.expected_models:
             if not hasattr(model, "hash_id"):

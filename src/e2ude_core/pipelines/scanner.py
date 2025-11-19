@@ -26,7 +26,8 @@ class FileToProcess(NamedTuple):
 class MetadataScanHandler(BaseHandler):
     PIPELINE_ID = "MetadataScanHandler"
     VERSION = 1
-    expected_models = [FileMetadata]
+    # Explicitly define BOTH output tables this handler populates
+    expected_models = [FileMetadata, FileHashRegistry]
 
     def __init__(self, eng: sa.Engine, folder_id: int, extract_dir: Path):
         self.eng = eng
@@ -37,16 +38,16 @@ class MetadataScanHandler(BaseHandler):
     def run(
         self,
         eng: sa.Engine,
-        hash_id: int|None,  # Unused for scanner (can be None/0)
-        file_path: Path, # This is the Zip Path
+        hash_id: int,  # Unused for scanner (can be None/0)
+        file_path: Path,  # This is the Zip Path
         job_updater: JobManager,
-        keys_to_process: List[str] = None, # Unused
+        keys_to_process: List[str] = None,  # Unused
     ):
         """
         Implements BaseHandler.run contract.
         """
         job_updater.mark_running("Scanning zip archive structure...")
-        
+
         scanner = RecursiveZipScanner(file_path)
         raw_files = scanner.scan()
 
@@ -56,9 +57,10 @@ class MetadataScanHandler(BaseHandler):
             return
 
         job_updater.mark_running(f"Cataloging {len(raw_files)} files...")
-        
+
         self.upsert(raw_files)
 
+        # Report Total Files Found as the "Rows" metric for the Scan Job
         job_updater._rows_uploaded_in_scope = len(raw_files)
         logger.info(f"[{self.PIPELINE_ID}] Cataloged {len(raw_files)} files.")
 
@@ -108,7 +110,9 @@ class MetadataScanHandler(BaseHandler):
                     insert(FileHashRegistry), [{"md5": h} for h in missing_hashes]
                 )
             except IntegrityError:
-                logger.warning("Hash collision in batch. Switching to iterative insert.")
+                logger.warning(
+                    "Hash collision in batch. Switching to iterative insert."
+                )
                 for h in missing_hashes:
                     try:
                         conn.execute(insert(FileHashRegistry).values(md5=h))
@@ -139,25 +143,30 @@ class MetadataScanHandler(BaseHandler):
         for f in files:
             path = f["relative_path"]
             new_hid = hash_map.get(f["md5"])
-            if not new_hid: continue
+            if not new_hid:
+                continue
 
             if path in existing_map:
                 db_id, db_hid = existing_map[path]
                 if db_hid != new_hid:
-                    to_update.append({
-                        "b_id": db_id,
-                        "b_hash_id": new_hid,
-                        "b_file_type": f["file_type"],
-                        "b_file_size": f["file_size_bytes"],
-                    })
+                    to_update.append(
+                        {
+                            "b_id": db_id,
+                            "b_hash_id": new_hid,
+                            "b_file_type": f["file_type"],
+                            "b_file_size": f["file_size_bytes"],
+                        }
+                    )
             else:
-                to_insert.append({
-                    "folder_id": self.folder_id,
-                    "relative_path": path,
-                    "hash_id": new_hid,
-                    "file_type": f["file_type"],
-                    "file_size_bytes": f["file_size_bytes"],
-                })
+                to_insert.append(
+                    {
+                        "folder_id": self.folder_id,
+                        "relative_path": path,
+                        "hash_id": new_hid,
+                        "file_type": f["file_type"],
+                        "file_size_bytes": f["file_size_bytes"],
+                    }
+                )
         return to_insert, to_update
 
     def _commit_changes(self, conn, to_insert, to_update):

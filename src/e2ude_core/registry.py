@@ -1,8 +1,17 @@
 from typing import Dict
 
-from e2ude_core.pipelines.base import BaseHandler, FileHandler # Import Base
+from e2ude_core.pipelines.base import BaseHandler, FileHandler  # Import Base
 from e2ude_core.db.models import (
-    NavData, PfcDb, RadarState, RfcDb, RotoScan, Rpcs, RpcsPres, TmptrData, LcsTemp, McInDiscr,
+    NavData,
+    PfcDb,
+    RadarState,
+    RfcDb,
+    RotoScan,
+    Rpcs,
+    RpcsPres,
+    TmptrData,
+    LcsTemp,
+    McInDiscr,
 )
 from e2ude_core.services.zip_io import FileType
 from e2ude_core.pipelines.parsers.tmptr import parse_tmptr_dataframe
@@ -19,7 +28,15 @@ HANDLER_REGISTRY: Dict[str, BaseHandler] = {
         pipeline_id="mcdata",
         parser_func=parse_mcdata,
         table_config=[
-            NavData, Rpcs, RpcsPres, RadarState, RotoScan, PfcDb, RfcDb, LcsTemp, McInDiscr,
+            NavData,
+            Rpcs,
+            RpcsPres,
+            RadarState,
+            RotoScan,
+            PfcDb,
+            RfcDb,
+            LcsTemp,
+            McInDiscr,
         ],
     ),
 }

@@ -10,7 +10,6 @@ if TYPE_CHECKING:
     from e2ude_core.orchestration.spec import JobSpec
 
 logger = logging.getLogger(__name__)
-logger.setLevel("DEBUG")
 
 
 @contextmanager
@@ -41,13 +40,13 @@ def job_scope(
 ):
     """
     Manages the life-cycle of a specific processing job.
-    
+
     Handles:
     1. Idempotency Check: Skips if work is already done (checking versions).
     2. Job Creation: Creates a PENDING job record.
     3. Execution Guard: Yields control to the caller to run the actual logic.
     4. Completion: Marks the job as COMPLETED or ERROR.
-    
+
     Usage:
         with job_scope(manager, spec) as job:
             if job.active:
@@ -67,7 +66,9 @@ def job_scope(
                 required_version=spec.handler_version,
             )
             if is_completed:
-                logger.debug(f"Skipping {spec.job_name}: Already Complete (Version {spec.handler_version}+).")
+                logger.debug(
+                    f"Skipping {spec.job_name}: Already Complete (Version {spec.handler_version}+)."
+                )
                 yield JobControl(manager=None, active=False)
                 return
 
@@ -78,7 +79,9 @@ def job_scope(
         # If the job exists in this session and is already done, we skip it.
         current_status = job_updater.get_status()
         if current_status == StatusEnum.COMPLETED:
-            logger.debug(f"Skipping {spec.job_name}: already COMPLETED in current session.")
+            logger.debug(
+                f"Skipping {spec.job_name}: already COMPLETED in current session."
+            )
             yield JobControl(manager=job_updater, active=False)
             return
 

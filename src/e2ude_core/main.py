@@ -11,12 +11,13 @@ from e2ude_core.orchestration.workflow import process_zip
 from e2ude_core.db import access as sql_io
 from e2ude_core.config import settings
 from e2ude_core.db.setup import initialize_database, get_or_create_folder
+from e2ude_core.logging_conf import setup_logging
 from sqlalchemy import text
 
 # --- Setup ---
-logging.basicConfig(
-    level=logging.INFO, format="%(asctime)s - %(name)s - %(levelname)s - %(message)s"
-)
+# Initialize logging using the professional config logic.
+# This handles file rotation, library silencing, and formatting automatically.
+setup_logging(settings)
 logger = logging.getLogger(__name__)
 
 
@@ -53,7 +54,20 @@ if __name__ == "__main__":
 
     # 3. Setup Test Data
     # id_paths = get_data(eng)
-    id_paths = [(0, Path(r'tests/static_assets/zips/166501_20240212_185419_000_TransportRSM.fpkg.e2d.zip'))]
+    id_paths = [
+        (
+            0,
+            Path(
+                r"tests/static_assets/zips/166501_20240212_185419_000_TransportRSM.fpkg.e2d.zip"
+            ),
+        ),
+        (
+            1,
+            Path(
+                r"tests/static_assets/zips/169069_20250203_004745_025_TransportRSM.fpkg.e2d.zip"
+            ),
+        ),
+    ]
 
     # 4. Main Processing Loop
     for folder_id, zip_path_str in tqdm(id_paths, desc="Overall Progress"):

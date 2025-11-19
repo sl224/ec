@@ -1,9 +1,8 @@
-from pandas import DataFrame
-
 """
 Scraping functions for individual record types within an MCData file.
 Refactored to return dictionaries for Schema independence.
 """
+
 
 def scrape_nav_record(text):
     """
@@ -21,25 +20,48 @@ def scrape_nav_record(text):
 
     flatten_idx = 15
     data = _split_filter_line(text[2:])
-    
+
     assert len(data[flatten_idx]) == 16
     bool_chars = [char for char in data[flatten_idx]]
-    
+
     values = data[:flatten_idx] + bool_chars + data[flatten_idx + 1 :]
-    
+
     keys = [
-        "Nav Mode", "Magnetic Variation", "True Air Speed", "Calibrated Airspeed",
-        "True Heading", "Magnetic Heading", "Vertical Velocity", "Altitude",
-        "Altitude Source", "ADC Altitude", "Ground Speed", "O/S is Airborne",
-        "WindSpeed", "WindDirection", "ADC Go", "GPS Go", "INS Go",
-        "Aircraft Navigation Valid", "Relative Navigation Valid", "Position Valid",
-        "Altitude Valid", "Horizontal Velocity Valid", "Vertical Velocity Valid",
-        "True Heading Valid", "Calibrated Airspeed Valid", "Ground Track Valid",
-        "Ground Speed Valid", "Aircraft Roll Valid", "Aircraft Pitch Valid",
-        "True Airspeed Valid", "O/S FOM", "GPS FOM"
+        "Nav Mode",
+        "Magnetic Variation",
+        "True Air Speed",
+        "Calibrated Airspeed",
+        "True Heading",
+        "Magnetic Heading",
+        "Vertical Velocity",
+        "Altitude",
+        "Altitude Source",
+        "ADC Altitude",
+        "Ground Speed",
+        "O/S is Airborne",
+        "WindSpeed",
+        "WindDirection",
+        "ADC Go",
+        "GPS Go",
+        "INS Go",
+        "Aircraft Navigation Valid",
+        "Relative Navigation Valid",
+        "Position Valid",
+        "Altitude Valid",
+        "Horizontal Velocity Valid",
+        "Vertical Velocity Valid",
+        "True Heading Valid",
+        "Calibrated Airspeed Valid",
+        "Ground Track Valid",
+        "Ground Speed Valid",
+        "Aircraft Roll Valid",
+        "Aircraft Pitch Valid",
+        "True Airspeed Valid",
+        "O/S FOM",
+        "GPS FOM",
     ]
 
-    full_tokens = text.split(',')
+    full_tokens = text.split(",")
     system_time = full_tokens[3]
 
     row_dict = dict(zip(keys, values))
@@ -84,7 +106,7 @@ def scrape_pfc_db_record(text):
         "Processed Fault Code": tokens[6],
         "Fault Description": tokens[4],
         "Subsystem": tokens[5],
-        "Mission Critical Result": tokens[8] 
+        "Mission Critical Result": tokens[8],
     }
 
 
@@ -115,7 +137,7 @@ def scrape_rfc_db_record(text):
 
     """
     tokens = text.split(",")
-    
+
     row = {
         "System TimeStamp": tokens[3],
         "FCI Indicator": tokens[4],
@@ -123,19 +145,19 @@ def scrape_rfc_db_record(text):
         "Fault Status": tokens[6],
         "TimeStamp": tokens[7],
         "Bit Type Indicator": tokens[8],
-        "Consecutive True Count": tokens[10], 
-        "Total True Count": tokens[12],       
+        "Consecutive True Count": tokens[10],
+        "Total True Count": tokens[12],
         "Consecutive False Count": tokens[14],
-        "Total False Count": tokens[16],      
+        "Total False Count": tokens[16],
         "Total Count": tokens[18],
         "System Fault Code": tokens[19],
         "RDR Component": tokens[20],
-        "Appended Data": tokens[21]
+        "Appended Data": tokens[21],
     }
-    
+
     date_part = tokens[3].split(" ")[0]
     row["TimeStamp"] = f"{date_part} {tokens[7]}"
-    
+
     return row
 
 
@@ -163,7 +185,7 @@ def scrape_rpcs_record(text):
     row = {}
     comma_split_tokens = text.split(",")
     row["System TimeStamp"] = comma_split_tokens[3]
-    
+
     param_to_col = {
         "HUM_B": "Humidity B",
         "SEC_HI_PRE": "Secondary High Pressure",
@@ -171,7 +193,7 @@ def scrape_rpcs_record(text):
         "D_PRES": "Delta Pressure",
         "HUM_A": "Humidity A",
         "MAN_PRE": "Manifold Pressure",
-        "PRI_HI_PRE": "Primary High Pressure"
+        "PRI_HI_PRE": "Primary High Pressure",
     }
 
     BINARY_START_READ_IDX = 4
@@ -182,11 +204,11 @@ def scrape_rpcs_record(text):
         bin_data_word = comma_split_tokens[i + 1].split(" ")[2]
         dec = int(bin_data_word, 2)
         param_val = decode(dec, token)
-        
+
         col_name = param_to_col.get(token)
         if col_name:
             row[col_name] = round(param_val, 3)
-            
+
     return row
 
 
@@ -194,14 +216,20 @@ def scrape_rdr_state_record(text):
     """
     Parses an RDR_STATE line.
     """
-    row = []
     stripped = [token for token in text.split(",") if token and token != "\n"]
     keys = [
-        "System TimeStamp", "RSCP_OFF_Switch_State", "RSCP_ON_Switch_State",
-        "RSCP_STBY_Switch_State", "RSCP_OPER_Switch_State", "Radar_State",
-        "Transmitter_Power_is_HIGH", "Transmitter_Power_is_MED",
-        "Transmitter_Power_is_LOW", "Transmitter_Power_is_ON_DECK",
-        "EMIRS_Power_Switch_State", "EMIRS_Power_State"
+        "System TimeStamp",
+        "RSCP_OFF_Switch_State",
+        "RSCP_ON_Switch_State",
+        "RSCP_STBY_Switch_State",
+        "RSCP_OPER_Switch_State",
+        "Radar_State",
+        "Transmitter_Power_is_HIGH",
+        "Transmitter_Power_is_MED",
+        "Transmitter_Power_is_LOW",
+        "Transmitter_Power_is_ON_DECK",
+        "EMIRS_Power_Switch_State",
+        "EMIRS_Power_State",
     ]
     values = [stripped[i] for i in range(2, len(stripped), 2)]
     return dict(zip(keys, values))
@@ -230,18 +258,36 @@ def scrape_mc_in_discr(text):
     Parses an MC_IN_DISCR line by slicing tokens based on fixed positions.
     """
     text = text.split(",")
-    values = [text[3]] + text[5:7] + text[8:14] + text[15:19] + text[20:24] + text[25:33]
-    
+    values = (
+        [text[3]] + text[5:7] + text[8:14] + text[15:19] + text[20:24] + text[25:33]
+    )
+
     keys = [
-        "System TimeStamp", 
-        "Power On", "Cooling Air", 
-        "External Temperature Sensor", "Internal Temperature 1 Sensor",
-        "Internal Temperature 2 Sensor", "Internal Temperature 3 Sensor",
-        "External Relative Humidity", "Dew Point",
-        "Air Valve Closed", "Air Valve Open", "Air Flow Enabled", "H Bridge Fault",
-        "PBIT Byte 1 DPR R Fault", "PBIT Byte 1 DPR W Fault", "PBIT Byte 1 DPR WR Fault", "PBIT Byte 1 Air Valve Fault",
-        "PBIT Byte 2 EXT H Fault", "PBIT Byte 2 EXT T Fault", "PBIT Byte 2 Valve Pos Fault", "PBIT Byte 2 OPC Fault",
-        "PBIT Byte 2 INT T1 Fault", "PBIT Byte 2 INT T2 Fault", "PBIT Byte 2 INT T3 Fault", "PBIT Byte 2 NVSTORE Fault"
+        "System TimeStamp",
+        "Power On",
+        "Cooling Air",
+        "External Temperature Sensor",
+        "Internal Temperature 1 Sensor",
+        "Internal Temperature 2 Sensor",
+        "Internal Temperature 3 Sensor",
+        "External Relative Humidity",
+        "Dew Point",
+        "Air Valve Closed",
+        "Air Valve Open",
+        "Air Flow Enabled",
+        "H Bridge Fault",
+        "PBIT Byte 1 DPR R Fault",
+        "PBIT Byte 1 DPR W Fault",
+        "PBIT Byte 1 DPR WR Fault",
+        "PBIT Byte 1 Air Valve Fault",
+        "PBIT Byte 2 EXT H Fault",
+        "PBIT Byte 2 EXT T Fault",
+        "PBIT Byte 2 Valve Pos Fault",
+        "PBIT Byte 2 OPC Fault",
+        "PBIT Byte 2 INT T1 Fault",
+        "PBIT Byte 2 INT T2 Fault",
+        "PBIT Byte 2 INT T3 Fault",
+        "PBIT Byte 2 NVSTORE Fault",
     ]
-    
+
     return dict(zip(keys, values))

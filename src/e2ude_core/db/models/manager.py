@@ -2,7 +2,6 @@ from enum import Enum as PyEnum
 from sqlalchemy import Column, Integer, String, ForeignKey, DateTime, Enum, func, Index
 from sqlalchemy.orm import relationship
 
-# Import Base AND the new schema_fkey helper
 from e2ude_core.db.base_session import Base, schema_fkey, DEFAULT_SCHEMA, E2UDE_DATETIME
 
 
