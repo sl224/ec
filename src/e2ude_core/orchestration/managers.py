@@ -1,13 +1,13 @@
 import logging
-
 from dataclasses import dataclass
-from sqlalchemy import (
-    func,
-)
+from sqlalchemy import func
 from sqlalchemy.orm import scoped_session, sessionmaker
-from e2ude_core.db.models import StatusEnum, ProcessingJob, ProcessingSession
-from e2ude_core.services.zip_io import FileType
+from e2ude_core.db.models import StatusEnum, ProcessingJob, ProcessingSession, FileMetadata
 from e2ude_core.context import EtlContext
+from typing import TYPE_CHECKING, Optional
+
+if TYPE_CHECKING:
+    from e2ude_core.orchestration.spec import JobSpec
 
 logger = logging.getLogger(__name__)
 
@@ -76,7 +76,7 @@ class JobManager:
 @dataclass
 class JobControl:
     """Yielded by job_scope to allow clean conditional execution."""
-    manager: "JobManager"
+    manager: Optional["JobManager"]
     active: bool
 
 
@@ -121,12 +121,7 @@ class SessionManager:
 
     def get_or_create_job(
         self,
-        job_name: str,
-        file_type: FileType,
-        pipeline_id: str,
-        file_id: int,
-        hash_id: int,
-        dataset_key: str,
+        spec: "JobSpec",
     ) -> JobManager:
         """
         Idempotently gets an existing job or creates a new one for a specific
@@ -138,67 +133,80 @@ class SessionManager:
                 self._session.query(ProcessingJob)
                 .filter_by(
                     session_id=self.session_id,
-                    pipeline_id=pipeline_id,
-                    file_id=file_id,
-                    dataset_key=dataset_key,
+                    pipeline_id=spec.pipeline_id,
+                    file_id=spec.file_id,
+                    target_name=spec.target_name,
                 )
                 .first()
             )
 
             if existing_job:
                 logger.debug(
-                    f"Found existing job {existing_job.id} for {pipeline_id} / FileID {file_id} / Key {dataset_key}"
+                    f"Found existing job {existing_job.id} for {spec.pipeline_id} / FileID {spec.file_id} / Target {spec.target_name}"
                 )
                 return JobManager(self.eng, existing_job.id)
 
             # Create a new job if one doesn't exist for this session.
-            logger.info(f"Creating new job for {job_name}")
+            logger.info(f"Creating new job for {spec.job_name}")
             new_job = ProcessingJob(
                 session_id=self.session_id,
-                job_name=job_name,
-                file_type=file_type,
-                pipeline_id=pipeline_id,
+                job_name=spec.job_name,
+                pipeline_id=spec.pipeline_id,
                 status=StatusEnum.PENDING,
-                file_id=file_id,
-                hash_id=hash_id,
-                dataset_key=dataset_key,
+                file_id=spec.file_id,
+                target_name=spec.target_name,
+                handler_version=spec.handler_version,
             )
             self._session.add(new_job)
             self._session.commit()
-            logger.info(f"Created new job '{job_name}' with ID: {new_job.id}")
+            logger.info(f"Created new job '{spec.job_name}' with ID: {new_job.id}")
 
             return JobManager(self.eng, new_job.id)
 
         except Exception as e:
             self._session.rollback()
-            logger.error(f"Failed to get or create job {job_name}: {e}", exc_info=True)
+            logger.error(f"Failed to get or create job {spec.job_name}: {e}", exc_info=True)
             raise
 
     def check_for_completed_job(
         self,
         pipeline_id: str,
         hash_id: int,
-        dataset_key: str,
+        target_name: str,
+        required_version: int,
     ) -> bool:
         """
         Checks if a COMPLETED job exists for a given pipeline, content hash,
-        and dataset key across *any* previous session. Used for skipping work.
+        and target name across *any* previous session. 
+        
+        Used for skipping work (Semantic Invalidation).
+        Returns True ONLY if work exists for this hash/target WITH a version >= required_version.
         """
         session = self.Session()
         try:
-            job_exists = (
-                session.query(ProcessingJob)
+            # Find the MAX version successfully processed for this content
+            best_existing_version = (
+                session.query(func.max(ProcessingJob.handler_version))
+                .join(FileMetadata, ProcessingJob.file_id == FileMetadata.id)
                 .filter(
                     ProcessingJob.pipeline_id == pipeline_id,
-                    ProcessingJob.hash_id == hash_id,
-                    ProcessingJob.dataset_key == dataset_key,
+                    ProcessingJob.target_name == target_name,
                     ProcessingJob.status == StatusEnum.COMPLETED,
+                    FileMetadata.hash_id == hash_id,  # Check hash via join
                 )
-                .first()
+                .scalar()
             )
-            return job_exists is not None
+            
+            if best_existing_version is None:
+                return False # Never processed
+            
+            # Professional Semantic Invalidation:
+            # If we have processed v2, and we are asking for v2, SKIP (True).
+            # If we have processed v1, and we are asking for v2, RUN (False).
+            return best_existing_version >= required_version
+
         except Exception as e:
-            logger.error(f"Failed skip-job check for hash_id {hash_id}: {e}")
+            logger.error(f"Skip check failed for hash_id {hash_id}: {e}")
             session.rollback()
             return False
         finally:

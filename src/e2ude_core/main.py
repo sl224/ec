@@ -52,7 +52,8 @@ if __name__ == "__main__":
     logger.info(f"Execution Context: {ctx}")
 
     # 3. Setup Test Data
-    id_paths = get_data(eng)
+    # id_paths = get_data(eng)
+    id_paths = [(0, Path(r'tests/static_assets/zips/166501_20240212_185419_000_TransportRSM.fpkg.e2d.zip'))]
 
     # 4. Main Processing Loop
     for folder_id, zip_path_str in tqdm(id_paths, desc="Overall Progress"):

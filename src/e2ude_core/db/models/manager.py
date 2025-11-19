@@ -45,6 +45,8 @@ class ProcessingJob(Base):
     job_name = Column(String(500))  # e.g., "VersionsSummaryHandler: abc_Versions.xml"
     file_type = Column(String(50), index=True)
     pipeline_id = Column(String(255), nullable=True, index=True)
+    target_name = Column(String(50), nullable=True, index=True)
+    handler_version = Column(Integer, default=1, nullable=False)
     rows_uploaded = Column(Integer, nullable=True)
     status = Column(Enum(StatusEnum), default=StatusEnum.PENDING, index=True)
     message = Column(String, nullable=True)

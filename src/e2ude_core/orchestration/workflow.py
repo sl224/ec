@@ -1,22 +1,19 @@
 import logging
 import tempfile
-import shutil
 from pathlib import Path
 from tqdm import tqdm
 import sqlalchemy as sa
-from typing import List, Tuple, Optional, Dict
 
-# --- Core ETL Imports ---
 from e2ude_core.orchestration.scopes import session_scope, job_scope
-from e2ude_core.services.zip_io import RecursiveZipScanner, recursive_unzip
+from e2ude_core.orchestration.spec import JobSpec
+from e2ude_core.services.zip_io import extract_specific_files
 from e2ude_core.registry import HANDLER_REGISTRY
 from e2ude_core.context import EtlContext
-from e2ude_core.pipelines.scanner import MetadataScanHandler, FileToProcess
-from e2ude_core.pipelines.contexts import ScanJobContext, FileJobContext
+from e2ude_core.pipelines.scanner import MetadataScanHandler
 from e2ude_core.orchestration.state import get_folder_work_delta, FolderState
+from e2ude_core.db.models import FileMetadata
 
 logger = logging.getLogger(__name__)
-
 
 def process_zip(
     eng: sa.Engine,
@@ -26,40 +23,54 @@ def process_zip(
     extract_to_dir: Path = None,
 ):
     """
-    Orchestrates the ETL workflow for a single zipped folder.
-    Uses Lazy Extraction: Scans first, only unzips if work is needed.
+    Orchestrates the ETL workflow.
+    Optimized: Checks DB state BEFORE initializing session or touching zip.
     """
+    
+    # 0. PRE-CHECK (Optimization)
+    try:
+        pre_check_delta = get_folder_work_delta(eng, folder_id, scan_version=MetadataScanHandler.VERSION)
+        if pre_check_delta and pre_check_delta.status == FolderState.UP_TO_DATE:
+            # logger.info(f"Folder {folder_id} is already UP_TO_DATE. Skipping.")
+            return
+    except Exception as e:
+        logger.warning(f"Pre-check failed for folder {folder_id} (proceeding to full logic): {e}")
+
     try:
         with session_scope(eng, folder_id, context) as session_manager:
             
             # =========================================
-            # PHASE 1: IN-MEMORY SCAN & CATALOG
+            # PHASE 1: SCAN JOB
             # =========================================
-            logger.info("Starting Metadata Scan (In-Memory)...")
+            logger.info("Starting Metadata Scan...")
             
-            # 1. Scan the zip structure in-memory to get file list & hashes
-            scanner = RecursiveZipScanner(zip_path)
-            raw_files = scanner.scan()
-            
-            if not raw_files:
-                logger.warning("Zip file appears empty or unreadable.")
-                return
+            scan_spec = JobSpec(
+                pipeline_id=MetadataScanHandler.PIPELINE_ID,
+                job_name=f"MetadataScan: Folder {folder_id}",
+                target_name=FileMetadata.__tablename__, # Explicit Output Table
+                handler_version=MetadataScanHandler.VERSION,
+                file_type="N/A"
+            )
 
-            # 2. Initialize Handler with a dummy path (since we haven't extracted yet)
-            # The handler's `upsert` method doesn't need the physical path, just the metadata dicts.
-            meta_handler = MetadataScanHandler(eng, folder_id, Path("."))
-            
-            # 3. Upsert metadata to DB (Public API)
-            # This updates `metadata_file` and `metadata_hash_registry`
-            meta_handler.upsert(raw_files)
+            with job_scope(session_manager, scan_spec) as job:
+                if job.active:
+                    # Delegate execution to the handler, just like standard files
+                    meta_handler = MetadataScanHandler(eng, folder_id, Path("."))
+                    meta_handler.run(
+                        eng=eng,
+                        hash_id=None, 
+                        file_path=zip_path, 
+                        job_updater=job.manager,
+                        keys_to_process=None
+                    )
+                    meta_handler.run(zip_path, job.manager)
             
             # =========================================
             # PHASE 2: STATE CALCULATION
             # =========================================
-            work_delta = get_folder_work_delta(eng, folder_id)
+            work_delta = get_folder_work_delta(eng, folder_id, scan_version=MetadataScanHandler.VERSION)
             
             if work_delta is None:
-                 # Should not happen if upsert worked, unless DB commit failed
                  logger.error("Work delta is None after scan. Aborting.")
                  return
 
@@ -71,58 +82,56 @@ def process_zip(
             logger.info(f"Folder partially complete. Processing {len(missing_items)} missing datasets.")
 
             # =========================================
-            # PHASE 3: PHYSICAL EXTRACTION
+            # PHASE 3: SELECTIVE EXTRACTION & PROCESSING
             # =========================================
-            # Only now do we touch the disk
-            with tempfile.TemporaryDirectory() as temp_dir:
-                temp_dir_path = Path(temp_dir)
-                logger.info(f"Work detected. Extracting to {temp_dir_path}...")
-                
-                # Extract everything (handling nested zips)
-                recursive_unzip(temp_dir_path, zip_path)
-                
-                # Re-fetch file list from DB to get the correct FileIDs and Relative Paths
-                # Update their full_path to point to our temp dir
-                db_files = meta_handler.fetch_existing_files()
-                
-                # Create lookup map
-                files_map = {f.hash_id: f for f in db_files}
+            # Re-init handler to fetch DB state
+            meta_handler = MetadataScanHandler(eng, folder_id, Path("."))
+            db_files = meta_handler.fetch_existing_files()
+            files_map = {f.hash_id: f for f in db_files}
 
-                # =========================================
-                # PHASE 4: EXECUTION LOOP
-                # =========================================
-                logger.info(f"Dispatching {len(missing_items)} dataset jobs.")
-                
-                for hash_id, dataset_key in tqdm(missing_items, desc=f"Folder {folder_id} Jobs"):
+            files_to_extract = set()
+            for hash_id, _ in missing_items:
+                file_info = files_map.get(hash_id)
+                if file_info:
+                    files_to_extract.add(file_info.relative_path)
+            
+            if files_to_extract:
+                with tempfile.TemporaryDirectory() as temp_dir:
+                    temp_dir_path = Path(temp_dir)
                     
-                    file_info = files_map.get(hash_id)
-                    if not file_info:
-                        logger.warning(f"Missing file info for hash {hash_id}. Skipping.")
-                        continue
-                    
-                    # Update path to be absolute based on current temp_dir
-                    full_path = temp_dir_path / file_info.relative_path
-                    
-                    handler = HANDLER_REGISTRY.get(file_info.file_type)
-                    if not handler:
-                        # Should have been filtered by expected_work logic, but safe check
-                        continue
+                    logger.info(f"Extracting {len(files_to_extract)} files to {temp_dir_path}...")
+                    extract_specific_files(zip_path, list(files_to_extract), temp_dir_path)
 
-                    file_context = FileJobContext(handler, file_info, dataset_key)
-                    
-                    # Use new simplified scope
-                    with job_scope(session_manager, file_context) as job:
-                        if job.active:
-                             handler.run(
-                                eng=eng, 
-                                hash_id=hash_id, 
-                                file_path=full_path, 
-                                job_updater=job.manager, 
-                                keys_to_process=[dataset_key]
-                            )
+                    for hash_id, dataset_key in tqdm(missing_items, desc=f"Folder {folder_id} Jobs"):
+                        
+                        file_info = files_map.get(hash_id)
+                        if not file_info: continue
+                        
+                        full_path = temp_dir_path / file_info.relative_path
+                        if not full_path.exists(): continue
+
+                        handler = HANDLER_REGISTRY.get(file_info.file_type)
+                        if not handler: continue
+
+                        file_spec = JobSpec(
+                            pipeline_id=handler.PIPELINE_ID,
+                            job_name=f"{handler.PIPELINE_ID}: {file_info.relative_path} [{dataset_key}]",
+                            target_name=dataset_key,
+                            handler_version=handler.VERSION,
+                            file_type=file_info.file_type,
+                            file_id=file_info.file_id,
+                            hash_id=file_info.hash_id
+                        )
+                        
+                        with job_scope(session_manager, file_spec) as job:
+                            if job.active:
+                                handler.run(
+                                    eng=eng, 
+                                    hash_id=hash_id, 
+                                    file_path=full_path, 
+                                    job_updater=job.manager, 
+                                    keys_to_process=[dataset_key]
+                                )
 
     except Exception as e:
-        logger.error(
-            f"ETL process failed critically for FolderID {folder_id}: {e}",
-            exc_info=True,
-        )
+        logger.error(f"Critical failure in folder {folder_id}: {e}", exc_info=True)
