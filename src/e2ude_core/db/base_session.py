@@ -18,9 +18,10 @@ def E2UDE_DATETIME(precision: int | None = None) -> TypeDecorator:
         return DateTime(timezone=False)
 
 
-# Conditionally set a default schema for MSSQL to keep tables organized.
+# Conditionally set a default schema for MSSQL based on CONFIG
 if settings.database.type == "mssql":
-    DEFAULT_SCHEMA = "e2ude_core_dev"
+    # Use the configured schema name (e.g., "e2ude_core_dev")
+    DEFAULT_SCHEMA = settings.database.schema_name
 
     class e2udeCoreBase:
         __table_args__ = {"schema": DEFAULT_SCHEMA}
@@ -35,9 +36,6 @@ def schema_fkey(key: str) -> str:
     """
     Returns a schema-qualified foreign key string if a schema is defined,
     otherwise returns the simple key.
-
-    - MSSQL: "e2ude_core.table.column"
-    - SQLite: "table.column"
     """
     if DEFAULT_SCHEMA:
         return f"{DEFAULT_SCHEMA}.{key}"

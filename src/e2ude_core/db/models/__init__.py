@@ -38,4 +38,5 @@ __all__ = [
     "RfcDb",
     "LcsTemp",
     "McInDiscr",
+    "SegmentsData",
 ]

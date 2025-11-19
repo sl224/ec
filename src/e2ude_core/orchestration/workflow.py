@@ -1,17 +1,16 @@
 import logging
+import tempfile
 from pathlib import Path
-from tqdm import tqdm
 import sqlalchemy as sa
-from typing import List, Tuple, Optional, Dict
 
-# --- Core ETL Imports ---
 from e2ude_core.orchestration.scopes import session_scope, job_scope
-from e2ude_core.services.zip_io import UnzipContext
+from e2ude_core.orchestration.spec import JobSpec
+from e2ude_core.services.zip_io import extract_specific_files
 from e2ude_core.registry import HANDLER_REGISTRY
 from e2ude_core.context import EtlContext
-from e2ude_core.pipelines.scanner import MetadataScanHandler, FileToProcess
-from e2ude_core.pipelines.contexts import ScanJobContext, FileJobContext
+from e2ude_core.pipelines.scanner import MetadataScanHandler
 from e2ude_core.orchestration.state import get_folder_work_delta, FolderState
+from e2ude_core.db.models import FileMetadata
 
 logger = logging.getLogger(__name__)
 
@@ -24,133 +23,141 @@ def process_zip(
     extract_to_dir: Path = None,
 ):
     """
-    Orchestrates the ETL workflow for a single zipped folder.
+    Orchestrates the ETL workflow.
     """
+
     try:
         with session_scope(eng, folder_id, context) as session_manager:
-            # 1. Calculate State
-            work_delta = get_folder_work_delta(eng, folder_id)
-            missing_items_lookup: Optional[List[Tuple[int, str]]] = None
+            # =========================================
+            # PHASE 1: SCAN JOB
+            # =========================================
+            logger.info("Starting Metadata Scan...")
+
+            meta_handler = MetadataScanHandler(eng, folder_id, Path("."))
+
+            primary_model = FileMetadata
+            secondary_models = [
+                m for m in meta_handler.expected_models if m != primary_model
+            ]
+
+            # A. Primary Job: FileMetadata (Drives Execution)
+            scan_spec = JobSpec(
+                pipeline_id=MetadataScanHandler.PIPELINE_ID,
+                job_name=f"MetadataScan: Folder {folder_id}",
+                target_name=primary_model.__tablename__,
+                handler_version=MetadataScanHandler.VERSION,
+                file_id=None,
+                hash_id=None,
+                file_type="METADATA_SCAN",  # <--- Explicit type for scanner
+            )
+
+            row_count = 0
+            with job_scope(session_manager, scan_spec) as job:
+                if job.active:
+                    meta_handler.run(
+                        eng=eng,
+                        hash_id=0,
+                        file_path=zip_path,
+                        job_updater=job.manager,
+                        keys_to_process=None,
+                    )
+                    if job.manager._rows_uploaded_in_scope:
+                        row_count = job.manager._rows_uploaded_in_scope
+
+            # B. Secondary Job: FileHashRegistry (Audit Trail)
+            for model in secondary_models:
+                sec_spec = JobSpec(
+                    pipeline_id=MetadataScanHandler.PIPELINE_ID,
+                    job_name=f"MetadataScan (Registry): Folder {folder_id}",
+                    target_name=model.__tablename__,
+                    handler_version=MetadataScanHandler.VERSION,
+                    file_id=None,
+                    hash_id=None,
+                    file_type="METADATA_SCAN",  # <--- Explicit type for scanner side-effect
+                )
+
+                with job_scope(session_manager, sec_spec) as job:
+                    if job.active:
+                        job.manager.mark_completed(
+                            "Completed via Primary Scan", rows=row_count
+                        )
+
+            # =========================================
+            # PHASE 2: STATE CALCULATION
+            # =========================================
+            work_delta = get_folder_work_delta(
+                eng, folder_id, scan_version=MetadataScanHandler.VERSION
+            )
 
             if work_delta is None:
-                logger.info("New folder detected. Proceeding to Unzip & Scan.")
-            elif work_delta.status is FolderState.UP_TO_DATE:
-                logger.info("Folder is 100% complete. Skipping.")
+                logger.error("Work delta is None after scan. Aborting.")
                 return
-            else:
-                logger.info(
-                    f"Folder partially complete. Processing {len(work_delta.missing_items)} missing datasets."
-                )
-                missing_items_lookup = work_delta.missing_items
 
-            # 2. Unzip
-            with UnzipContext(zip_path) as uc:
-                logger.info(
-                    f"[Session: {session_manager.session_id}] Files extracted to {uc.temp_dir}"
-                )
+            if work_delta.status == FolderState.UP_TO_DATE:
+                logger.info("Folder is 100% complete. Skipping physical extraction.")
+                return
 
-                # 3. Metadata Scan
-                files_to_process: List[FileToProcess] = []
-                try:
-                    scanner = MetadataScanHandler(eng, folder_id, uc.temp_dir)
-                    scan_context = ScanJobContext(scanner)
-                    with job_scope(session_manager, context=scan_context) as (
-                        job_updater,
-                        should_skip,
-                    ):
-                        # scanner.run() -> list[FileToProcess]
-                        files_to_process = scanner.run(job_updater, should_skip)
-                except Exception as e:
-                    logger.error(
-                        f"CRITICAL: MetadataScanHandler failed: {e}. Aborting session.",
-                        exc_info=True,
-                    )
-                    raise
+            missing_items = work_delta.missing_items
+            logger.info(
+                f"Folder partially complete. Processing {len(missing_items)} missing datasets."
+            )
 
-                if not files_to_process:
-                    logger.warning(
-                        f"[Session: {session_manager.session_id}] No files found to process."
-                    )
-                    return
+            # =========================================
+            # PHASE 3: SELECTIVE EXTRACTION & PROCESSING
+            # =========================================
+            meta_handler = MetadataScanHandler(eng, folder_id, Path("."))
+            db_files = meta_handler.fetch_existing_files()
+            files_map = {f.hash_id: f for f in db_files}
 
-                # 4. File Dispatch Loop
-                # Create a lookup map for efficient job dispatch
-                file_map: Dict[int, FileToProcess] = {
-                    f.hash_id: f for f in files_to_process
-                }
+            files_to_extract = set()
+            for hash_id, _ in missing_items:
+                file_info = files_map.get(hash_id)
+                if file_info:
+                    files_to_extract.add(file_info.relative_path)
 
-                work_items_to_process: List[Tuple[int, str]] = []
+            if files_to_extract:
+                with tempfile.TemporaryDirectory() as temp_dir:
+                    temp_dir_path = Path(temp_dir)
 
-                if missing_items_lookup is None:
-                    # New folder: process all datasets for all files
-                    logger.info("New folder: processing all datasets for all files.")
-                    for file in files_to_process:
-                        handler = HANDLER_REGISTRY.get(file.file_type)
-                        if handler:
-                            # Enumerate models from `handler.expected_models` to derive dataset keys (aligns with state.py).
-                            for model in handler.expected_models:
-                                work_items_to_process.append(
-                                    (file.hash_id, model.__tablename__)
-                                )
-                else:
-                    # Partial folder: only process the missing items
-                    work_items_to_process = missing_items_lookup
                     logger.info(
-                        f"Partial folder: processing {len(work_items_to_process)} missing datasets."
+                        f"Extracting {len(files_to_extract)} files to {temp_dir_path}..."
+                    )
+                    extract_specific_files(
+                        zip_path, list(files_to_extract), temp_dir_path
                     )
 
-                logger.info(
-                    f"[Session: {session_manager.session_id}] Dispatching {len(work_items_to_process)} dataset jobs."
-                )
+                    for hash_id, dataset_key in missing_items:
+                        file_info = files_map.get(hash_id)
+                        if not file_info:
+                            continue
 
-                # 5. Process work items
-                # `dataset_key`: job-tracking key (replaces legacy 'table_name').
-                for hash_id, dataset_key in tqdm(
-                    work_items_to_process, desc=f"Folder {folder_id} Jobs"
-                ):
-                    file = file_map.get(hash_id)
-                    if not file:
-                        logger.warning(
-                            f"Skipping job for missing hash_id {hash_id} ({dataset_key})"
+                        full_path = temp_dir_path / file_info.relative_path
+                        if not full_path.exists():
+                            continue
+
+                        handler = HANDLER_REGISTRY.get(file_info.file_type)
+                        if not handler:
+                            continue
+
+                        file_spec = JobSpec(
+                            pipeline_id=handler.PIPELINE_ID,
+                            job_name=f"{handler.PIPELINE_ID}: {file_info.relative_path} [{dataset_key}]",
+                            target_name=dataset_key,
+                            handler_version=handler.VERSION,
+                            file_id=file_info.file_id,
+                            hash_id=file_info.hash_id,
+                            file_type=file_info.file_type,  # <--- Pass the actual file type here
                         )
-                        continue
 
-                    handler = HANDLER_REGISTRY.get(file.file_type)
-                    if not handler:
-                        logger.warning(
-                            f"Skipping job for missing handler {file.file_type} ({dataset_key})"
-                        )
-                        continue
-
-                    try:
-                        # Context uses string `dataset_key` for job identification.
-                        file_context = FileJobContext(handler, file, dataset_key)
-                        with job_scope(session_manager, context=file_context) as (
-                            job_updater,
-                            should_skip,
-                        ):
-                            if should_skip:
-                                continue
-
-                            # Restrict handler execution to the specified `dataset_key`.
-                            handler.run(
-                                eng=eng,
-                                hash_id=file.hash_id,
-                                file_path=file.full_path,
-                                job_updater=job_updater,
-                                keys_to_process=[
-                                    dataset_key
-                                ],  # Pass the specific dataset_key
-                            )
-
-                    except Exception as e:
-                        logger.error(
-                            f"Handler {handler.PIPELINE_ID} failed for FileID {file.file_id} / Key {dataset_key}: {e}"
-                        )
-                        pass  # job_scope will mark as ERROR
+                        with job_scope(session_manager, file_spec) as job:
+                            if job.active:
+                                handler.run(
+                                    eng=eng,
+                                    hash_id=hash_id,
+                                    file_path=full_path,
+                                    job_updater=job.manager,
+                                    keys_to_process=[dataset_key],
+                                )
 
     except Exception as e:
-        logger.error(
-            f"ETL process failed critically for FolderID {folder_id}: {e}",
-            exc_info=True,
-        )
+        logger.error(f"Critical failure in folder {folder_id}: {e}", exc_info=True)

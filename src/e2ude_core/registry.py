@@ -1,6 +1,6 @@
 from typing import Dict
 
-from e2ude_core.pipelines.base import FileHandler
+from e2ude_core.pipelines.base import BaseHandler, FileHandler
 from e2ude_core.db.models import (
     NavData,
     PfcDb,
@@ -22,10 +22,8 @@ from e2ude_core.pipelines.parsers import (
     parse_segment,
 )
 
-
-# Maps a file type string to its corresponding FileHandler instance.
-HANDLER_REGISTRY: Dict[str, FileHandler] = {
-    # A "simple" handler for a file type that maps to a single table.
+# Registry now stores BaseHandler (polymorphic)
+HANDLER_REGISTRY: Dict[str, BaseHandler] = {
     FileType.TMPTR_LOG.value: FileHandler(
         pipeline_id="tmptr_log",
         parser_func=parse_tmptr_dataframe,

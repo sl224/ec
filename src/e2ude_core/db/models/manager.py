@@ -2,7 +2,6 @@ from enum import Enum as PyEnum
 from sqlalchemy import Column, Integer, String, ForeignKey, DateTime, Enum, func, Index
 from sqlalchemy.orm import relationship
 
-# Import Base AND the new schema_fkey helper
 from e2ude_core.db.base_session import Base, schema_fkey, DEFAULT_SCHEMA, E2UDE_DATETIME
 
 
@@ -45,6 +44,8 @@ class ProcessingJob(Base):
     job_name = Column(String(500))  # e.g., "VersionsSummaryHandler: abc_Versions.xml"
     file_type = Column(String(50), index=True)
     pipeline_id = Column(String(255), nullable=True, index=True)
+    target_name = Column(String(50), nullable=True, index=True)
+    handler_version = Column(Integer, default=1, nullable=False)
     rows_uploaded = Column(Integer, nullable=True)
     status = Column(Enum(StatusEnum), default=StatusEnum.PENDING, index=True)
     message = Column(String, nullable=True)

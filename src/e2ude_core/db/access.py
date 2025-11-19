@@ -2,7 +2,6 @@ import logging
 import numpy as np
 import pandas as pd
 from sqlalchemy import URL, Connection, Table, create_engine
-from tqdm import tqdm
 
 logger = logging.getLogger(__name__)
 
@@ -53,9 +52,6 @@ def bulk_upload(
     conn: Connection,
     sa_table: Table,
     chunksize: int = 2000,
-    tqdm_description: str = "Uploading",
-    show_progress: bool = False,
-    leave: bool = True,
 ):
     """
     Uploads a DataFrame to a database table in chunks.
@@ -64,24 +60,14 @@ def bulk_upload(
         return
 
     total_rows = len(df)
+    # Slice via `iloc` for memory-efficient chunking.
+    for start_idx in range(0, total_rows, chunksize):
+        df_chunk = df.iloc[start_idx : start_idx + chunksize]
 
-    with tqdm(
-        total=total_rows,
-        desc=tqdm_description,
-        unit="rows",
-        leave=leave,
-        disable=not show_progress,
-    ) as pbar:
-        sa_table.create(conn, checkfirst=True)
-        # Slice via `iloc` for memory-efficient chunking.
-        for start_idx in range(0, total_rows, chunksize):
-            df_chunk = df.iloc[start_idx : start_idx + chunksize]
+        # Sanitize chunk just before upload, converting pandas/numpy nulls to SQL NULL.
+        clean_chunk = df_chunk.replace({np.nan: None, pd.NA: None})
 
-            # Sanitize chunk just before upload, converting pandas/numpy nulls to SQL NULL.
-            clean_chunk = df_chunk.replace({np.nan: None, pd.NA: None})
-
-            conn.execute(
-                sa_table.insert(),
-                clean_chunk.to_dict(orient="records"),
-            )
-            pbar.update(len(df_chunk))
+        conn.execute(
+            sa_table.insert(),
+            clean_chunk.to_dict(orient="records"),
+        )

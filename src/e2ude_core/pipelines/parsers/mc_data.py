@@ -17,9 +17,7 @@ from e2ude_core.db.models import (
     LcsTemp,
     McInDiscr,
 )
-
 from e2ude_core.pipelines.cleaning import clean_dataframe_from_model
-
 from e2ude_core.pipelines.parsers.mc_data_scrape import (
     scrape_lcs_temp_record,
     scrape_mc_in_discr,
@@ -32,7 +30,7 @@ from e2ude_core.pipelines.parsers.mc_data_scrape import (
     scrape_rpcs_record,
 )
 
-# Maps message type strings from the log file to their corresponding model and scrape function.
+# Maps message type strings to a model and scrape function.
 parser_map = {
     "RPCS:": (Rpcs, scrape_rpcs_record),
     "RPCS_PRES:": (RpcsPres, scrape_rpcs_pres_record),
@@ -48,18 +46,16 @@ parser_map = {
 
 def parse_mcdata(file_path: Path) -> Dict[Type[Base], pd.DataFrame]:
     """
-    Parses an MCData file, scrapes each line, builds DataFrames,
-    and cleans them according to their SQLAlchemy model definitions.
+    Parses an MCData file, scrapes each line, and builds cleaned DataFrames
+    for each message type.
     """
     with open(file_path, "r", encoding="utf-8", errors="ignore") as f:
         lines = f.readlines()
 
-    # Group raw row data by message type
     data = defaultdict(list)
 
     for i, line in enumerate(lines):
         try:
-            # The 2nd token is the message type
             tokens = line.split(",", maxsplit=2)
             if len(tokens) < 2:
                 continue  # Skip blank lines
@@ -68,40 +64,28 @@ def parse_mcdata(file_path: Path) -> Dict[Type[Base], pd.DataFrame]:
             if message_type_str in parser_map:
                 model, scrape_func = parser_map[message_type_str]
 
-                scraped_data = scrape_func(line)
+                row_dict = scrape_func(line)
+                row_dict["LineNumber"] = i
 
-                row = [i] + scraped_data  # Prepend line number
-
-                data[message_type_str].append(row)
+                data[message_type_str].append(row_dict)
         except Exception:
-            # Skip blank or malformed lines
             continue
 
     ret_payload: Dict[Type[Base], pd.DataFrame] = {}
 
     for str_key, model_tuple in parser_map.items():
         model, _ = model_tuple
-
-        # Get all column names from the model's table definition
-        all_model_cols = [c.name for c in model.__table__.columns]
-
-        # Assemble the DataFrame column order, starting with the line number.
-        columns = []
-        if "LineNumber" in all_model_cols:
-            columns.append("LineNumber")
-
-        # Add the data columns, excluding primary keys (like hash_id)
-        data_cols = [c.name for c in model.__table__.columns if not c.primary_key]
-        columns.extend(data_cols)
-
         raw_rows = data[str_key]
 
-        # Create a raw DataFrame, ensuring columns are set even if no data was found.
-        df = pd.DataFrame(raw_rows, columns=columns)
+        df = pd.DataFrame(raw_rows)
 
-        # Clean and cast the DataFrame based on the model's types.
-        clean_df = clean_dataframe_from_model(df, model)
-
-        ret_payload[model] = clean_df
+        if not df.empty:
+            clean_df = clean_dataframe_from_model(df, model)
+            ret_payload[model] = clean_df
+        else:
+            # Create an empty DataFrame with correct columns if no data was found.
+            cols = [c.name for c in model.__table__.columns]
+            cols_to_keep = [c for c in cols if c not in ("id", "hash_id")]
+            ret_payload[model] = pd.DataFrame(columns=cols_to_keep)
 
     return ret_payload

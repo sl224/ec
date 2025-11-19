@@ -34,3 +34,6 @@ tests/static_assets/
 
 #Scratch
 *nocheckin*
+
+# log
+*.log
