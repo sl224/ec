@@ -1,97 +1,95 @@
-## Environment Setup (Windows)
+# E2UDE Core ETL
+
+**E2UDE Core** is a robust, idempotent ETL framework designed to process complex file archives (like MCData, Segments, Maintenance Logs) and load them into a SQL database (MSSQL/SQLite) using a **Hash-Centric Deduplication strategy**.
+
+## Architecture Overview
+
+This system is designed to be **"Dagster Lite,"** providing orchestration, state management, and auditability without the heavy infrastructure overhead of a full platform.
+
+### Key Concepts
+
+#### Hash-Centric Deduplication (HCD)
+Data is keyed by the **MD5 hash** of the source file content, not the filename or date.
+* **Benefit:** If the same file appears in 50 different zip archives (common in cumulative logs), it is parsed and stored once.
+* **`metadata_hash_registry`**: The canonical list of unique file contents.
+* **`metadata_file`**: The link between a specific Zip Archive instance and the Content Hash.
+
+#### Atomic Execution
+* **Handlers:** Each file type (e.g., `MCDATA`, `TMPTR_LOG`) has a dedicated Handler that inherits from `BaseHandler`.
+* **Atomic Replace:** When processing a file, the system performs an atomic transaction: `DELETE` existing data for this hash -> `INSERT` new data. This ensures idempotency.
+* **Metadata Scan:** A specialized handler that scans archives to populate the registry before deep processing begins.
+
+#### Orchestration
+* **Session Management:** Every execution run is tracked in `processing_sessions`.
+* **Job Tracking:** Every individual file processing task is logged in `processing_jobs`.
+* **Smart Skipping:** The system checks the database state before doing work. If a file hash has already been successfully processed by the current logic version, it is skipped.
+
+---
+
+## Design Philosophy: Why "Dagster Lite"?
+
+We deliberately chose a custom, lightweight architecture over off-the-shelf orchestrators like Dagster or Airflow for specific domain reasons:
+
+### 1. Direct Data Visibility (The "Killer Feature")
+* **The Problem with Standard Orchestrators:** Tools like Dagster typically abstract their run history into an internal database (often SQLite or a siloed Postgres schema). Joining "Job Success" data with "Business Data" requires complex cross-database queries or API calls.
+* **The E2UDE Advantage:** Our `processing_jobs` and `processing_sessions` tables live in the **same database schema** as your actual data (`rsmdata_*`).
+* **Benefit:** You can write a single SQL query to join metadata, file lineage, and raw sensor data.
+* **Benefit:** Debugging is instant. You can trace a specific row in `rsmdata_tmptr` back to the exact `job_id`, `git_hash`, and `zip_file` that produced it using standard foreign keys.
+
+### 2. Domain-Specific Deduplication
+Generic orchestrators trigger based on "Events" or "Time". Our system triggers based on **Content Hashing**. We natively understand that `FolderA/File.csv` and `FolderB/File.csv` are identical if their hashes match, preventing billions of rows of redundant storage—a feature that would require complex custom logic to implement in Dagster.
+
+### 3. Infrastructure Simplicity
+* No web servers, no daemon processes, no complex deployment manifests.
+* The entire "Platform" is a single Python library and a database schema. It runs anywhere Python runs.
+
+---
+
+## Environment Setup (Windows/Linux/Mac)
 
 ### Prerequisites
+* **Python:** Requires Python 3.13+.
+* **UV:** This project uses `uv` for ultra-fast package management.
+    * Install UV: `pip install uv` (or follow official docs).
+* **ODBC Driver:** (For MSSQL) Install "ODBC Driver 17 for SQL Server".
 
-1.  **Python:** This project requires **Python 3.13**.
-2.  **UV:** This project uses `uv` for package management. Install it if you don't have it.
-3.  **ODBC Driver:** You must have "ODBC Driver 17 for SQL Server" installed for the database connection to work.
-
-### Installation Steps
+### Installation
 
 1.  **Clone the repository:**
-    ```powershell
-    git clone https://bitbucket.northgrum.com/scm/psai/e2ude_core.git
+    ```bash
+    git clone <repo_url>
     cd e2ude_core
     ```
 
-2.  **Create virtual environment and install dependencies:**
-    `uv` creates the `.venv` directory by default when you run `pip install`.
+2.  **Sync Dependencies:**
+    Create the virtual environment and sync lockfile dependencies.
+    ```bash
+    uv sync
+    ```
 
-    ```powershell
-    # Install main project dependencies
+3.  **Install Project in Editable Mode:**
+    Install the project into the environment created by uv sync.
+    ```bash
     uv pip install -e .
     ```
 
-3.  **Configure the database:**
-    Create a `global_config.toml` in the project root. Copy the contents from `global_config.toml` and ensure the `[database]` section points to your local or dev database.
+4.  **Configure the Application:**
+    Create a `global_config.toml` in the project root (copy from provided example).
+    * **Database:** Configure your connection string.
+    * **Schema:** Set `schema_name = "e2ude_core_dev"` for Blue/Green deployment support.
 
-4.  **Set up pre-commit hooks (Optional but Recommended):**
-    ```powershell
-    pre-commit install
+5.  **Set up Pre-Commit Hooks (Dev Only):**
+    Ensure code quality checks run before every commit.
+    ```bash
+    uv run pre-commit install
     ```
 
 ---
 
-## How to Run the Program
+## Usage
 
-Run the ETL pipeline using `uv`:
+### Running the Pipeline
+To process data, run the main entry point module. By default, it will attempt to connect to the DB configured in `global_config.toml`.
 
-```powershell
+```bash
 uv run -m e2ude_core.main
-```
-
-# Architecture Summary
-
-**Objective:** A robust, idempotent ETL system for processing zipped archives. The system extracts files, scans metadata, and loads data into a SQL database using a **Hash-Centric Deduplication** strategy.
-
----
-
-## 1. Core Design Philosophy: Hash-Centric Architecture
-
-The core philosophy remains unchanged, as confirmed by the codebase.
-
-### Separation of Instance vs. Content
-* **File Instance (`FileID`):** Represents a specific file path in a specific zip folder. Used for Audit Logs and Lineage (`metadata_file` table).
-* **File Content (`HashID`):** Represents the MD5 hash of the file. Used for Data Deduplication and Job Control (`metadata_hash_registry` table).
-
-### Data Deduplication
-Leaf data tables (e.g., `rsmdata_tmptr`) are keyed by `hash_id`. Data is stored once per unique content.
-
-### Idempotency & Skip Logic
-* Jobs are safe to re-run.
-* The `job_scope` context manager checks `check_for_completed_job(pipeline_id, hash_id, dataset_key)`.
-* If a **COMPLETED** job is found for that specific hash and table (`dataset_key`), the job is skipped.
-
-### Atomic Replace
-The `FileHandler`'s `_atomic_upload` method performs a transaction: `DELETE FROM table WHERE hash_id = X` &rarr; `INSERT new data`.
-
----
-
-## 2. Component Architecture
-
-### A. The Handler (`src/e2ude_core/pipelines/base.py`)
-A generic, configurable class (`FileHandler`) that orchestrates the ETL.
-* **Responsibility:** Validation, Transaction Management, Atomic Writes.
-* **Inputs:** A `parser_func` and a `table_config` (which is now a `List[Type[HashVerifiableModel]]`).
-* **Contract:** The `run` method can be restricted to a subset of its models using the `keys_to_process: List[str]` argument.
-
-### B. The Parsers (`src/e2ude_core/pipelines/parsers/`)
-* **Purity:** Pure Python functions with no SQL imports.
-* **Return Type:** Must return a `Dict[Type[Base], pd.DataFrame]`. The dictionary key is the SQLAlchemy Model class itself.
-
-### C. The Orchestrator (`src/e2ude_core/registry.py`)
-* **Responsibility:** Wires `FileType` strings to configured `FileHandler` instances.
-* **Registry:** A dictionary (`HANDLER_REGISTRY`) that holds the master configuration.
-
-### D. Job Management (`src/e2ude_core/orchestration/` and `src/e2ude_core/db/models/manager.py`)
-* **`ProcessingJob` Table:** Logs `file_id`, `hash_id`, `pipeline_id`, and the new granular `dataset_key` (the table name).
-* **`job_scope` Context:** Manages the lifecycle of a `ProcessingJob`, handling skip logic, status updates, and error capture.
-
----
-
-## 3. Data Models & Schema (`src/e2ude_core/db/`)
-
-* **`metadata_hash_registry`:** Unique list of all file contents (MD5s).
-* **`metadata_file`:** The "Rosetta Stone" linking `folder_id`, `relative_path`, and `hash_id`.
-* **Leaf Tables (e.g., `rsmdata_tmptr`):** Keyed by `hash_id`.
-* **Schema:** The system is configured to use a specific schema (e.g., `e2ude_core`) when run against MSSQL, managed by `DEFAULT_SCHEMA` and the `schema_fkey` helper.
