@@ -6,8 +6,9 @@ from typing import Optional
 class JobSpec:
     pipeline_id: str
     job_name: str
-    target_name: str  # Renamed from dataset_key
-    handler_version: int  # New field
+    target_name: str
+    handler_version: int
 
     file_id: Optional[int] = None
     hash_id: Optional[int] = None
+    file_type: Optional[str] = None

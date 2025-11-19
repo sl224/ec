@@ -96,6 +96,7 @@ class SessionManager:
             user = ctx.user_name
             host = ctx.host_name
             gh = ctx.git_hash
+
         self.eng = eng
         self.Session = scoped_session(sessionmaker(bind=eng))
         self.git_hash = gh
@@ -132,11 +133,9 @@ class SessionManager:
         spec: "JobSpec",
     ) -> JobManager:
         """
-        Idempotently gets an existing job or creates a new one for a specific
-        pipeline, file, and dataset. Returns a JobManager for it.
+        Idempotently gets an existing job or creates a new one.
         """
         try:
-            # Try to find an existing job within the current session.
             existing_job = (
                 self._session.query(ProcessingJob)
                 .filter_by(
@@ -154,7 +153,6 @@ class SessionManager:
                 )
                 return JobManager(self.eng, existing_job.id)
 
-            # Create a new job if one doesn't exist for this session.
             logger.info(f"Creating new job for {spec.job_name}")
             new_job = ProcessingJob(
                 session_id=self.session_id,
@@ -164,6 +162,7 @@ class SessionManager:
                 file_id=spec.file_id,
                 target_name=spec.target_name,
                 handler_version=spec.handler_version,
+                file_type=spec.file_type,  # <--- POPULATING THE COLUMN
             )
             self._session.add(new_job)
             self._session.commit()
@@ -188,9 +187,6 @@ class SessionManager:
         """
         Checks if a COMPLETED job exists for a given pipeline, content hash,
         and target name across *any* previous session.
-
-        Used for skipping work (Semantic Invalidation).
-        Returns True ONLY if work exists for this hash/target WITH a version >= required_version.
         """
         session = self.Session()
         try:
@@ -202,17 +198,14 @@ class SessionManager:
                     ProcessingJob.pipeline_id == pipeline_id,
                     ProcessingJob.target_name == target_name,
                     ProcessingJob.status == StatusEnum.COMPLETED,
-                    FileMetadata.hash_id == hash_id,  # Check hash via join
+                    FileMetadata.hash_id == hash_id,
                 )
                 .scalar()
             )
 
             if best_existing_version is None:
-                return False  # Never processed
+                return False
 
-            # Professional Semantic Invalidation:
-            # If we have processed v2, and we are asking for v2, SKIP (True).
-            # If we have processed v1, and we are asking for v2, RUN (False).
             return best_existing_version >= required_version
 
         except Exception as e:
@@ -223,9 +216,6 @@ class SessionManager:
             session.close()
 
     def finalize_session(self):
-        """
-        Finalizes the session, setting its status to COMPLETED or ERROR.
-        """
         session = self.Session()
         try:
             session_obj = session.query(ProcessingSession).get(self.session_id)
