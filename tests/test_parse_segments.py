@@ -1,28 +1,50 @@
 # %%
 from pathlib import Path
 import pandas as pd
-import sqlalchemy as sa
 
 # TODO setup a network drive location for test assets
 STATIC_ASSETS_ROOT = Path("tests/static_assets")
 
+from sqlalchemy import Column, Integer, String, ForeignKey
+from e2ude_core.db.base_session import Base, schema_fkey, E2UDE_DATETIME
+
+
+class SegmentsData(Base):
+    """
+    Represents data parsed from a SEGMENTS file.
+    """
+
+    __tablename__ = "rsmdata_segments"
+
+    # Use `schema_fkey` to create a schema-qualified foreign key reference.
+    hash_id = Column(
+        Integer, ForeignKey(schema_fkey("metadata_hash_registry.id")), primary_key=True
+    )
+    line_number = Column(Integer, primary_key=True)
+    group = Column(Integer)
+    event_start = Column(E2UDE_DATETIME(3))
+    event_stop = Column(E2UDE_DATETIME(3))
+    flight_status = Column(String(100))
+
 
 def get_segment_df(lines):
+
     COLUMNS = [
-        "LineNumber",
-        "Group",
-        "Flight",
-        "Event Start",
-        "Event Stop",
+        "line_number",
+        "group",
+        "flight",
+        "event_start",
+        "event_stop",
         None,
         None,
-        "Ground Time",
-        "Flight Time",
-        "Landing",
-        "Catapults",
-        "Arrests",
-        "Remarks",
+        "ground_time",
+        "flight_time",
+        "landing",
+        "catapults",
+        "arrests",
+        "flight_status",
     ]
+    keep_columns = ["line_number", "group", "event_start", "event_stop", "flight_status"]
 
     rows = []
     for line in lines:
@@ -30,10 +52,13 @@ def get_segment_df(lines):
         rows.append(tokens)
 
     df = pd.DataFrame(rows, columns=COLUMNS)
-    for date_col in ("Event Start", "Event Stop"):
+    for date_col in ("event_start", "event_stop"):
         df[date_col] = pd.to_datetime(df[date_col], format="%m/%d/%Y %H:%M:%S:%f")
 
-    return df
+    return {SegmentsData: df[keep_columns]}
+
+
+
 
 
 def test_parse_segment():

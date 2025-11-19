@@ -4,6 +4,7 @@ from .file import FileHashRegistry, FileMetadata, FolderMetadata
 from .manager import ProcessingJob, ProcessingSession, StatusEnum
 
 from .rsm_tmptr import TmptrData
+from .rsm_segments import SegmentsData
 from .rsm_mcdata import (
     Rpcs,
     RpcsPres,
@@ -16,11 +17,6 @@ from .rsm_mcdata import (
     LcsTemp,
     McInDiscr,
 )
-
-from sqlalchemy.dialects.mssql import DATETIME2
-from sqlalchemy.sql.sqltypes import DateTime
-
-E2UDE_DATETIME = DateTime().with_variant(DATETIME2(0), "mssql")
 
 __all__ = [
     "Base",

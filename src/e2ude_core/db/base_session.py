@@ -1,9 +1,22 @@
 from sqlalchemy.orm import declarative_base, sessionmaker
 from e2ude_core.config import settings
 from sqlalchemy.dialects.mssql import DATETIME2
-from sqlalchemy.sql.sqltypes import DateTime
+from sqlalchemy.sql.sqltypes import DateTime, TypeDecorator
 
-E2UDE_DATETIME = DateTime().with_variant(DATETIME2(0), "mssql")
+
+def E2UDE_DATETIME(precision: int | None = None) -> TypeDecorator:
+    """
+    Factory function that returns a database-specific DATETIME type.
+
+    - For MSSQL, returns DATETIME2 with specified precision.
+    - For other databases (like SQLite), returns a standard DateTime.
+    """
+    if settings.database.type == "mssql":
+        return DATETIME2(precision=precision)
+    else:
+        # SQLite's native DATETIME does not support precision.
+        return DateTime(timezone=False)
+
 
 # Conditionally set a default schema for MSSQL to keep tables organized.
 if settings.database.type == "mssql":

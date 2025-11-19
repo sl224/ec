@@ -26,8 +26,8 @@ class ProcessingSession(Base):
     user_name = Column(String(40), nullable=True)
     host_name = Column(String(40), nullable=True)
     status = Column(Enum(StatusEnum), default="UNINITIALIZED")
-    start_time = Column(E2UDE_DATETIME, server_default=func.now())
-    end_time = Column(E2UDE_DATETIME, nullable=True)
+    start_time = Column(E2UDE_DATETIME(), server_default=func.now())
+    end_time = Column(E2UDE_DATETIME(), nullable=True)
     jobs = relationship("ProcessingJob", back_populates="session", lazy="dynamic")
 
 

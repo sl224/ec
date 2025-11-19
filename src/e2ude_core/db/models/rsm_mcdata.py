@@ -15,7 +15,7 @@ class Rpcs(Base):
         Integer, ForeignKey(schema_fkey("metadata_hash_registry.id")), primary_key=True
     )
     line_number = Column("LineNumber", Integer, primary_key=True)
-    system_time_stamp = Column("System TimeStamp", E2UDE_DATETIME)
+    system_time_stamp = Column("System TimeStamp", E2UDE_DATETIME())
     humidity_b = Column("Humidity B", Float)
     secondary_high_pressure = Column("Secondary High Pressure", Float)
     high_temp = Column("High Temp", Float)
@@ -33,8 +33,8 @@ class RpcsPres(Base):
         Integer, ForeignKey(schema_fkey("metadata_hash_registry.id")), primary_key=True
     )
     line_number = Column("LineNumber", Integer, primary_key=True)
-    system_time_stamp = Column("System TimeStamp", E2UDE_DATETIME)
-    dataset_time_stamp = Column("Dataset TimeStamp", E2UDE_DATETIME)
+    system_time_stamp = Column("System TimeStamp", E2UDE_DATETIME())
+    dataset_time_stamp = Column("Dataset TimeStamp", E2UDE_DATETIME())
 
     # Generate repeated pressure columns programmatically.
     _primary_high_pressure_cols = {
@@ -64,7 +64,7 @@ class NavData(Base):
         Integer, ForeignKey(schema_fkey("metadata_hash_registry.id")), primary_key=True
     )
     line_number = Column("LineNumber", Integer, primary_key=True)
-    system_time_stamp = Column("System TimeStamp", E2UDE_DATETIME)
+    system_time_stamp = Column("System TimeStamp", E2UDE_DATETIME())
     nav_mode = Column("Nav Mode", String(50))
     magnetic_variation = Column("Magnetic Variation", Float)
     true_air_speed = Column("True Air Speed", Float)
@@ -107,7 +107,7 @@ class RadarState(Base):
         Integer, ForeignKey(schema_fkey("metadata_hash_registry.id")), primary_key=True
     )
     line_number = Column("LineNumber", Integer, primary_key=True)
-    system_time_stamp = Column("System TimeStamp", E2UDE_DATETIME)
+    system_time_stamp = Column("System TimeStamp", E2UDE_DATETIME())
     rscp_off_switch_state = Column("RSCP_OFF_Switch_State", String)
     rscp_on_switch_state = Column("RSCP_ON_Switch_State", String)
     rscp_stby_switch_state = Column("RSCP_STBY_Switch_State", String)
@@ -129,7 +129,7 @@ class RotoScan(Base):
         Integer, ForeignKey(schema_fkey("metadata_hash_registry.id")), primary_key=True
     )
     line_number = Column("LineNumber", Integer, primary_key=True)
-    system_time_stamp = Column("System TimeStamp", E2UDE_DATETIME)
+    system_time_stamp = Column("System TimeStamp", E2UDE_DATETIME())
     scan_mode = Column("ScanMode", String)
     scan_rpm = Column("ScanRPM", Float)
     rpm_command = Column("RPM_Command", String)
@@ -145,7 +145,7 @@ class GfcDb(Base):
         Integer, ForeignKey(schema_fkey("metadata_hash_registry.id")), primary_key=True
     )
     line_number = Column("LineNumber", Integer, primary_key=True)
-    system_time_stamp = Column("System TimeStamp", E2UDE_DATETIME)
+    system_time_stamp = Column("System TimeStamp", E2UDE_DATETIME())
     time_stamp = Column("Time Stamp", String)
     group_fault_code = Column("Group Fault Code", Integer)
     confirmation_status = Column("Confirmation Status", String)
@@ -165,7 +165,7 @@ class PfcDb(Base):
         Integer, ForeignKey(schema_fkey("metadata_hash_registry.id")), primary_key=True
     )
     line_number = Column("LineNumber", Integer, primary_key=True)
-    system_time_stamp = Column("System TimeStamp", E2UDE_DATETIME)
+    system_time_stamp = Column("System TimeStamp", E2UDE_DATETIME())
     processed_fault_code = Column("Processed Fault Code", Integer)
     fault_description = Column("Fault Description", String)
     subsystem = Column("Subsystem", String)
@@ -180,11 +180,11 @@ class RfcDb(Base):
         Integer, ForeignKey(schema_fkey("metadata_hash_registry.id")), primary_key=True
     )
     line_number = Column("LineNumber", Integer, primary_key=True)
-    system_time_stamp = Column("System TimeStamp", E2UDE_DATETIME)
+    system_time_stamp = Column("System TimeStamp", E2UDE_DATETIME())
     fci_indicator = Column("FCI Indicator", String)
     raw_fault_code = Column("Raw Fault Code", String)
     fault_status = Column("Fault Status", String)
-    time_stamp = Column("TimeStamp", E2UDE_DATETIME)
+    time_stamp = Column("TimeStamp", E2UDE_DATETIME())
     bit_type_indicator = Column("Bit Type Indicator", String)
     consecutive_true_count = Column("Consecutive True Count", Integer)
     total_true_count = Column("Total True Count", Integer)
@@ -204,10 +204,10 @@ class LcsTemp(Base):
         Integer, ForeignKey(schema_fkey("metadata_hash_registry.id")), primary_key=True
     )
     line_number = Column("LineNumber", Integer, primary_key=True)
-    system_time_stamp = Column("System TimeStamp", E2UDE_DATETIME)
+    system_time_stamp = Column("System TimeStamp", E2UDE_DATETIME())
     lcs_temp_f = Column("LCS Temp F", String)
     lcs_temp_status = Column("LCS Temp Status", String)
-    lcs_time = Column("LCS Time", E2UDE_DATETIME)
+    lcs_time = Column("LCS Time", E2UDE_DATETIME())
 
 
 class McInDiscr(Base):
@@ -218,7 +218,7 @@ class McInDiscr(Base):
         Integer, ForeignKey(schema_fkey("metadata_hash_registry.id")), primary_key=True
     )
     line_number = Column("LineNumber", Integer, primary_key=True)
-    system_time_stamp = Column("System TimeStamp", E2UDE_DATETIME)
+    system_time_stamp = Column("System TimeStamp", E2UDE_DATETIME())
     power_on = Column("Power On", Boolean)
     cooling_air = Column("Cooling Air", Boolean)
     external_temperature_sensor = Column("External Temperature Sensor", Integer)

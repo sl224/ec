@@ -10,7 +10,7 @@ def parse_tmptr_dataframe(file_path: Path) -> pd.DataFrame:
     df = pd.read_csv(
         file_path,
         header=None,
-        names=["afmc", "date", "time", "category", "temp_f_raw", "temp_c_raw"],
+        names=["afmc", "date", "time", "category", "temp_c_raw", "temp_f_raw"],
         dtype=str,
     )
 

@@ -13,7 +13,7 @@ class FolderMetadata(Base):
     __tablename__ = "metadata_folder"
     id = Column("id", Integer, primary_key=True)
     buno = Column("buno", String(6), nullable=False)
-    folder_datetime = Column("folder_datetime", E2UDE_DATETIME, nullable=False)
+    folder_datetime = Column("folder_datetime", E2UDE_DATETIME(0), nullable=False)
     path = Column("path", String(500), unique=True, nullable=False)
     files = relationship("FileMetadata", back_populates="folder")
 
