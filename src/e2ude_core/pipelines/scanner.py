@@ -37,7 +37,7 @@ class MetadataScanHandler:
             logger.info(
                 f"[{self.PIPELINE_ID}] Job skipped. Fetching existing file list."
             )
-            return self._fetch_existing_files()
+            return self.fetch_existing_files()
 
         job_updater.mark_running("Scanning directory...")
         raw_files = scan_directory(self.extract_dir, self.pattern_map, FileType.UNKNOWN)
@@ -47,13 +47,14 @@ class MetadataScanHandler:
             return []
 
         job_updater.mark_running(f"Cataloging {len(raw_files)} files...")
-        self._upsert_metadata(raw_files)
+        self.upsert(raw_files)
 
         job_updater._rows_uploaded_in_scope = len(raw_files)
-        return self._fetch_existing_files()
+        return self.fetch_existing_files()
 
-    def _upsert_metadata(self, files: List[Dict[str, Any]]):
+    def upsert(self, files: List[Dict[str, Any]]):
         """
+        Public API to insert or update file metadata.
         Orchestrates DB metadata updates via a 3-step process:
         1. Resolve: Ensure all file hashes exist in the registry.
         2. Diff: Detect new or changed files.
@@ -69,6 +70,31 @@ class MetadataScanHandler:
         except Exception:
             logger.error("Failed to upsert metadata.", exc_info=True)
             raise
+
+    def fetch_existing_files(self) -> List[FileToProcess]:
+        """
+        Public API to query the DB to get the list of all files associated with the folder.
+        """
+        with self.eng.connect() as conn:
+            query = select(
+                FileMetadata.id,
+                FileMetadata.hash_id,
+                FileMetadata.file_type,
+                FileMetadata.relative_path,
+            ).where(FileMetadata.folder_id == self.folder_id)
+
+            results = []
+            for row in conn.execute(query):
+                results.append(
+                    FileToProcess(
+                        file_id=row.id,
+                        hash_id=row.hash_id,
+                        file_type=row.file_type,
+                        relative_path=row.relative_path,
+                        full_path=self.extract_dir / row.relative_path,
+                    )
+                )
+            return results
 
     def _ensure_hashes_exist(self, conn, unique_md5s: List[bytes]) -> Dict[str, int]:
         """
@@ -197,28 +223,3 @@ class MetadataScanHandler:
             )
 
             conn.execute(stmt, to_update)
-
-    def _fetch_existing_files(self) -> List[FileToProcess]:
-        """
-        Queries the DB to get the list of all files associated with the folder.
-        """
-        with self.eng.connect() as conn:
-            query = select(
-                FileMetadata.id,
-                FileMetadata.hash_id,
-                FileMetadata.file_type,
-                FileMetadata.relative_path,
-            ).where(FileMetadata.folder_id == self.folder_id)
-
-            results = []
-            for row in conn.execute(query):
-                results.append(
-                    FileToProcess(
-                        file_id=row.id,
-                        hash_id=row.hash_id,
-                        file_type=row.file_type,
-                        relative_path=row.relative_path,
-                        full_path=self.extract_dir / row.relative_path,
-                    )
-                )
-            return results

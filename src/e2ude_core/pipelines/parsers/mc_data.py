@@ -4,7 +4,6 @@ from pathlib import Path
 from typing import Dict, Type
 
 from e2ude_core.db.base_session import Base
-
 # Import the models this parser produces
 from e2ude_core.db.models import (
     Rpcs,
@@ -17,9 +16,7 @@ from e2ude_core.db.models import (
     LcsTemp,
     McInDiscr,
 )
-
 from e2ude_core.pipelines.cleaning import clean_dataframe_from_model
-
 from e2ude_core.pipelines.parsers.mc_data_scrape import (
     scrape_lcs_temp_record,
     scrape_mc_in_discr,
@@ -31,7 +28,6 @@ from e2ude_core.pipelines.parsers.mc_data_scrape import (
     scrape_rpcs_pres_record,
     scrape_rpcs_record,
 )
-
 # Maps message type strings from the log file to their corresponding model and scrape function.
 parser_map = {
     "RPCS:": (Rpcs, scrape_rpcs_record),
@@ -67,41 +63,31 @@ def parse_mcdata(file_path: Path) -> Dict[Type[Base], pd.DataFrame]:
 
             if message_type_str in parser_map:
                 model, scrape_func = parser_map[message_type_str]
-
-                scraped_data = scrape_func(line)
-
-                row = [i] + scraped_data  # Prepend line number
-
-                data[message_type_str].append(row)
+                
+                row_dict = scrape_func(line)
+                row_dict["LineNumber"] = i
+                
+                data[message_type_str].append(row_dict)
         except Exception:
-            # Skip blank or malformed lines
             continue
 
     ret_payload: Dict[Type[Base], pd.DataFrame] = {}
 
     for str_key, model_tuple in parser_map.items():
         model, _ = model_tuple
-
-        # Get all column names from the model's table definition
-        all_model_cols = [c.name for c in model.__table__.columns]
-
-        # Assemble the DataFrame column order, starting with the line number.
-        columns = []
-        if "LineNumber" in all_model_cols:
-            columns.append("LineNumber")
-
-        # Add the data columns, excluding primary keys (like hash_id)
-        data_cols = [c.name for c in model.__table__.columns if not c.primary_key]
-        columns.extend(data_cols)
-
         raw_rows = data[str_key]
 
-        # Create a raw DataFrame, ensuring columns are set even if no data was found.
-        df = pd.DataFrame(raw_rows, columns=columns)
+        df = pd.DataFrame(raw_rows)
 
-        # Clean and cast the DataFrame based on the model's types.
-        clean_df = clean_dataframe_from_model(df, model)
+        if not df.empty:
+            clean_df = clean_dataframe_from_model(df, model)
+            ret_payload[model] = clean_df
+        else:
+            # Create an empty DataFrame with the correct columns if no data was found
+            cols = [c.name for c in model.__table__.columns]
+            # Remove columns that are auto-generated or not expected from the parser
+            cols_to_keep = [c for c in cols if c not in ('id', 'hash_id')]
+            ret_payload[model] = pd.DataFrame(columns=cols_to_keep)
 
-        ret_payload[model] = clean_df
 
     return ret_payload

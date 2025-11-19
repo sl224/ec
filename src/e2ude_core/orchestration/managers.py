@@ -1,5 +1,6 @@
 import logging
 
+from dataclasses import dataclass
 from sqlalchemy import (
     func,
 )
@@ -70,6 +71,13 @@ class JobManager:
         if self._session:
             self._session.close()
         self.Session.remove()
+
+
+@dataclass
+class JobControl:
+    """Yielded by job_scope to allow clean conditional execution."""
+    manager: "JobManager"
+    active: bool
 
 
 class SessionManager:

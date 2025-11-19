@@ -3,10 +3,12 @@ import tempfile
 import shutil
 from enum import StrEnum
 from pathlib import Path
-
+import io
+import hashlib
 import logging
-from typing import Union
+from typing import Union, List, Dict, Any
 
+logger = logging.getLogger(__name__)
 
 class FileType(StrEnum):
     UNKNOWN = "UNKNOWN"
@@ -95,8 +97,7 @@ file_type_patterns = {
 
 class UnzipContext:
     """
-    Context manager to recursively unzip an archive to a temporary
-    directory, identify all contained files, and auto-cleanup on exit.
+    Legacy Context manager (kept for compatibility or full extractions).
     """
 
     def __init__(self, zip_path: Union[str, Path]):
@@ -105,52 +106,90 @@ class UnzipContext:
             raise FileNotFoundError(f"Zip file not found: {self.zip_path}")
 
         self.temp_dir: str = None
-        # self.file_list: List[Tuple[Path, Union[FileType, str]]] = []
 
     def __enter__(self):
-        """Create temp dir, unzip, and build file list."""
         self.temp_dir = Path(tempfile.mkdtemp())
         logging.info(f"Extracting '{self.zip_path.name}' to {self.temp_dir}")
 
-        # 1. Unzip all files recursively
         recursive_unzip(self.temp_dir, self.zip_path)
 
-        # # 2. Walk all files and categorize them
-        # for file_path in temp_dir_path.rglob("*"):
-        #     if not file_path.is_file():
-        #         continue
-
-        #     # Get path relative to the /temp_dir
-        #     relative_path = file_path.relative_to(temp_dir_path)
-
-        #     found_type = "UNKNOWN"
-
-        #     # 3. Check against patterns
-        #     # We use relative_path.match() which works with glob patterns
-        #     # like '**/file' and 'file'
-        #     for file_type, pattern in file_type_patterns.items():
-        #         if relative_path.match(pattern):
-        #             found_type = file_type  # Store the Enum object
-        #             break  # Stop at first match
-
-        #     self.file_list.append((found_type, file_path))
-
-        # Return the 'self' object to be used after 'as'
         return self
 
     def __exit__(self, exc_type, exc_value, traceback):
-        """Clean up the temporary directory."""
         if self.temp_dir and Path(self.temp_dir).exists():
-            logging.info(f"Cleaning up temp dir: {self.temp_dir}")
             try:
                 shutil.rmtree(self.temp_dir)
             except Exception as e:
                 logging.error(f"Failed to delete temp dir {self.temp_dir}: {e}")
 
-        # Allow exceptions to propagate.
+
+def calculate_stream_md5(f_obj, chunk_size=4096) -> bytes:
+    """Calculates MD5 from a file-like object stream."""
+    hash_md5 = hashlib.md5()
+    for chunk in iter(lambda: f_obj.read(chunk_size), b""):
+        hash_md5.update(chunk)
+    return hash_md5.digest()
+
+
+class RecursiveZipScanner:
+    """
+    Scans a zip file recursively in memory (extracting nested zips to temp only when needed),
+    calculating hashes and identifying file types without full extraction.
+    """
+    def __init__(self, root_zip_path: Path):
+        self.root_zip_path = root_zip_path
+        self.files_found: List[Dict[str, Any]] = []
+
+    def scan(self) -> List[Dict[str, Any]]:
+        with ZipFile(self.root_zip_path, 'r') as zf:
+            self._scan_zip(zf, Path(""))
+        return self.files_found
+
+    def _scan_zip(self, zf: ZipFile, relative_parent: Path):
+        for name in zf.namelist():
+            # Skip directories
+            if name.endswith('/'):
+                continue
+                
+            current_rel_path = relative_parent / name
+            
+            # Check if it's a nested zip
+            if name.lower().endswith('.zip'):
+                # For nested zips, we must extract to a temp file to open with zipfile module
+                with tempfile.NamedTemporaryFile() as tmp_zip:
+                    tmp_zip.write(zf.read(name))
+                    tmp_zip.flush()
+                    try:
+                        with ZipFile(tmp_zip.name, 'r') as nested_zf:
+                            self._scan_zip(nested_zf, current_rel_path.with_suffix(''))
+                    except Exception as e:
+                        logger.warning(f"Failed to scan nested zip {current_rel_path}: {e}")
+                continue
+
+            # Identify File Type
+            f_type = FileType.UNKNOWN
+            for ftype, pattern in file_type_patterns.items():
+                if current_rel_path.match(pattern):
+                    f_type = ftype
+                    break
+            
+            # Calculate Hash
+            with zf.open(name) as f_stream:
+                md5 = calculate_stream_md5(f_stream)
+                size = zf.getinfo(name).file_size
+
+            self.files_found.append({
+                "relative_path": str(current_rel_path),
+                "file_type": f_type.value,
+                "file_size_bytes": size,
+                "md5": md5
+            })
 
 
 def recursive_unzip(extract_dir, zip_path):
+    """
+    Recursively unzips nested archives.
+    """
     with ZipFile(zip_path, "r") as zip_ref:
         zip_ref.extractall(extract_dir)
 
@@ -161,7 +200,7 @@ def recursive_unzip(extract_dir, zip_path):
     while to_unzip and nesting < MAX_NESTING:
         zip_path = to_unzip.pop()
         extract_dir = Path(zip_path.parent / zip_path.stem)
-        extract_dir.mkdir()
+        extract_dir.mkdir(exist_ok=True)
         with ZipFile(zip_path, "r") as zip_ref:
             zip_ref.extractall(extract_dir)
         zip_path.unlink()

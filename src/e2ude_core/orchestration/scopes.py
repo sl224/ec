@@ -1,7 +1,7 @@
 import logging
 from contextlib import contextmanager
 
-from e2ude_core.orchestration.managers import SessionManager
+from e2ude_core.orchestration.managers import SessionManager, JobControl
 from e2ude_core.db.models import StatusEnum
 from e2ude_core.pipelines.contexts import JobContext
 from e2ude_core.context import EtlContext
@@ -37,9 +37,11 @@ def job_scope(
     context: JobContext,
 ):
     """
-    Manages the lifecycle of a single `ProcessingJob`. It handles idempotency
-    by checking for previously completed jobs, creates a job record, yields a
-    `JobManager`, and guarantees status updates (COMPLETED or ERROR) on exit.
+    Manages processing life-cycle. Returns a JobControl object.
+    Usage:
+        with job_scope(mgr, ctx) as job:
+            if job.active:
+                # do work
     """
     # Unpack parameters from the polymorphic context object.
     pipeline_id = context.handler_instance.PIPELINE_ID
@@ -47,32 +49,24 @@ def job_scope(
     file_type = context.file_type
     file_id = context.file_id
     hash_id = context.hash_id
-    dataset_key_str = context.dataset_key  # Already a string
+    dataset_key_str = context.dataset_key
 
-    job_updater = None  # Ensure it's defined in all paths
-    should_skip = False  # Ensure it's defined
+    job_updater = None
 
     try:
-        # Skip logic: check if a completed job for this content hash already exists.
-        if hash_id is None:
-            logger.debug(f"Job {job_name} has no hash_id, will run.")
-            is_already_completed = False
-        else:
-            is_already_completed = session_manager.check_for_completed_job(
+        # 1. Skip logic: Check global completion (idempotency)
+        if hash_id is not None:
+            is_completed = session_manager.check_for_completed_job(
                 pipeline_id=pipeline_id,
                 hash_id=hash_id,
                 dataset_key=dataset_key_str,
             )
+            if is_completed:
+                logger.debug(f"Skipping {job_name}: Already Complete.")
+                yield JobControl(manager=None, active=False)
+                return
 
-        if is_already_completed:
-            logger.debug(
-                f"Skipping {job_name}: Found COMPLETED job in a previous session for hash_id {hash_id}."
-            )
-            should_skip = True
-            yield None, True  # Yield (updater=None, should_skip=True)
-            return  # Exit context manager early
-
-        # Setup: Get or create the job record for this session.
+        # 2. Setup: Get or create the job record for this session.
         job_updater = session_manager.get_or_create_job(
             job_name=job_name,
             file_type=file_type,
@@ -82,37 +76,30 @@ def job_scope(
             dataset_key=dataset_key_str,
         )
 
+        # 3. Check status within current session (restart recovery)
         current_status = job_updater.get_status()
         if current_status == StatusEnum.COMPLETED:
-            logger.debug(
-                f"Skipping {job_name}: already COMPLETED (within this session)."
-            )
-            should_skip = True
-            yield job_updater, True
+            logger.debug(f"Skipping {job_name}: already COMPLETED in session.")
+            yield JobControl(manager=job_updater, active=False)
             return
 
         job_updater.mark_running(f"Starting {pipeline_id} processing")
 
-        # Yield (updater, should_skip=False)
-        yield job_updater, False
+        # 4. Yield Active Control
+        yield JobControl(manager=job_updater, active=True)
+
+        # 5. Success Mark
+        rows = getattr(job_updater, "_rows_uploaded_in_scope", None)
+        job_updater.mark_completed(
+            message=f"{pipeline_id} processed successfully",
+            rows=rows,
+        )
 
     except Exception as e:
-        # Error handling: mark the job as failed.
         logger.error(f"Failed to process {job_name}: {e}", exc_info=True)
         if job_updater:
             job_updater.mark_failed(error_message=f"Failed: {e}")
-        # Re-raise exception to be handled by the outer session scope
         raise
-    else:
-        # Success: mark the job as completed if it wasn't skipped.
-        if job_updater and not should_skip:
-            rows = getattr(job_updater, "_rows_uploaded_in_scope", None)
-
-            job_updater.mark_completed(
-                message=f"{pipeline_id} processed successfully",
-                rows=rows,
-            )
     finally:
-        # Teardown: close the job's database session.
         if job_updater:
             job_updater.close_session()
