@@ -12,11 +12,31 @@ class StatusEnum(PyEnum):
     ERROR = "ERROR"
 
 
-class ProcessingSession(Base):
+class ArtifactManifest(Base):
     """
-    Represents a single execution run of the ETL against a specific folder.
+    A lightweight registry of valid data currently stored in the database.
     """
 
+    __tablename__ = "metadata_artifact_manifest"
+
+    hash_id = Column(
+        Integer,
+        ForeignKey(schema_fkey("metadata_hash_registry.id")),
+        primary_key=True,
+        nullable=False,
+    )
+    target_table = Column(String(100), primary_key=True, nullable=False)
+    handler_version = Column(Integer, nullable=False, default=1)
+
+    __table_args__ = (
+        # Clustered index (implied by PK) is usually sufficient,
+        # but explicit index ensures covering behavior if needed.
+        Index("ix_artifact_lookup", "hash_id", "target_table"),
+        {"schema": DEFAULT_SCHEMA},
+    )
+
+
+class ProcessingSession(Base):
     __tablename__ = "processing_sessions"
     id = Column(Integer, primary_key=True)
 
@@ -32,7 +52,8 @@ class ProcessingSession(Base):
 
 class ProcessingJob(Base):
     """
-    Represents a single unit of work, e.g., processing one table from one file.
+    Audit Log for ETL execution.
+    No longer used for logic/skipping checks.
     """
 
     __tablename__ = "processing_jobs"
@@ -41,19 +62,18 @@ class ProcessingJob(Base):
     )
     id = Column(Integer, primary_key=True)
 
-    job_name = Column(String(500))  # e.g., "VersionsSummaryHandler: abc_Versions.xml"
+    job_name = Column(String(500))
     file_type = Column(String(50), index=True)
-    pipeline_id = Column(String(255), nullable=True, index=True)
-    target_name = Column(String(50), nullable=True, index=True)
+    pipeline_id = Column(String(255), nullable=True)  # Index removed (not queried)
+    target_name = Column(String(50), nullable=True)  # Index removed
     handler_version = Column(Integer, default=1, nullable=False)
     rows_uploaded = Column(Integer, nullable=True)
     status = Column(Enum(StatusEnum), default=StatusEnum.PENDING, index=True)
     message = Column(String, nullable=True)
     start_time = Column(DateTime, nullable=True)
     end_time = Column(DateTime, nullable=True)
-    dataset_key = Column(String(50), nullable=True, index=True)
+    dataset_key = Column(String(50), nullable=True)
 
-    # Use `schema_fkey` to reference schema-qualified columns for foreign keys.
     file_id = Column(
         Integer,
         ForeignKey(schema_fkey("metadata_file.id")),
@@ -61,7 +81,6 @@ class ProcessingJob(Base):
         index=True,
     )
 
-    # Use `schema_fkey` for the hash registry foreign key.
     hash_id = Column(
         Integer,
         ForeignKey(schema_fkey("metadata_hash_registry.id")),
@@ -72,8 +91,7 @@ class ProcessingJob(Base):
     session = relationship("ProcessingSession", back_populates="jobs")
 
     __table_args__ = (
-        Index("ix_folder_status_type", "file_type", "status"),
-        # Unique index to find a specific job within a session.
+        # Keep index for "Find jobs in this session"
         Index(
             "ix_job_lookup",
             "session_id",
@@ -82,7 +100,6 @@ class ProcessingJob(Base):
             "dataset_key",
             unique=True,
         ),
-        # Index to check for completed hashes across *all* sessions
-        Index("ix_hash_skip_lookup", "pipeline_id", "hash_id", "dataset_key", "status"),
+        # DELETED: "ix_hash_skip_lookup" - Replaced by ArtifactManifest
         {"schema": DEFAULT_SCHEMA},
     )

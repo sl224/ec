@@ -4,15 +4,13 @@ from enum import Enum, auto
 from dataclasses import dataclass, field
 from typing import List, Tuple, Optional
 
-# Import models used for queries
 from e2ude_core.db.models import (
-    ProcessingSession,
-    ProcessingJob,
-    StatusEnum,
     FileMetadata,
 )
-from e2ude_core.pipelines.scanner import MetadataScanHandler
+
+# CHANGED: Import the constant ID, not the removed class
 from e2ude_core.registry import HANDLER_REGISTRY
+from e2ude_core.db.models import ArtifactManifest
 
 logger = logging.getLogger(__name__)
 
@@ -22,78 +20,69 @@ logger = logging.getLogger(__name__)
 
 class FolderState(Enum):
     UP_TO_DATE = auto()
-    PARTIAL = auto()
+    INCOMPLETE = auto()
+    NEEDS_SCAN = auto()
 
 
 @dataclass
 class WorkDelta:
     status: FolderState
+    # Tuple of (hash_id, dataset_key)
     missing_items: List[Tuple[int, str]] = field(default_factory=list)
+    # Context for why a scan is needed
+    scan_reason: Optional[str] = None
 
 
 # --- State Calculation Function ---
 
 
+# ... imports ...
+
+
 def get_folder_work_delta(
     eng: sa.Engine, folder_id: int, scan_version: int = 1
-) -> Optional[WorkDelta]:
+) -> WorkDelta:
     """
-    Determines the processing state of a folder by comparing the
-    'Actual' completed jobs against the 'Expected' registry requirements.
-
-    Args:
-        eng: Database engine.
-        folder_id: The folder to check.
-        scan_version: The required version of the MetadataScanHandler.
-                      If the last successful scan was older than this,
-                      returns None (forcing a re-scan).
-
-    Returns:
-        None if the folder has never been successfully scanned (or scan is outdated).
-        WorkDelta if scan is valid (status UP_TO_DATE or PARTIAL).
+    Determines processing state by checking the ArtifactManifest.
     """
     with eng.connect() as conn:
-        # 1. Check if the folder has ever been successfully scanned
-        #    AND if that scan meets the current version requirement.
-        scan_job_row = conn.execute(
-            sa.select(ProcessingJob.handler_version)
-            .join(ProcessingSession, ProcessingJob.session_id == ProcessingSession.id)
-            .where(
-                ProcessingSession.folder_id == folder_id,
-                ProcessingJob.pipeline_id == MetadataScanHandler.PIPELINE_ID,
-                # ProcessingJob.handler_version == scan_version,
-                ProcessingJob.status == StatusEnum.COMPLETED,
+        # 1. Check Scan Status via Manifest
+        # We assume hash_id=0 represents the folder-level scan artifact
+        scan_artifact = conn.execute(
+            sa.select(ArtifactManifest.handler_version).where(
+                ArtifactManifest.hash_id == 0,
+                ArtifactManifest.target_table == FileMetadata.__tablename__,
             )
-            .order_by(ProcessingJob.handler_version.desc())  # Get best version
-            .limit(1)
-        ).fetchone()
-        logger.debug(f"Found prexisting scan job {scan_job_row}")
-        if not scan_job_row:
-            # Never scanned
-            return None
+        ).scalar_one_or_none()
 
-        last_scan_version = scan_job_row[0]
-        if last_scan_version < scan_version:
-            logger.info(
-                f"Folder {folder_id} scan outdated (v{last_scan_version} < v{scan_version}). Re-scanning."
+        if scan_artifact is None:
+            return WorkDelta(status=FolderState.NEEDS_SCAN, scan_reason="New Folder")
+
+        if scan_artifact < scan_version:
+            return WorkDelta(
+                status=FolderState.NEEDS_SCAN,
+                scan_reason=f"Outdated Scan (v{scan_artifact} < v{scan_version})",
             )
-            return None
 
-        # 2. Get ACTUAL state (all completed jobs)
-        # Note: We might want to check versions here too, but typically
-        # semantic invalidation happens at the job_scope level.
-        # Here we just check "Is it done?".
+        # 2. Get ACTUAL state (From Manifest, not Jobs)
+        # Join Manifest -> FileMetadata to see what we have for *this* folder
         actual_stmt = (
-            sa.select(ProcessingJob.hash_id, ProcessingJob.target_name)
-            .join(FileMetadata, ProcessingJob.file_id == FileMetadata.id)
+            sa.select(FileMetadata.hash_id, ArtifactManifest.target_table)
+            .join(FileMetadata, FileMetadata.hash_id == ArtifactManifest.hash_id)
             .where(
-                FileMetadata.folder_id == folder_id,
-                ProcessingJob.status == StatusEnum.COMPLETED,
+                FileMetadata.folder_id == folder_id
+                # Implicitly, we accept ANY version in the manifest as "present",
+                # but we should filter by version if we want to force upgrades.
             )
         )
-        actual_work = set(conn.execute(actual_stmt).fetchall())
+        actual_rows = conn.execute(actual_stmt).fetchall()
 
-        # 3. Get EXPECTED state (all files found * registry definitions)
+        # If you want to enforce versioning per-file:
+        # In the loop below, you'd check if `actual_version < required_version`
+
+        actual_work = {(row.hash_id, row.target_table) for row in actual_rows}
+
+        # 3. Get EXPECTED state (Same as before)
         expected_work = set()
         files = conn.execute(
             sa.select(FileMetadata.hash_id, FileMetadata.file_type).where(
@@ -102,16 +91,15 @@ def get_folder_work_delta(
         ).fetchall()
 
         for hash_id, file_type in files:
-            handler = HANDLER_REGISTRY.get(file_type)
-            if handler:
-                for model in handler.expected_models:
+            handler_spec = HANDLER_REGISTRY.get(file_type)
+            if handler_spec:
+                for model in handler_spec.expected_models:
                     expected_work.add((hash_id, model.__tablename__))
 
-        # 4. Calculate the delta
+        # 4. Calculate Delta
         missing_items = list(expected_work - actual_work)
 
         if not missing_items:
-            # If `files` was empty, both sets are empty, this is correct.
             return WorkDelta(status=FolderState.UP_TO_DATE)
 
-        return WorkDelta(status=FolderState.PARTIAL, missing_items=missing_items)
+        return WorkDelta(status=FolderState.INCOMPLETE, missing_items=missing_items)

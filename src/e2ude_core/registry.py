@@ -1,7 +1,10 @@
-from typing import Dict
+from dataclasses import dataclass
+from typing import Callable, List, Type
+from pathlib import Path
+import pandas as pd
 
-from e2ude_core.pipelines.base import BaseHandler, FileHandler
 from e2ude_core.db.models import (
+    Base,
     NavData,
     PfcDb,
     RadarState,
@@ -15,30 +18,40 @@ from e2ude_core.db.models import (
     SegmentsData,
 )
 from e2ude_core.services.zip_io import FileType
-
 from e2ude_core.pipelines.parsers import (
     parse_tmptr_dataframe,
     parse_mcdata,
     parse_segment,
 )
 
-# Registry now stores BaseHandler (polymorphic)
-HANDLER_REGISTRY: Dict[str, BaseHandler] = {
-    FileType.TMPTR_LOG.value: FileHandler(
+
+@dataclass(frozen=True)
+class HandlerSpec:
+    pipeline_id: str
+    version: int
+    parser_func: Callable[[Path], dict[Type[Base], pd.DataFrame]]
+    expected_models: List[Type[Base]]
+
+
+# Registry maps FileType string -> HandlerSpec
+HANDLER_REGISTRY: dict[str, HandlerSpec] = {
+    FileType.TMPTR_LOG.value: HandlerSpec(
         pipeline_id="tmptr_log",
+        version=1,
         parser_func=parse_tmptr_dataframe,
-        table_config=[TmptrData],
+        expected_models=[TmptrData],
     ),
-    FileType.SEGMENTS.value: FileHandler(
+    FileType.SEGMENTS.value: HandlerSpec(
         pipeline_id="segments",
+        version=1,
         parser_func=parse_segment,
-        table_config=[SegmentsData],
+        expected_models=[SegmentsData],
     ),
-    # A "complex" handler for a file type that maps to multiple tables.
-    FileType.MCDATA.value: FileHandler(
+    FileType.MCDATA.value: HandlerSpec(
         pipeline_id="mcdata",
+        version=1,
         parser_func=parse_mcdata,
-        table_config=[
+        expected_models=[
             NavData,
             Rpcs,
             RpcsPres,
