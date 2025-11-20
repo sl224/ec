@@ -2,16 +2,15 @@ import logging
 import multiprocessing
 from pathlib import Path
 from typing import Tuple, List, Any
+from concurrent.futures import ThreadPoolExecutor
+from tqdm import tqdm
 
 # --- Core ETL Imports ---
 from e2ude_core.context import EtlContext
 from e2ude_core.orchestration.workflow import process_zip
 from e2ude_core.db import access as sql_io
 from e2ude_core.config import settings
-from e2ude_core.db.setup import (
-    initialize_database,
-    register_folders_bulk,
-)  # Changed import
+from e2ude_core.db.setup import initialize_database, register_folders_bulk
 from e2ude_core.logging_mp import listener_process, worker_configurer
 
 # Note: In 'spawn' mode, the global logger must be retrieved inside functions,
@@ -24,6 +23,8 @@ def get_data(eng) -> List[Tuple[int, Any]]:
     Fetches list of (FolderID, FolderPath).
     Using provided test data configuration.
     """
+    # ... (Your existing get_data logic) ...
+    # Placeholder for the 24k items you seemingly have
     id_paths = [
         (
             0,
@@ -41,21 +42,21 @@ def get_data(eng) -> List[Tuple[int, Any]]:
     return id_paths
 
 
+def check_path_exists(path_obj: Path) -> Path | None:
+    """Helper for parallel existence check."""
+    return path_obj if path_obj.exists() else None
+
+
 def worker_task(args: Tuple[Any, str, int, Path, EtlContext]):
     """
     The entry point for a Worker Process.
-    It sets up its own environment (logging, DB) and processes ONE item.
     """
     log_queue, log_level, folder_id, zip_path, context = args
 
-    # 1. Configure Logging for this specific worker process
     worker_configurer(log_queue, log_level)
 
-    # 2. Create a FRESH Database Engine
     try:
         worker_eng = sql_io.get_engine(settings.database)
-
-        # 3. Run the Workflow
         process_zip(
             eng=worker_eng, folder_id=folder_id, zip_path=zip_path, context=context
         )
@@ -72,16 +73,12 @@ def main():
     """
     Main entry point.
     """
-    # 1. Enforce 'spawn' for safety with SQLAlchemy/ODBC
     multiprocessing.set_start_method("spawn", force=True)
-
-    # 2. Setup Centralized Logging Queue via Manager
     manager = multiprocessing.Manager()
 
     try:
         log_queue = manager.Queue(-1)
 
-        # Configuration for the listener process
         listener_config = {
             "log_file": settings.logging.log_file,
             "level": settings.logging.level,
@@ -90,13 +87,11 @@ def main():
             "format": settings.logging.format,
         }
 
-        # Start the Listener
         listener = multiprocessing.Process(
             target=listener_process, args=(log_queue, listener_config)
         )
         listener.start()
 
-        # Configure the Main Process to also log to the queue
         worker_configurer(log_queue, settings.logging.level)
 
         # --- Main Logic ---
@@ -106,13 +101,11 @@ def main():
                 f"Starting E2UDE Core [Multiprocessing]. DB: {settings.database.type}"
             )
 
-            # 3. Initialize Database (One-time setup)
             main_eng = sql_io.get_engine(settings.database)
-            # WARNING: reset_tables=True wipes data. Use False for production.
             initialize_database(main_eng, reset_tables=True)
 
-            # 4. Fetch Work
             try:
+                # This returns (id, Path) tuples
                 source_data = get_data(main_eng)
             except Exception as e:
                 logger.warning(f"Could not fetch data: {e}")
@@ -123,30 +116,45 @@ def main():
             if not source_data:
                 logger.warning("No work found. Exiting.")
             else:
-                # 5. Context & Pre-processing
                 ctx = EtlContext.capture()
                 work_items = []
 
-                logger.info("Pre-registering folders in database...")
-
-                # Filter valid paths first
+                logger.info("Verifying file existence (Parallel)...")
+                
+                # --- OPTIMIZATION: Parallel Existence Check ---
+                # Extract just the Path objects for checking
+                all_paths = [Path(item[1]) for item in source_data]
                 valid_paths = []
-                for _, zip_path_obj in source_data:
-                    p = Path(zip_path_obj)
-                    if p.exists():
-                        valid_paths.append(p)
+
+                # Use ThreadPool for IO-bound existence checks
+                # max_workers=32 is usually a sweet spot for network drives
+                with ThreadPoolExecutor(max_workers=32) as executor:
+                    # tqdm gives you a progress bar so you know it's not frozen
+                    results = list(
+                        tqdm(
+                            executor.map(check_path_exists, all_paths),
+                            total=len(all_paths),
+                            desc="Checking Files",
+                            unit="file"
+                        )
+                    )
+
+                # Filter out None results
+                for i, res in enumerate(results):
+                    if res:
+                        valid_paths.append(res)
                     else:
-                        logger.warning(f"Skipping missing file: {p}")
+                        # Log missing files (optional: keep concise if many missing)
+                        logger.warning(f"Skipping missing file: {all_paths[i]}")
+
+                logger.info(f"Verified {len(valid_paths)} files exist. Registering...")
 
                 # Bulk Register (Optimized)
-                # Returns {Path: folder_id}
                 folder_id_map = register_folders_bulk(main_eng, valid_paths)
 
                 # Build work items from the map
                 for zip_path in valid_paths:
-                    # Get the ID (it might be missing if registration failed for some reason, e.g. bad name)
                     new_folder_id = folder_id_map.get(zip_path)
-
                     if new_folder_id:
                         work_items.append(
                             (
@@ -160,13 +168,12 @@ def main():
 
                 main_eng.dispose()
 
-                # 6. Launch Multiprocessing Pool
                 if not work_items:
                     logger.info("No valid work items prepared.")
                 else:
                     cpu_count = multiprocessing.cpu_count()
                     num_workers = max(1, cpu_count - 2)
-                    num_workers = 1  # Forced for debugging/safety
+                    # num_workers = 1 # Uncomment for debugging
 
                     logger.info(
                         f"Dispatching {len(work_items)} jobs to {num_workers} workers."
@@ -182,9 +189,7 @@ def main():
                     logger.info("All workers finished.")
 
         except KeyboardInterrupt:
-            logger.debug(
-                "\n[Manual Interrupt] Interrupted by user. Terminating workers..."
-            )
+            logger.debug("\n[Manual Interrupt] Terminating workers...")
             if pool:
                 pool.terminate()
                 pool.join()
@@ -193,10 +198,8 @@ def main():
         except Exception as e:
             logger.critical(f"Main process terminated unexpectedly: {e}", exc_info=True)
             import traceback
-
             traceback.print_exc()
         finally:
-            # 7. Cleanup Logging
             logger.info("Shutting down logging listener...")
             log_queue.put(None)
             listener.join()
