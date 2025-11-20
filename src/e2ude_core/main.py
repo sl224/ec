@@ -12,35 +12,30 @@ from e2ude_core.db import access as sql_io
 from e2ude_core.config import settings
 from e2ude_core.db.setup import initialize_database, register_folders_bulk
 from e2ude_core.logging_mp import listener_process, worker_configurer
+from sqlalchemy import text
 
 # Note: In 'spawn' mode, the global logger must be retrieved inside functions,
 # but we can define a placeholder here.
 logger = logging.getLogger(__name__)
 
-
 def get_data(eng) -> List[Tuple[int, Any]]:
+    # This query finds the most recent 100 folders from the source
+    # that have NOT yet been registered in our metadata_folder table.
+    q = """
+        SELECT TOP(100) source.FolderPath
+        FROM [AnalyticsDataMart].[E2D_METADATA].[FOLDER] AS source
+        LEFT JOIN (
+        select f.id, f.path from [e2ude_core_dev].metadata_folder as f 
+        inner join e2ude_core_dev.processing_sessions as s on s.folder_id = f.id
+        where 
+        s.STATUS = 'COMPLETED'
+        ) AS processed ON source.FolderPath = processed.path
+        WHERE processed.id IS NULL
+        ORDER BY source.FolderDatetime DESC
     """
-    Fetches list of (FolderID, FolderPath).
-    Using provided test data configuration.
-    """
-    # ... (Your existing get_data logic) ...
-    # Placeholder for the 24k items you seemingly have
-    id_paths = [
-        (
-            0,
-            Path(
-                r"tests/static_assets/zips/166501_20240212_185419_000_TransportRSM.fpkg.e2d.zip"
-            ),
-        ),
-        (
-            1,
-            Path(
-                r"tests/static_assets/zips/169069_20250203_004745_025_TransportRSM.fpkg.e2d.zip"
-            ),
-        ),
-    ]
-    return id_paths
-
+    with eng.connect() as conn:
+        paths = [Path(r[0]) for r in conn.execute(text(q)).fetchall()]
+    return paths
 
 def check_path_exists(path_obj: Path) -> Path | None:
     """Helper for parallel existence check."""
@@ -102,7 +97,7 @@ def main():
             )
 
             main_eng = sql_io.get_engine(settings.database)
-            initialize_database(main_eng, reset_tables=True)
+            initialize_database(main_eng, reset_tables=False)
 
             try:
                 # This returns (id, Path) tuples
@@ -123,7 +118,6 @@ def main():
                 
                 # --- OPTIMIZATION: Parallel Existence Check ---
                 # Extract just the Path objects for checking
-                all_paths = [Path(item[1]) for item in source_data]
                 valid_paths = []
 
                 # Use ThreadPool for IO-bound existence checks
@@ -132,8 +126,8 @@ def main():
                     # tqdm gives you a progress bar so you know it's not frozen
                     results = list(
                         tqdm(
-                            executor.map(check_path_exists, all_paths),
-                            total=len(all_paths),
+                            executor.map(check_path_exists, source_data),
+                            total=len(source_data),
                             desc="Checking Files",
                             unit="file"
                         )
@@ -179,9 +173,17 @@ def main():
                         f"Dispatching {len(work_items)} jobs to {num_workers} workers."
                     )
 
-                    pool = multiprocessing.Pool(processes=num_workers)
-                    result = pool.map_async(worker_task, work_items)
-                    result.get(timeout=None)
+                    pool = multiprocessing.Pool(processes=num_workers)                    
+                    # Use imap_unordered and wrap with tqdm for a live progress bar.
+                    # We wrap it in list() to consume the iterator and ensure all tasks complete.
+                    list(
+                        tqdm(
+                            pool.imap_unordered(worker_task, work_items),
+                            total=len(work_items),
+                            desc="Processing Folders",
+                            unit="folder",
+                        )
+                    )
 
                     pool.close()
                     pool.join()
