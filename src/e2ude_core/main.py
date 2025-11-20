@@ -8,9 +8,11 @@ from e2ude_core.context import EtlContext
 from e2ude_core.orchestration.workflow import process_zip
 from e2ude_core.db import access as sql_io
 from e2ude_core.config import settings
-from e2ude_core.db.setup import initialize_database, get_or_create_folder
+from e2ude_core.db.setup import (
+    initialize_database,
+    register_folders_bulk,
+)  # Changed import
 from e2ude_core.logging_mp import listener_process, worker_configurer
-from sqlalchemy import text
 
 # Note: In 'spawn' mode, the global logger must be retrieved inside functions,
 # but we can define a placeholder here.
@@ -18,10 +20,25 @@ logger = logging.getLogger(__name__)
 
 
 def get_data(eng) -> List[Tuple[int, Any]]:
-    q = "select FolderPath from [AnalyticsDataMart].[E2D_METADATA].[FOLDER]"
-    with eng.connect() as conn:
-        paths = [r[0] for r in conn.execute(text(q)).fetchall()]
-    return paths
+    """
+    Fetches list of (FolderID, FolderPath).
+    Using provided test data configuration.
+    """
+    id_paths = [
+        (
+            0,
+            Path(
+                r"tests/static_assets/zips/166501_20240212_185419_000_TransportRSM.fpkg.e2d.zip"
+            ),
+        ),
+        (
+            1,
+            Path(
+                r"tests/static_assets/zips/169069_20250203_004745_025_TransportRSM.fpkg.e2d.zip"
+            ),
+        ),
+    ]
+    return id_paths
 
 
 def worker_task(args: Tuple[Any, str, int, Path, EtlContext]):
@@ -32,11 +49,9 @@ def worker_task(args: Tuple[Any, str, int, Path, EtlContext]):
     log_queue, log_level, folder_id, zip_path, context = args
 
     # 1. Configure Logging for this specific worker process
-    # This redirects all logging.info() calls to the Queue.
     worker_configurer(log_queue, log_level)
 
     # 2. Create a FRESH Database Engine
-    # Engines cannot be shared across processes.
     try:
         worker_eng = sql_io.get_engine(settings.database)
 
@@ -45,15 +60,10 @@ def worker_task(args: Tuple[Any, str, int, Path, EtlContext]):
             eng=worker_eng, folder_id=folder_id, zip_path=zip_path, context=context
         )
     except KeyboardInterrupt:
-        # Workers should generally ignore SIGINT and let the parent terminate them,
-        # but catching it here prevents ugly tracebacks from every single worker.
         pass
     except Exception as e:
-        # Catch-all to ensure the worker doesn't crash silently
-        # We use the root logger (via worker_configurer) which sends to queue
         logging.error(f"Worker crashed processing {zip_path}: {e}", exc_info=True)
     finally:
-        # 4. Clean up DB resources explicitly
         if "worker_eng" in locals():
             worker_eng.dispose()
 
@@ -80,7 +90,7 @@ def main():
             "format": settings.logging.format,
         }
 
-        # Start the Listener (The only process that writes to the file)
+        # Start the Listener
         listener = multiprocessing.Process(
             target=listener_process, args=(log_queue, listener_config)
         )
@@ -97,7 +107,6 @@ def main():
             )
 
             # 3. Initialize Database (One-time setup)
-            # We use a temporary engine for the main process setup
             main_eng = sql_io.get_engine(settings.database)
             # WARNING: reset_tables=True wipes data. Use False for production.
             initialize_database(main_eng, reset_tables=True)
@@ -119,21 +128,26 @@ def main():
                 work_items = []
 
                 logger.info("Pre-registering folders in database...")
-                for zip_path_obj in source_data:
-                    # Ensure it's a Path object
-                    zip_path = Path(zip_path_obj)
 
-                    if not zip_path.exists():
-                        logger.warning(f"Skipping missing file: {zip_path}")
-                        continue
+                # Filter valid paths first
+                valid_paths = []
+                for _, zip_path_obj in source_data:
+                    p = Path(zip_path_obj)
+                    if p.exists():
+                        valid_paths.append(p)
+                    else:
+                        logger.warning(f"Skipping missing file: {p}")
 
-                    # We create the folder metadata sequentially here.
-                    # This prevents database locking issues if multiple workers
-                    # tried to insert the same folder at the same time.
-                    new_folder_id = get_or_create_folder(main_eng, zip_path)
+                # Bulk Register (Optimized)
+                # Returns {Path: folder_id}
+                folder_id_map = register_folders_bulk(main_eng, valid_paths)
+
+                # Build work items from the map
+                for zip_path in valid_paths:
+                    # Get the ID (it might be missing if registration failed for some reason, e.g. bad name)
+                    new_folder_id = folder_id_map.get(zip_path)
 
                     if new_folder_id:
-                        # Pack arguments for the worker
                         work_items.append(
                             (
                                 log_queue,
@@ -152,21 +166,14 @@ def main():
                 else:
                     cpu_count = multiprocessing.cpu_count()
                     num_workers = max(1, cpu_count - 2)
+                    num_workers = 1  # Forced for debugging/safety
 
                     logger.info(
                         f"Dispatching {len(work_items)} jobs to {num_workers} workers."
                     )
 
-                    # Use context manager for Pool, but manage lifecycle for interrupt safety
                     pool = multiprocessing.Pool(processes=num_workers)
-
-                    # Use map_async to allow the main thread to remain responsive to signals
-                    # Standard map() blocks completely and can swallow KeyboardInterrupt on some platforms
                     result = pool.map_async(worker_task, work_items)
-
-                    # Wait for results with a timeout loop to allow signal processing
-                    # OR just use .get() which blocks but on Python 3 should handle SIGINT.
-                    # However, the safest way to handle Ctrl+C in pools is to catch it around the wait.
                     result.get(timeout=None)
 
                     pool.close()
@@ -199,6 +206,5 @@ def main():
 
 
 if __name__ == "__main__":
-    # Freeze support is needed for Windows executables, but good practice generally
     multiprocessing.freeze_support()
     main()

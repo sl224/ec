@@ -4,6 +4,7 @@ from sqlalchemy.schema import CreateSchema
 import re
 from datetime import datetime
 from pathlib import Path
+from typing import List, Dict
 
 from e2ude_core.config import settings
 from e2ude_core.db.base_session import Base
@@ -47,53 +48,111 @@ def initialize_database(eng: sa.Engine, reset_tables: bool = False):
         Base.metadata.create_all(eng)
 
 
-def get_or_create_folder(eng: sa.Engine, zip_path: Path) -> int | None:
+def register_folders_bulk(eng: sa.Engine, zip_paths: List[Path]) -> Dict[Path, int]:
     """
-    Ensures the parent FolderMetadata row exists before processing.
-    Returns the folder's ID on success, None on failure.
+    Optimized bulk registration of folders.
+
+    Strategy:
+    1. Parse all local paths to get (Buno, Date) keys.
+    2. Fetch ALL existing IDs for those Bunos from DB in one query.
+    3. Calculate missing folders in memory.
+    4. Bulk Insert missing folders.
+    5. Return a map of {InputPath -> FolderID}.
     """
-    match = re.search(r"([0-9]+)_([0-9]{8}_[0-9]{6})", zip_path.name)
-    if not match:
-        logging.warning(f"Could not strip info from {zip_path}")
-        return None, None
-    buno, dt_str = match.groups()
-    dt = datetime.strptime(dt_str, "%Y%m%d_%H%M%S")
-    with eng.connect() as conn:
+    if not zip_paths:
+        return {}
+
+    # 1. Parse Metadata from Paths
+    # We store `obj_path` to map the result back to the exact input object
+    parsed_items = []
+
+    for zp in zip_paths:
+        match = re.search(r"([0-9]+)_([0-9]{8}_[0-9]{6})", zp.name)
+        if not match:
+            logger.warning(f"Could not parse BUNO/Date from: {zp.name}")
+            continue
+
+        buno, dt_str = match.groups()
         try:
-            # First, try to find the existing folder by its unique buno/datetime combination.
-            existing_id = conn.execute(
-                sa.select(FolderMetadata.id).where(
-                    FolderMetadata.buno == buno, FolderMetadata.folder_datetime == dt
-                )
-            ).scalar_one_or_none()
-
-            if existing_id:
-                logger.debug(
-                    f"Folder for buno '{buno}' at '{dt}' already exists with ID {existing_id}."
-                )
-                return existing_id
-
-            # If it doesn't exist, insert it and get the new ID.
-            result = conn.execute(
-                sa.insert(FolderMetadata).values(
-                    path=str(zip_path), buno=buno, folder_datetime=dt
-                )
+            dt = datetime.strptime(dt_str, "%Y%m%d_%H%M%S")
+            parsed_items.append(
+                {
+                    "obj_path": zp,  # Key for the returned map
+                    "buno": buno,
+                    "folder_datetime": dt,
+                    "path": str(zp),  # String for DB insert
+                    "scan_version": 0,  # Default for new folders
+                }
             )
+        except ValueError:
+            logger.warning(f"Invalid date format in: {zp.name}")
+            continue
+
+    if not parsed_items:
+        return {}
+
+    # 2. Fetch Existing IDs (Bulk Query)
+    # Filter by the BUNOs present in our list to reduce query scope
+    unique_bunos = {p["buno"] for p in parsed_items}
+    existing_map = {}  # Key: (buno, folder_datetime) -> Value: id
+
+    with eng.connect() as conn:
+        if unique_bunos:
+            stmt = sa.select(
+                FolderMetadata.id, FolderMetadata.buno, FolderMetadata.folder_datetime
+            ).where(FolderMetadata.buno.in_(unique_bunos))
+
+            for row in conn.execute(stmt):
+                existing_map[(row.buno, row.folder_datetime)] = row.id
+
+        # 3. Diff & Prepare Inserts
+        to_insert = []
+        seen_in_batch = set()
+
+        for item in parsed_items:
+            key = (item["buno"], item["folder_datetime"])
+
+            # If already in DB, we don't need to insert
+            if key in existing_map:
+                continue
+
+            # If we already queued this folder for insert in this batch (duplicate inputs), skip
+            if key in seen_in_batch:
+                continue
+
+            seen_in_batch.add(key)
+
+            # Prepare record for bulk insert
+            to_insert.append(
+                {
+                    "buno": item["buno"],
+                    "folder_datetime": item["folder_datetime"],
+                    "path": item["path"],
+                    "scan_version": item["scan_version"],
+                }
+            )
+
+        # 4. Bulk Insert (If needed)
+        if to_insert:
+            logger.info(f"Bulk inserting {len(to_insert)} new folders...")
+            conn.execute(sa.insert(FolderMetadata), to_insert)
             conn.commit()
-            new_id = result.inserted_primary_key[0]
-            logger.debug(f"Created new FolderMetadata record with ID {new_id}")
-            return new_id
-        except sa.exc.IntegrityError:  # Catches unique constraint violations
-            # This handles a race condition where another process inserted it.
-            conn.rollback()
-            logger.warning(
-                f"Race condition on insert for path '{zip_path}', re-querying."
-            )
-            return get_or_create_folder(eng, zip_path)
-        except Exception as e:
-            logger.error(
-                f"Failed to get or create FolderMetadata for path '{zip_path}': {e}",
-                exc_info=True,
-            )
-            conn.rollback()
-            return None
+
+            # 5. Re-fetch IDs for the newly inserted items
+            # Simplest robust way across different DBs (vs RETURNING) is to re-query the keys
+            stmt = sa.select(
+                FolderMetadata.id, FolderMetadata.buno, FolderMetadata.folder_datetime
+            ).where(FolderMetadata.buno.in_(unique_bunos))
+
+            for row in conn.execute(stmt):
+                existing_map[(row.buno, row.folder_datetime)] = row.id
+
+    # 6. Build Result Map
+    # Map the original Path objects to their IDs
+    result_map = {}
+    for item in parsed_items:
+        key = (item["buno"], item["folder_datetime"])
+        if key in existing_map:
+            result_map[item["obj_path"]] = existing_map[key]
+
+    return result_map
