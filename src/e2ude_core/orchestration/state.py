@@ -10,7 +10,7 @@ from e2ude_core.db.models import (
 
 # CHANGED: Import the constant ID, not the removed class
 from e2ude_core.registry import HANDLER_REGISTRY
-from e2ude_core.db.models import ArtifactManifest
+from e2ude_core.db.models import ArtifactManifest, FolderMetadata
 
 logger = logging.getLogger(__name__)
 
@@ -42,26 +42,23 @@ class WorkDelta:
 def get_folder_work_delta(
     eng: sa.Engine, folder_id: int, scan_version: int = 1
 ) -> WorkDelta:
-    """
-    Determines processing state by checking the ArtifactManifest.
-    """
     with eng.connect() as conn:
-        # 1. Check Scan Status via Manifest
-        # We assume hash_id=0 represents the folder-level scan artifact
-        scan_artifact = conn.execute(
-            sa.select(ArtifactManifest.handler_version).where(
-                ArtifactManifest.hash_id == 0,
-                ArtifactManifest.target_table == FileMetadata.__tablename__,
-            )
+        # 1. Check Scan Status via FolderMetadata
+        current_scan_ver = conn.execute(
+            sa.select(FolderMetadata.scan_version).where(FolderMetadata.id == folder_id)
         ).scalar_one_or_none()
 
-        if scan_artifact is None:
-            return WorkDelta(status=FolderState.NEEDS_SCAN, scan_reason="New Folder")
+        # Handle New Folder (current_scan_ver might be None if row missing, or 0 if default)
+        if current_scan_ver is None:
+            # Should technically not happen if process_zip ensures folder existence
+            return WorkDelta(
+                status=FolderState.NEEDS_SCAN, scan_reason="Folder not registered"
+            )
 
-        if scan_artifact < scan_version:
+        if current_scan_ver < scan_version:
             return WorkDelta(
                 status=FolderState.NEEDS_SCAN,
-                scan_reason=f"Outdated Scan (v{scan_artifact} < v{scan_version})",
+                scan_reason=f"Outdated Scan (v{current_scan_ver} < v{scan_version})",
             )
 
         # 2. Get ACTUAL state (From Manifest, not Jobs)

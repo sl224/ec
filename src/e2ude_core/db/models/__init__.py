@@ -1,7 +1,7 @@
 from e2ude_core.db.base_session import Base, SessionLocal
 
 from .file import FileHashRegistry, FileMetadata, FolderMetadata
-from .manager import ProcessingJob, ProcessingSession, StatusEnum
+from .manager import ProcessingJob, ProcessingSession, StatusEnum, ArtifactManifest
 
 from .rsm_tmptr import TmptrData
 from .rsm_segments import SegmentsData
@@ -39,4 +39,5 @@ __all__ = [
     "LcsTemp",
     "McInDiscr",
     "SegmentsData",
+    "ArtifactManifest",
 ]

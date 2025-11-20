@@ -12,7 +12,7 @@ class BadParameter(ValueError):
 
 def get_engine(db_settings, fast_executemany: bool = True, echo: bool = False):
     """
-    Creates and returns a SQLAlchemy engine based on the loaded pydantic settings.
+    Creates and returns a SQLAlchemy engine.
     """
     engine_args = {"echo": echo}
     url_object = None
@@ -28,6 +28,7 @@ def get_engine(db_settings, fast_executemany: bool = True, echo: bool = False):
                     "trusted_connection": db_settings.trusted_connection,
                 },
             )
+            # SQLAlchemy handles fast_executemany automatically if enabled here
             engine_args["fast_executemany"] = fast_executemany
 
         case "sqlite3":
@@ -51,22 +52,37 @@ def bulk_upload(
     df: pd.DataFrame,
     conn: Connection,
     sa_table: Table,
-    chunksize: int = 2000,
+    chunksize: int = 10000,
 ):
     """
-    Uploads a DataFrame to a database table in chunks.
+    Uploads a DataFrame to a database table using SQLAlchemy Core.
+    Safe for all data types (Timestamps, Integers, etc).
     """
     if df.empty:
         return
 
-    total_rows = len(df)
-    # Slice via `iloc` for memory-efficient chunking.
-    for start_idx in range(0, total_rows, chunksize):
-        df_chunk = df.iloc[start_idx : start_idx + chunksize]
+    # Align columns: only upload columns that exist in both DataFrame and Table
+    table_cols = [c.name for c in sa_table.columns]
+    common_cols = [c for c in table_cols if c in df.columns]
 
-        # Sanitize chunk just before upload, converting pandas/numpy nulls to SQL NULL.
+    if not common_cols:
+        logger.warning(
+            f"No matching columns found for table {sa_table.name}. Skipping."
+        )
+        return
+
+    df_aligned = df[common_cols]
+    total_rows = len(df_aligned)
+
+    # Chunking loop to prevent memory spikes
+    for start_idx in range(0, total_rows, chunksize):
+        # Use .iloc for positional slicing
+        df_chunk = df_aligned.iloc[start_idx : start_idx + chunksize]
+
+        # Sanitize: Convert NaN to None (SQL NULL)
         clean_chunk = df_chunk.replace({np.nan: None, pd.NA: None})
 
+        # Use SQLAlchemy Core (Fast enough, type-safe)
         conn.execute(
             sa_table.insert(),
             clean_chunk.to_dict(orient="records"),

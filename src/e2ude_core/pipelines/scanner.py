@@ -7,9 +7,8 @@ from sqlalchemy import bindparam, insert, select, update
 from sqlalchemy.exc import IntegrityError
 
 from e2ude_core.services.zip_io import RecursiveZipScanner
-from e2ude_core.db.models import FileMetadata, FileHashRegistry
+from e2ude_core.db.models import FileMetadata, FileHashRegistry, FolderMetadata
 from e2ude_core.orchestration.managers import JobManager
-from e2ude_core.db.models import ArtifactManifest
 
 logger = logging.getLogger(__name__)
 
@@ -76,23 +75,10 @@ def _upsert_metadata(eng: sa.Engine, folder_id: int, files: List[Dict[str, Any]]
             to_insert, to_update = _detect_changes(conn, folder_id, files, hash_map)
             _commit_changes(conn, to_insert, to_update)
 
-            # UPDATE MANIFEST for the "Metadata" itself
-            # Since metadata is folder-wide, we use hash_id=0 (or a folder-specific hash)
-            # to denote "The scan for this folder is done".
-
-            # Note: Using 0 as a sentinel for "Folder Level Work"
             conn.execute(
-                ArtifactManifest.__table__.delete().where(
-                    (ArtifactManifest.hash_id == 0)
-                    & (ArtifactManifest.target_table == FileMetadata.__tablename__)
-                )
-            )
-            conn.execute(
-                ArtifactManifest.__table__.insert().values(
-                    hash_id=None,
-                    target_table=FileMetadata.__tablename__,
-                    handler_version=SCANNER_VERSION,
-                )
+                update(FolderMetadata)
+                .where(FolderMetadata.id == folder_id)
+                .values(scan_version=SCANNER_VERSION)
             )
 
     except Exception:

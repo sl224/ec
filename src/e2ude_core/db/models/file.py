@@ -15,6 +15,7 @@ class FolderMetadata(Base):
     buno = Column("buno", String(6), nullable=False)
     folder_datetime = Column("folder_datetime", E2UDE_DATETIME(0), nullable=False)
     path = Column("path", String(500), unique=True, nullable=False)
+    scan_version = Column("scan_version", Integer, default=0, nullable=False)
     files = relationship("FileMetadata", back_populates="folder")
 
     __table_args__ = (
