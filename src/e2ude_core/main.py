@@ -10,6 +10,7 @@ from e2ude_core.db import access as sql_io
 from e2ude_core.config import settings
 from e2ude_core.db.setup import initialize_database, get_or_create_folder
 from e2ude_core.logging_mp import listener_process, worker_configurer
+from sqlalchemy import text
 
 # Note: In 'spawn' mode, the global logger must be retrieved inside functions,
 # but we can define a placeholder here.
@@ -17,25 +18,10 @@ logger = logging.getLogger(__name__)
 
 
 def get_data(eng) -> List[Tuple[int, Any]]:
-    """
-    Fetches list of (FolderID, FolderPath).
-    Using provided test data configuration.
-    """
-    id_paths = [
-        (
-            0,
-            Path(
-                r"tests/static_assets/zips/166501_20240212_185419_000_TransportRSM.fpkg.e2d.zip"
-            ),
-        ),
-        (
-            1,
-            Path(
-                r"tests/static_assets/zips/169069_20250203_004745_025_TransportRSM.fpkg.e2d.zip"
-            ),
-        ),
-    ]
-    return id_paths
+    q = "select FolderPath from [AnalyticsDataMart].[E2D_METADATA].[FOLDER]"
+    with eng.connect() as conn:
+        paths = [r[0] for r in conn.execute(text(q)).fetchall()]
+    return paths
 
 
 def worker_task(args: Tuple[Any, str, int, Path, EtlContext]):
@@ -133,7 +119,7 @@ def main():
                 work_items = []
 
                 logger.info("Pre-registering folders in database...")
-                for _, zip_path_obj in source_data:
+                for zip_path_obj in source_data:
                     # Ensure it's a Path object
                     zip_path = Path(zip_path_obj)
 
@@ -166,7 +152,6 @@ def main():
                 else:
                     cpu_count = multiprocessing.cpu_count()
                     num_workers = max(1, cpu_count - 2)
-                    num_workers = 1
 
                     logger.info(
                         f"Dispatching {len(work_items)} jobs to {num_workers} workers."
