@@ -132,15 +132,15 @@ class SessionManager:
             session.close()
 
     def get_or_create_job(self, spec: "JobSpec") -> JobManager:
-        # ... (This logic remains valid for creating the audit log entry) ...
         try:
+            # FIXED: Query using 'dataset_key' to match the unique index
             existing_job = (
                 self._session.query(ProcessingJob)
                 .filter_by(
                     session_id=self.session_id,
                     pipeline_id=spec.pipeline_id,
                     file_id=spec.file_id,
-                    target_name=spec.target_name,
+                    dataset_key=spec.target_name,  # Map target_name -> dataset_key
                 )
                 .first()
             )
@@ -155,6 +155,7 @@ class SessionManager:
                 status=StatusEnum.PENDING,
                 file_id=spec.file_id,
                 target_name=spec.target_name,
+                dataset_key=spec.target_name,  # FIXED: Populate this field!
                 handler_version=spec.handler_version,
                 file_type=spec.file_type,
             )

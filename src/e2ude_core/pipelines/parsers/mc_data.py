@@ -5,7 +5,7 @@ from typing import Dict, Type
 
 from e2ude_core.db.base_session import Base
 
-# Import the models this parser produces
+# Import Models
 from e2ude_core.db.models import (
     Rpcs,
     RpcsPres,
@@ -58,16 +58,16 @@ def parse_mcdata(file_path: Path) -> Dict[Type[Base], pd.DataFrame]:
         try:
             tokens = line.split(",", maxsplit=2)
             if len(tokens) < 2:
-                continue  # Skip blank lines
+                continue
             message_type_str = tokens[1]
 
             if message_type_str in parser_map:
                 model, scrape_func = parser_map[message_type_str]
 
                 row_dict = scrape_func(line)
-                row_dict["LineNumber"] = i
-
-                data[message_type_str].append(row_dict)
+                if row_dict:
+                    row_dict["LineNumber"] = i
+                    data[message_type_str].append(row_dict)
         except Exception:
             continue
 
@@ -83,7 +83,6 @@ def parse_mcdata(file_path: Path) -> Dict[Type[Base], pd.DataFrame]:
             clean_df = clean_dataframe_from_model(df, model)
             ret_payload[model] = clean_df
         else:
-            # Create an empty DataFrame with correct columns if no data was found.
             cols = [c.name for c in model.__table__.columns]
             cols_to_keep = [c for c in cols if c not in ("id", "hash_id")]
             ret_payload[model] = pd.DataFrame(columns=cols_to_keep)
