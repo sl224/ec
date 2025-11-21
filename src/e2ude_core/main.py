@@ -18,17 +18,18 @@ from sqlalchemy import text
 # but we can define a placeholder here.
 logger = logging.getLogger(__name__)
 
+
 def get_data(eng) -> List[Tuple[int, Any]]:
     # This query finds the most recent 100 folders from the source
     # that have NOT yet been registered in our metadata_folder table.
     q = """
-        SELECT TOP(100) source.FolderPath
+        SELECT TOP(10000) source.FolderPath
         FROM [AnalyticsDataMart].[E2D_METADATA].[FOLDER] AS source
         LEFT JOIN (
-        select f.id, f.path from [e2ude_core_dev].metadata_folder as f 
+        select f.id, f.path from [e2ude_core_dev].metadata_folder as f
         inner join e2ude_core_dev.processing_sessions as s on s.folder_id = f.id
-        where 
-        s.STATUS = 'COMPLETED'
+        where
+        s.STATUS in ('COMPLETED', 'ERROR')
         ) AS processed ON source.FolderPath = processed.path
         WHERE processed.id IS NULL
         ORDER BY source.FolderDatetime DESC
@@ -36,6 +37,7 @@ def get_data(eng) -> List[Tuple[int, Any]]:
     with eng.connect() as conn:
         paths = [Path(r[0]) for r in conn.execute(text(q)).fetchall()]
     return paths
+
 
 def check_path_exists(path_obj: Path) -> Path | None:
     """Helper for parallel existence check."""
@@ -115,7 +117,7 @@ def main():
                 work_items = []
 
                 logger.info("Verifying file existence (Parallel)...")
-                
+
                 # --- OPTIMIZATION: Parallel Existence Check ---
                 # Extract just the Path objects for checking
                 valid_paths = []
@@ -129,7 +131,7 @@ def main():
                             executor.map(check_path_exists, source_data),
                             total=len(source_data),
                             desc="Checking Files",
-                            unit="file"
+                            unit="file",
                         )
                     )
 
@@ -173,7 +175,7 @@ def main():
                         f"Dispatching {len(work_items)} jobs to {num_workers} workers."
                     )
 
-                    pool = multiprocessing.Pool(processes=num_workers)                    
+                    pool = multiprocessing.Pool(processes=num_workers)
                     # Use imap_unordered and wrap with tqdm for a live progress bar.
                     # We wrap it in list() to consume the iterator and ensure all tasks complete.
                     list(
@@ -200,6 +202,7 @@ def main():
         except Exception as e:
             logger.critical(f"Main process terminated unexpectedly: {e}", exc_info=True)
             import traceback
+
             traceback.print_exc()
         finally:
             logger.info("Shutting down logging listener...")

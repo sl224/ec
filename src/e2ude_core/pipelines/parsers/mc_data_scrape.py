@@ -133,11 +133,11 @@ def scrape_pfc_db_record(text: str) -> Dict[str, Any]:
     if len(tokens) < 9:
         return {}
     return {
-        "System TimeStamp": tokens[3],
-        "Processed Fault Code": tokens[6],
-        "Fault Description": tokens[4],
-        "Subsystem": tokens[5],
-        "Mission Critical Result": tokens[8],
+        "System TimeStamp": tokens[3].strip(),
+        "Fault Description": tokens[4].strip(),
+        "Subsystem": tokens[5].strip(),
+        "Processed Fault Code": tokens[6].strip(),
+        "Mission Critical Result": tokens[8].strip(),
     }
 
 

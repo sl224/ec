@@ -15,7 +15,7 @@ schema_name = "e2ude_core_dev"
 
 # --- Logging Settings ---
 [logging]
-level = "DEBUG"
+level = "INFO"
 log_to_file = true
 log_file = "main.log"
 rotation_size_mb = 10

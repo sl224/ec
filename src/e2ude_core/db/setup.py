@@ -59,23 +59,25 @@ def register_folders_bulk(eng: sa.Engine, zip_paths: List[Path]) -> Dict[Path, i
 
     # 1. Parse Metadata from Paths
     parsed_items = []
-    
+
     for zp in zip_paths:
         match = re.search(r"([0-9]+)_([0-9]{8}_[0-9]{6})", zp.name)
         if not match:
             logger.warning(f"Could not parse BUNO/Date from: {zp.name}")
             continue
-            
+
         buno, dt_str = match.groups()
         try:
             dt = datetime.strptime(dt_str, "%Y%m%d_%H%M%S")
-            parsed_items.append({
-                "obj_path": zp,          # Key for the returned map
-                "buno": buno,
-                "folder_datetime": dt,
-                "path": str(zp),         # String for DB insert
-                "scan_version": 0        # Default for new folders
-            })
+            parsed_items.append(
+                {
+                    "obj_path": zp,  # Key for the returned map
+                    "buno": buno,
+                    "folder_datetime": dt,
+                    "path": str(zp),  # String for DB insert
+                    "scan_version": 0,  # Default for new folders
+                }
+            )
         except ValueError:
             logger.warning(f"Invalid date format in: {zp.name}")
             continue
@@ -85,16 +87,14 @@ def register_folders_bulk(eng: sa.Engine, zip_paths: List[Path]) -> Dict[Path, i
 
     # 2. Fetch Existing IDs (Bulk Query)
     unique_bunos = {p["buno"] for p in parsed_items}
-    existing_map = {} # Key: (buno, folder_datetime) -> Value: id
+    existing_map = {}  # Key: (buno, folder_datetime) -> Value: id
 
     with eng.connect() as conn:
         if unique_bunos:
             stmt = sa.select(
-                FolderMetadata.id, 
-                FolderMetadata.buno, 
-                FolderMetadata.folder_datetime
+                FolderMetadata.id, FolderMetadata.buno, FolderMetadata.folder_datetime
             ).where(FolderMetadata.buno.in_(unique_bunos))
-            
+
             for row in conn.execute(stmt):
                 existing_map[(row.buno, row.folder_datetime)] = row.id
 
@@ -104,44 +104,42 @@ def register_folders_bulk(eng: sa.Engine, zip_paths: List[Path]) -> Dict[Path, i
 
         for item in parsed_items:
             key = (item["buno"], item["folder_datetime"])
-            
+
             if key in existing_map:
                 continue
-            
+
             if key in seen_in_batch:
                 continue
 
             seen_in_batch.add(key)
-            
-            to_insert.append({
-                "buno": item["buno"],
-                "folder_datetime": item["folder_datetime"],
-                "path": item["path"],
-                "scan_version": item["scan_version"]
-            })
+
+            to_insert.append(
+                {
+                    "buno": item["buno"],
+                    "folder_datetime": item["folder_datetime"],
+                    "path": item["path"],
+                    "scan_version": item["scan_version"],
+                }
+            )
 
         # 4. Bulk Insert using sql_io.bulk_upload
         if to_insert:
             logger.info(f"Bulk inserting {len(to_insert)} new folders...")
-            
+
             # Convert to DataFrame
             df_insert = pd.DataFrame(to_insert)
-            
+
             # Use common utility (Handles chunking, types, etc.)
             sql_io.bulk_upload(
-                df=df_insert,
-                conn=conn,
-                sa_table=FolderMetadata.__table__
+                df=df_insert, conn=conn, sa_table=FolderMetadata.__table__
             )
             conn.commit()
-            
+
             # 5. Re-fetch IDs for the newly inserted items
             stmt = sa.select(
-                FolderMetadata.id, 
-                FolderMetadata.buno, 
-                FolderMetadata.folder_datetime
+                FolderMetadata.id, FolderMetadata.buno, FolderMetadata.folder_datetime
             ).where(FolderMetadata.buno.in_(unique_bunos))
-            
+
             for row in conn.execute(stmt):
                 existing_map[(row.buno, row.folder_datetime)] = row.id
 
@@ -151,5 +149,5 @@ def register_folders_bulk(eng: sa.Engine, zip_paths: List[Path]) -> Dict[Path, i
         key = (item["buno"], item["folder_datetime"])
         if key in existing_map:
             result_map[item["obj_path"]] = existing_map[key]
-            
+
     return result_map

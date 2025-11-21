@@ -36,4 +36,4 @@ tests/static_assets/
 *nocheckin*
 
 # log
-*.log
+*.log*
