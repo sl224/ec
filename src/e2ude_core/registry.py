@@ -37,7 +37,7 @@ class HandlerSpec:
 HANDLER_REGISTRY: dict[str, HandlerSpec] = {
     FileType.TMPTR_LOG.value: HandlerSpec(
         pipeline_id="tmptr_log",
-        version=2,
+        version=1,
         parser_func=parse_tmptr_dataframe,
         expected_models=[TmptrData],
     ),
@@ -49,7 +49,7 @@ HANDLER_REGISTRY: dict[str, HandlerSpec] = {
     ),
     FileType.MCDATA.value: HandlerSpec(
         pipeline_id="mcdata",
-        version=3,
+        version=1,
         parser_func=parse_mcdata,
         expected_models=[
             NavData,

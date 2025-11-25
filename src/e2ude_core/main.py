@@ -54,8 +54,8 @@ def main():
         # 4. Discovery Phase (Incremental Scan)
         # Instead of querying the DB for a fixed list, we scan the network drive
         # and let the discovery service tell us what is NEW or CHANGED.
-        # scan_root = Path(r"\\rsiny1-ilsfs\RSM") 
-        scan_root = Path(r"tests/static_assets") 
+        scan_root = Path(r"\\rsiny1-ilsfs\RSM") 
+        # scan_root = Path(r"tests/static_assets") 
         
         if not scan_root.exists():
             logger.error(f"Scan root not found: {scan_root}")
@@ -98,7 +98,7 @@ def main():
 
         # 7. Process in Parallel Threads
         # I/O Bound task = High thread count is okay.
-        max_threads = 64 
+        max_threads = 128 
         logger.info(f"Dispatching {len(work_items)} jobs to {max_threads} threads.")
 
         with ThreadPoolExecutor(max_workers=max_threads) as executor:
