@@ -16,6 +16,7 @@ class TmptrData(Base):
         Integer, ForeignKey(schema_fkey("metadata_hash_registry.id")), primary_key=True
     )
     line_number = Column(Integer, primary_key=True)
+    afmc = Column(String(10))
     datetime = Column(E2UDE_DATETIME(3))
     category = Column(String)
     temp_f = Column(Integer)

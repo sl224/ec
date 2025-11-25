@@ -27,7 +27,7 @@ from e2ude_core.pipelines.parsers.mc_data_scrape import(
     scrape_rpcs_record,
 )
 
-.
+
 
 
 tables = [
@@ -107,6 +107,11 @@ def test_parse_pfc_db():
     assert result == current_expected
 
 
+def test_rpcs_pres():
+    line = "1,RPCS_PRES:,,01/13/2025 17:31:52,17:31:33,PRI_HI,61.4,60.4,58.9,58.4,60.9,60.9,60.4,59.9,58.9,59.9,SEC_HI,47.7,48.2,46.1,45.1,47.2,48.7,47.2,46.7,46.7,48.2,MAN_PRE,16.6,17.1,16.6,16.6,16.6,17.1,17.1,17.1,17.1,17.1,,,,,,,,,,,,,"
+    res = scrape_rpcs_pres_record(line)
+    print(res)
+
 def test_parse_lcs_temp():
     """Test parsing of a LCS_TEMP record."""
     lcs_temp_line = "1,LCS_TEMP:,,02/03/2025 01:09:02,65.6,INIT,01:09:01,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,"
@@ -148,14 +153,9 @@ def test_parse_pfc_db_bug():
     """Demonstrates a bug in scrape_pfc_db_record where indices are misaligned."""
     pfc_db_line = "1,PFC_DB:,,,35537,CT ROUTER - NFS2 INTERFACE DOWN,02/03/2025 01:09:02,COMM,CI,E2HAWKEYEE2D-26512-02162-00&DMC-E2HAWKEYEE2D-AAAA-E43-91-0000-01000-411A-A,,,CONFIRMED_TRUE,,,,,NO_GRP,,0,False,True,,,,,False,IFPM,,,,,,,,,False,True,,,False,,,,,,,,,,,"
     result = scrape_pfc_db_record(pfc_db_line)
-    assert result["Subsystem"] == "02/03/2025 01:09:02"  # This is actually the timestamp
+    assert result["Subsystem"] == "02/03/2025 01:09:02"  # pThis is actually the timestamp
     assert result["Processed Fault Code"] == "COMM"  # This is correct
     assert result["Mission Critical Result"] == "E2HAWKEYEE2D-26512-02162-00&DMC-E2HAWKEYEE2D-AAAA-E43-91-0000-01000-411A-A" # This is wrong index
-
-
-test_file = Path(r"tests/static_assets/zips/169069_20250203_004745_025_TransportRSM.fpkg.e2d/169069_20250203_004745_025_MCData")
-with open(test_file, 'r') as f:
-    lines = f.readlines()
 
 
 def main():
@@ -164,25 +164,4 @@ def main():
 
 
 if __name__ == "__main__":
-    main()
-
-
-
-
-
-
-data = defaultdict(list)
-for line in lines:
-    message_type_str = line.split(',', maxsplit=2)[1]
-    if message_type_str in parser_map:
-        _, scrape_func = parser_map[message_type_str]
-        data[message_type_str].append(scrape_func(line))
-
-ret_payload = {}
-for k in parser_map:
-    model = parser_map[k][0]
-    columns = [c.name for c in model.__table__.columns if not c.primary_key]
-    df = pd.DataFrame(data[k], columns=columns)
-    ret_payload[k] = df
-
-return ret_payload
+    test_rpcs_pres()

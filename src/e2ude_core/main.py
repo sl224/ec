@@ -1,8 +1,7 @@
 import logging
 import multiprocessing
 from pathlib import Path
-from typing import Tuple, List, Any
-from concurrent.futures import ThreadPoolExecutor
+from typing import Tuple, Any
 from tqdm import tqdm
 
 # --- Core ETL Imports ---
@@ -12,31 +11,40 @@ from e2ude_core.db import access as sql_io
 from e2ude_core.config import settings
 from e2ude_core.db.setup import initialize_database, register_folders_bulk
 from e2ude_core.logging_mp import listener_process, worker_configurer
-from sqlalchemy import text
+from e2ude_core.services.fs_scanner import scan_for_rsm_zips
+
 
 # Note: In 'spawn' mode, the global logger must be retrieved inside functions,
 # but we can define a placeholder here.
 logger = logging.getLogger(__name__)
+ARCHIVE_ROOT = Path(r"\\esidme24\#ESIDME24\PUBLIC\E2 Stuff\ALE RSM Data Archive")
 
 
-def get_data(eng) -> List[Tuple[int, Any]]:
-    # This query finds the most recent 100 folders from the source
-    # that have NOT yet been registered in our metadata_folder table.
-    q = """
-        SELECT TOP(10000) source.FolderPath
-        FROM [AnalyticsDataMart].[E2D_METADATA].[FOLDER] AS source
-        LEFT JOIN (
-        select f.id, f.path from [e2ude_core_dev].metadata_folder as f
-        inner join e2ude_core_dev.processing_sessions as s on s.folder_id = f.id
-        where
-        s.STATUS in ('COMPLETED', 'ERROR')
-        ) AS processed ON source.FolderPath = processed.path
-        WHERE processed.id IS NULL
-        ORDER BY source.FolderDatetime DESC
-    """
-    with eng.connect() as conn:
-        paths = [Path(r[0]) for r in conn.execute(text(q)).fetchall()]
-    return paths
+def get_data(eng):
+    SEARCH_DIR = Path("tests/static_assets")
+    ARCHIVE_ROOT = Path(r"\\esidme24\#ESIDME24\PUBLIC\E2 Stuff\ALE RSM Data Archive")
+    found_zips = scan_for_rsm_zips(ARCHIVE_ROOT, top=None)
+    return found_zips
+
+
+# def get_data(eng) -> List[Tuple[int, Any]]:
+#     # This query finds the most recent 100 folders from the source
+#     # that have NOT yet been registered in our metadata_folder table.
+#     q = """
+#         SELECT TOP(10000) source.FolderPath
+#         FROM [AnalyticsDataMart].[E2D_METADATA].[FOLDER] AS source
+#         LEFT JOIN (
+#         select f.id, f.path from [e2ude_core_dev].metadata_folder as f
+#         inner join e2ude_core_dev.processing_sessions as s on s.folder_id = f.id
+#         where
+#         s.STATUS in ('COMPLETED', 'ERROR')
+#         ) AS processed ON source.FolderPath = processed.path
+#         WHERE processed.id IS NULL
+#         ORDER BY source.FolderDatetime DESC
+#     """
+#     with eng.connect() as conn:
+#         paths = [Path(r[0]) for r in conn.execute(text(q)).fetchall()]
+#     return paths
 
 
 def check_path_exists(path_obj: Path) -> Path | None:
@@ -102,15 +110,14 @@ def main():
             initialize_database(main_eng, reset_tables=False)
 
             try:
-                # This returns (id, Path) tuples
-                source_data = get_data(main_eng)
+                zip_paths = get_data(main_eng)
             except Exception as e:
                 logger.warning(f"Could not fetch data: {e}")
-                source_data = []
+                zip_paths = []
 
-            logger.info(f"Found {len(source_data)} potential folders to process.")
+            logger.info(f"Found {len(zip_paths)} potential folders to process.")
 
-            if not source_data:
+            if not zip_paths:
                 logger.warning("No work found. Exiting.")
             else:
                 ctx = EtlContext.capture()
@@ -118,38 +125,11 @@ def main():
 
                 logger.info("Verifying file existence (Parallel)...")
 
-                # --- OPTIMIZATION: Parallel Existence Check ---
-                # Extract just the Path objects for checking
-                valid_paths = []
-
-                # Use ThreadPool for IO-bound existence checks
-                # max_workers=32 is usually a sweet spot for network drives
-                with ThreadPoolExecutor(max_workers=32) as executor:
-                    # tqdm gives you a progress bar so you know it's not frozen
-                    results = list(
-                        tqdm(
-                            executor.map(check_path_exists, source_data),
-                            total=len(source_data),
-                            desc="Checking Files",
-                            unit="file",
-                        )
-                    )
-
-                # Filter out None results
-                for i, res in enumerate(results):
-                    if res:
-                        valid_paths.append(res)
-                    else:
-                        # Log missing files (optional: keep concise if many missing)
-                        logger.warning(f"Skipping missing file: {all_paths[i]}")
-
-                logger.info(f"Verified {len(valid_paths)} files exist. Registering...")
-
                 # Bulk Register (Optimized)
-                folder_id_map = register_folders_bulk(main_eng, valid_paths)
+                folder_id_map = register_folders_bulk(main_eng, zip_paths)
 
                 # Build work items from the map
-                for zip_path in valid_paths:
+                for zip_path in zip_paths:
                     new_folder_id = folder_id_map.get(zip_path)
                     if new_folder_id:
                         work_items.append(
