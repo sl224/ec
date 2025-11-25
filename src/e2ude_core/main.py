@@ -1,8 +1,9 @@
 import logging
-import multiprocessing
 from pathlib import Path
-from typing import Tuple, Any
+from typing import Tuple, List
+from concurrent.futures import ThreadPoolExecutor, as_completed
 from tqdm import tqdm
+import sqlalchemy as sa
 
 # --- Core ETL Imports ---
 from e2ude_core.context import EtlContext
@@ -10,189 +11,113 @@ from e2ude_core.orchestration.workflow import process_zip
 from e2ude_core.db import access as sql_io
 from e2ude_core.config import settings
 from e2ude_core.db.setup import initialize_database, register_folders_bulk
-from e2ude_core.logging_mp import listener_process, worker_configurer
+from e2ude_core.logging_conf import setup_logging
 from e2ude_core.services.fs_scanner import scan_for_rsm_zips
 
-
-# Note: In 'spawn' mode, the global logger must be retrieved inside functions,
-# but we can define a placeholder here.
 logger = logging.getLogger(__name__)
-ARCHIVE_ROOT = Path(r"\\esidme24\#ESIDME24\PUBLIC\E2 Stuff\ALE RSM Data Archive")
 
 
-def get_data(eng):
-    SEARCH_DIR = Path("tests/static_assets")
-    ARCHIVE_ROOT = Path(r"\\esidme24\#ESIDME24\PUBLIC\E2 Stuff\ALE RSM Data Archive")
-    found_zips = scan_for_rsm_zips(ARCHIVE_ROOT, top=None)
-    return found_zips
-
-
-# def get_data(eng) -> List[Tuple[int, Any]]:
-#     # This query finds the most recent 100 folders from the source
-#     # that have NOT yet been registered in our metadata_folder table.
-#     q = """
-#         SELECT TOP(10000) source.FolderPath
-#         FROM [AnalyticsDataMart].[E2D_METADATA].[FOLDER] AS source
-#         LEFT JOIN (
-#         select f.id, f.path from [e2ude_core_dev].metadata_folder as f
-#         inner join e2ude_core_dev.processing_sessions as s on s.folder_id = f.id
-#         where
-#         s.STATUS in ('COMPLETED', 'ERROR')
-#         ) AS processed ON source.FolderPath = processed.path
-#         WHERE processed.id IS NULL
-#         ORDER BY source.FolderDatetime DESC
-#     """
-#     with eng.connect() as conn:
-#         paths = [Path(r[0]) for r in conn.execute(text(q)).fetchall()]
-#     return paths
-
-
-def check_path_exists(path_obj: Path) -> Path | None:
-    """Helper for parallel existence check."""
-    return path_obj if path_obj.exists() else None
-
-
-def worker_task(args: Tuple[Any, str, int, Path, EtlContext]):
+def worker_task(args: Tuple[sa.Engine, int, Path, EtlContext]):
     """
-    The entry point for a Worker Process.
+    The entry point for a Thread Worker.
     """
-    log_queue, log_level, folder_id, zip_path, context = args
-
-    worker_configurer(log_queue, log_level)
+    eng, folder_id, zip_path, context = args
 
     try:
-        worker_eng = sql_io.get_engine(settings.database)
+        # We use the shared engine. process_zip manages its own connections/sessions.
         process_zip(
-            eng=worker_eng, folder_id=folder_id, zip_path=zip_path, context=context
+            eng=eng, folder_id=folder_id, zip_path=zip_path, context=context
         )
-    except KeyboardInterrupt:
-        pass
     except Exception as e:
-        logging.error(f"Worker crashed processing {zip_path}: {e}", exc_info=True)
-    finally:
-        if "worker_eng" in locals():
-            worker_eng.dispose()
+        logger.error(f"Worker failed processing {zip_path}: {e}", exc_info=True)
 
 
 def main():
     """
-    Main entry point.
+    Main entry point (Threaded Version).
     """
-    multiprocessing.set_start_method("spawn", force=True)
-    manager = multiprocessing.Manager()
+    # 1. Configure Standard Logging (Thread-safe)
+    setup_logging(settings)
+    
+    logger.info(
+        f"Starting E2UDE Core [Threading]. DB: {settings.database.type}"
+    )
+
+    # 2. Create ONE Shared Engine
+    # SQLAlchemy engines are thread-safe and manage their own connection pool.
+    main_eng = sql_io.get_engine(settings.database)
 
     try:
-        log_queue = manager.Queue(-1)
+        # 3. Setup DB
+        initialize_database(main_eng, reset_tables=True)
 
-        listener_config = {
-            "log_file": settings.logging.log_file,
-            "level": settings.logging.level,
-            "rotation_size_mb": settings.logging.rotation_size_mb,
-            "rotation_backup_count": settings.logging.rotation_backup_count,
-            "format": settings.logging.format,
-        }
+        # 4. Discovery Phase (Incremental Scan)
+        # Instead of querying the DB for a fixed list, we scan the network drive
+        # and let the discovery service tell us what is NEW or CHANGED.
+        # scan_root = Path(r"\\rsiny1-ilsfs\RSM") 
+        scan_root = Path(r"tests/static_assets") 
+        
+        if not scan_root.exists():
+            logger.error(f"Scan root not found: {scan_root}")
+            return
 
-        listener = multiprocessing.Process(
-            target=listener_process, args=(log_queue, listener_config)
-        )
-        listener.start()
+        logger.info(f"Scanning {scan_root} for incremental changes...")
+        
+        # This returns only valid paths that need processing
+        # It handles the diffing against the DB cache internally.
+        valid_paths = scan_for_rsm_zips(scan_root)
 
-        worker_configurer(log_queue, settings.logging.level)
+        logger.info(f"Discovery complete. Found {len(valid_paths)} files to process.")
 
-        # --- Main Logic ---
-        pool = None
-        try:
-            logger.info(
-                f"Starting E2UDE Core [Multiprocessing]. DB: {settings.database.type}"
-            )
+        if not valid_paths:
+            logger.info("No new work found. Exiting.")
+            return
 
-            main_eng = sql_io.get_engine(settings.database)
-            initialize_database(main_eng, reset_tables=False)
+        ctx = EtlContext.capture()
+        work_items = []
 
-            try:
-                zip_paths = get_data(main_eng)
-            except Exception as e:
-                logger.warning(f"Could not fetch data: {e}")
-                zip_paths = []
-
-            logger.info(f"Found {len(zip_paths)} potential folders to process.")
-
-            if not zip_paths:
-                logger.warning("No work found. Exiting.")
-            else:
-                ctx = EtlContext.capture()
-                work_items = []
-
-                logger.info("Verifying file existence (Parallel)...")
-
-                # Bulk Register (Optimized)
-                folder_id_map = register_folders_bulk(main_eng, zip_paths)
-
-                # Build work items from the map
-                for zip_path in zip_paths:
-                    new_folder_id = folder_id_map.get(zip_path)
-                    if new_folder_id:
-                        work_items.append(
-                            (
-                                log_queue,
-                                settings.logging.level,
-                                new_folder_id,
-                                zip_path,
-                                ctx,
-                            )
-                        )
-
-                main_eng.dispose()
-
-                if not work_items:
-                    logger.info("No valid work items prepared.")
-                else:
-                    cpu_count = multiprocessing.cpu_count()
-                    num_workers = max(1, cpu_count - 2)
-                    # num_workers = 1 # Uncomment for debugging
-
-                    logger.info(
-                        f"Dispatching {len(work_items)} jobs to {num_workers} workers."
+        # 5. Bulk Register (Ensure FolderMetadata exists for these files)
+        # This is still needed to link files to a 'Folder' entity in the business logic.
+        folder_id_map = register_folders_bulk(main_eng, valid_paths)
+        # 6. Build Work Args
+        for zip_path in valid_paths:
+            new_folder_id = folder_id_map.get(zip_path)
+            if new_folder_id:
+                work_items.append(
+                    (
+                        main_eng,
+                        new_folder_id,
+                        zip_path,
+                        ctx,
                     )
+                )
 
-                    pool = multiprocessing.Pool(processes=num_workers)
-                    # Use imap_unordered and wrap with tqdm for a live progress bar.
-                    # We wrap it in list() to consume the iterator and ensure all tasks complete.
-                    list(
-                        tqdm(
-                            pool.imap_unordered(worker_task, work_items),
-                            total=len(work_items),
-                            desc="Processing Folders",
-                            unit="folder",
-                        )
-                    )
+        if not work_items:
+            logger.info("No valid work items prepared (Registration failed?).")
+            return
 
-                    pool.close()
-                    pool.join()
+        # 7. Process in Parallel Threads
+        # I/O Bound task = High thread count is okay.
+        max_threads = 64 
+        logger.info(f"Dispatching {len(work_items)} jobs to {max_threads} threads.")
 
-                    logger.info("All workers finished.")
+        with ThreadPoolExecutor(max_workers=max_threads) as executor:
+            # Submit all tasks
+            futures = [executor.submit(worker_task, item) for item in work_items]
+            
+            # Monitor progress as they complete
+            for _ in tqdm(as_completed(futures), total=len(futures), desc="Processing Zips", unit="zip"):
+                pass
 
-        except KeyboardInterrupt:
-            logger.debug("\n[Manual Interrupt] Terminating workers...")
-            if pool:
-                pool.terminate()
-                pool.join()
-            logger.warning("Processing interrupted by user.")
+        logger.info("All threads finished.")
 
-        except Exception as e:
-            logger.critical(f"Main process terminated unexpectedly: {e}", exc_info=True)
-            import traceback
-
-            traceback.print_exc()
-        finally:
-            logger.info("Shutting down logging listener...")
-            log_queue.put(None)
-            listener.join()
-
+    except KeyboardInterrupt:
+        logger.warning("Processing interrupted by user.")
+    except Exception as e:
+        logger.critical(f"Main process terminated unexpectedly: {e}", exc_info=True)
     finally:
-        manager.shutdown()
+        main_eng.dispose()
 
 
 if __name__ == "__main__":
-    multiprocessing.freeze_support()
     main()
