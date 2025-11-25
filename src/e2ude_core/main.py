@@ -1,6 +1,7 @@
 import logging
+import sys
 from pathlib import Path
-from typing import Tuple, List
+from typing import Tuple
 from concurrent.futures import ThreadPoolExecutor, as_completed
 from tqdm import tqdm
 import sqlalchemy as sa
@@ -53,6 +54,9 @@ def main():
         default_pool_size=max_threads
     )
 
+    # Define executor outside try/finally so we can reference it in finally if needed
+    executor = None
+
     try:
         # 3. Setup DB
         initialize_database(main_eng, reset_tables=False)
@@ -102,19 +106,32 @@ def main():
         # 7. Process in Parallel Threads
         logger.info(f"Dispatching {len(work_items)} jobs to {max_threads} threads.")
 
-        with ThreadPoolExecutor(max_workers=max_threads) as executor:
-            futures = [executor.submit(worker_task, item) for item in work_items]
-            
+        # We do NOT use the context manager here because we want manual control over shutdown
+        executor = ThreadPoolExecutor(max_workers=max_threads)
+        futures = [executor.submit(worker_task, item) for item in work_items]
+        
+        try:
+            # Monitor progress as they complete
             for _ in tqdm(as_completed(futures), total=len(futures), desc="Processing Zips", unit="zip"):
                 pass
+        except KeyboardInterrupt:
+            logger.warning("\n[!] Processing interrupted by user (Ctrl+C). Shutting down...")
+            # Cancel all pending futures (python 3.9+)
+            executor.shutdown(wait=False, cancel_futures=True)
+            raise
 
         logger.info("All threads finished.")
 
     except KeyboardInterrupt:
-        logger.warning("Processing interrupted by user.")
+        # Catch the re-raised interrupt to exit cleanly
+        logger.info("Exiting.")
+        sys.exit(130)
     except Exception as e:
         logger.critical(f"Main process terminated unexpectedly: {e}", exc_info=True)
     finally:
+        if executor:
+            # Ensure any remaining threads are cleaned up
+            executor.shutdown(wait=True)
         main_eng.dispose()
 
 
