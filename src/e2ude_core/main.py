@@ -33,6 +33,7 @@ def main():
 
         # 1. Discovery
         scan_root = Path(r"\\esidme24\#ESIDME24\PUBLIC\E2 Stuff\ALE RSM Data Archive")
+        scan_root = Path(r"tests/static_assets")
         valid_paths = discover_network_zips(scan_root, max_workers=1024)
         
         if not valid_paths:
