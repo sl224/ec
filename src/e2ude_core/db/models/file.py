@@ -15,7 +15,9 @@ class FolderMetadata(Base):
     buno = Column("buno", String(6), nullable=False)
     folder_datetime = Column("folder_datetime", E2UDE_DATETIME(0), nullable=False)
     path = Column("path", String(500), unique=True, nullable=False)
-    scan_version = Column("scan_version", Integer, default=0, nullable=False)
+    
+    # REMOVED: scan_version. 
+    
     files = relationship("FileMetadata", back_populates="folder")
 
     __table_args__ = (
@@ -26,8 +28,7 @@ class FolderMetadata(Base):
 
 class FileHashRegistry(Base):
     """
-    Registry of unique file content hashes (MD5). This allows for content-based
-    deduplication, where many file instances can point to one hash ID.
+    Registry of unique file content hashes (MD5).
     """
 
     __tablename__ = "metadata_hash_registry"
@@ -38,15 +39,13 @@ class FileHashRegistry(Base):
 
 class FileMetadata(Base):
     """
-    Links a specific file instance (by its path within a folder) to its
-    unique content hash in the `metadata_hash_registry`.
+    Links a specific file instance to its unique content hash.
     """
 
     __tablename__ = "metadata_file"
 
     id = Column(Integer, primary_key=True)
 
-    # Use `schema_fkey` to reference schema-qualified columns for foreign keys.
     folder_id = Column(
         Integer,
         ForeignKey(schema_fkey("metadata_folder.id")),
@@ -54,7 +53,6 @@ class FileMetadata(Base):
         index=True,
     )
 
-    # Use `schema_fkey` for the hash registry foreign key.
     hash_id = Column(
         Integer,
         ForeignKey(schema_fkey("metadata_hash_registry.id")),

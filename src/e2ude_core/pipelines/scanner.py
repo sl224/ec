@@ -6,9 +6,8 @@ import sqlalchemy as sa
 from sqlalchemy import bindparam, insert, select, update
 from sqlalchemy.exc import IntegrityError
 
-# Import from the new Catalog Service
 from e2ude_core.services.catalog import FileScanResult, catalog_staged_folder
-from e2ude_core.db.models import FileHashRegistry, FileMetadata, FolderMetadata
+from e2ude_core.db.models import FileHashRegistry, FileMetadata
 from e2ude_core.orchestration.managers import JobManager
 
 logger = logging.getLogger(__name__)
@@ -33,7 +32,6 @@ def run_metadata_scan(
         logger.error(f"Scanner expects a directory: {target_path}")
         return
 
-    # Call the Catalog Service
     raw_files: List[FileScanResult] = catalog_staged_folder(target_path)
 
     if not raw_files:
@@ -49,7 +47,6 @@ def run_metadata_scan(
     logger.info(f"[{SCANNER_PIPELINE_ID}] Cataloged {len(raw_files)} files.")
 
 
-# ... (fetch_existing_files_map remains unchanged) ...
 def fetch_existing_files_map(eng: sa.Engine, folder_id: int):
     with eng.connect() as conn:
         query = select(
@@ -64,17 +61,11 @@ def fetch_existing_files_map(eng: sa.Engine, folder_id: int):
 def _upsert_metadata(eng: sa.Engine, folder_id: int, files: List[FileScanResult]):
     try:
         with eng.begin() as conn:
-            # Access via strictly typed attributes
             unique_md5s = list({f.md5 for f in files if f.md5})
             hash_map = _ensure_hashes_exist(conn, unique_md5s)
             to_insert, to_update = _detect_changes(conn, folder_id, files, hash_map)
             _commit_changes(conn, to_insert, to_update)
-
-            conn.execute(
-                update(FolderMetadata)
-                .where(FolderMetadata.id == folder_id)
-                .values(scan_version=SCANNER_VERSION)
-            )
+            # REMOVED: Update to FolderMetadata.scan_version
 
     except Exception:
         logger.error("Failed to upsert metadata.", exc_info=True)

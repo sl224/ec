@@ -13,7 +13,11 @@ from tqdm import tqdm
 from e2ude_core.context import EtlContext
 from e2ude_core.orchestration.workflow import process_staged_directory
 from e2ude_core.registry import HANDLER_REGISTRY
-from e2ude_core.services.zip_io import file_type_patterns 
+from e2ude_core.services.zip_io import file_type_patterns
+
+# Import State Logic
+from e2ude_core.orchestration.state import get_folder_work_delta, FolderState
+from e2ude_core.pipelines.scanner import SCANNER_VERSION
 
 logger = logging.getLogger(__name__)
 
@@ -44,11 +48,6 @@ def _match_any(path_str: str, patterns: List[str]) -> bool:
 class StagingPipeline:
     """
     High-Throughput Continuous Pipeline (Thread-Based).
-    
-    Optimized for 'Selective Extraction':
-    - Uses High Thread Count (32) for Staging to hide Network Latency (SMB Seek/Read).
-    - Uses Lower Thread Count (8) for Processing to match CPU/DB capacity.
-    - Uses Semaphores for constant flow control.
     """
 
     def __init__(
@@ -57,8 +56,8 @@ class StagingPipeline:
         folder_id_map: Dict[Path, int],
         staging_root: Path,
         buffer_size: int = 30,
-        unzip_workers: int = 32,  # High concurrency for I/O
-        process_workers: int = 8, # CPU/DB Bound
+        unzip_workers: int = 32,
+        process_workers: int = 8,
         db_write_workers: int = 4,
     ):
         self.eng = eng
@@ -77,30 +76,24 @@ class StagingPipeline:
         logger.info(f"Active Patterns: {len(self.active_patterns)}")
 
     def run(self):
-
         total = len(self.folder_id_map)
         logger.info(f"Starting Pipeline. Processing {total} files.")
 
-        # Two pools allow us to flood the network (Unzip) without choking the DB (Process)
         unzip_pool = ThreadPoolExecutor(max_workers=self.unzip_workers, thread_name_prefix="Stage")
         process_pool = ThreadPoolExecutor(max_workers=self.process_workers, thread_name_prefix="Proc")
-        # debug 
-        LIMIT = 20
+        LIMIT = 100000  # Removed low limit for production
 
         try:
             with tqdm(total=total, desc="Pipeline", unit="zip") as pbar:
-                # FIX: Iterate keys() to get the Path object
+                # Iterate keys() to get the Path object
                 for i, zip_path in enumerate(self.folder_id_map.keys()):
                     if self.stop_event.is_set() or i == LIMIT:
                         break
 
-                    # 1. Acquire Ticket (Backpressure)
                     while not self.buffer_sem.acquire(timeout=0.5):
                         if self.stop_event.is_set():
                             break
 
-                    # 2. Start Chain (Non-blocking)
-                    # We submit to Unzip pool first.
                     unzip_pool.submit(
                         self._task_stage_selective,
                         zip_path,
@@ -108,7 +101,6 @@ class StagingPipeline:
                         pbar,
                     )
 
-                # Wait for pools to drain
                 unzip_pool.shutdown(wait=True)
                 process_pool.shutdown(wait=True)
 
@@ -137,6 +129,19 @@ class StagingPipeline:
             self._finalize_item(None, pbar)
             return
 
+        # --- JIT STATE CHECK ---
+        # Check DB before we do ANY expensive file IO.
+        try:
+            delta = get_folder_work_delta(self.eng, folder_id, SCANNER_VERSION)
+            if delta.status == FolderState.UP_TO_DATE:
+                # Skip extraction entirely
+                self._finalize_item(None, pbar)
+                return
+        except Exception as e:
+            # If DB check fails, log and default to processing (safe fallback)
+            logger.warning(f"State check failed for {folder_id}, forcing retry: {e}")
+
+        # --- Proceed to Extraction ---
         safe_name = f"{folder_id}_{zip_path.stem}"
         local_dir = self.staging_root / safe_name
         
@@ -144,9 +149,7 @@ class StagingPipeline:
             if local_dir.exists(): shutil.rmtree(local_dir)
             local_dir.mkdir(parents=True, exist_ok=True)
 
-            # --- Selective Unzip Logic ---
             with ZipFile(zip_path) as zf:
-                # Peek at headers (Network Seek/Read)
                 members = zf.namelist()
                 targets = [
                     m for m in members 
@@ -154,10 +157,8 @@ class StagingPipeline:
                 ]
                 
                 if targets:
-                    # Extract matches (Network Read -> SSD Write)
                     zf.extractall(local_dir, members=targets)
 
-            # --- Explode Nested (Local I/O) ---
             for nested_zip in local_dir.rglob("*RSM_RawArchive.zip"):
                 try:
                     nested_root = nested_zip.with_suffix("")
@@ -166,7 +167,6 @@ class StagingPipeline:
                     with ZipFile(nested_zip) as nz:
                         nested_targets = []
                         for name in nz.namelist():
-                            # Virtual path check
                             if _match_any(nested_root.name + "/" + name, self.active_patterns):
                                 nested_targets.append(name)
                         
@@ -175,7 +175,6 @@ class StagingPipeline:
                 finally:
                     nested_zip.unlink()
 
-            # --- Hand off to Processor ---
             process_pool.submit(self._task_process, folder_id, local_dir, pbar)
 
         except Exception as e:

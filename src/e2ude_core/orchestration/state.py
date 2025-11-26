@@ -6,16 +6,14 @@ from typing import List, Tuple, Optional
 
 from e2ude_core.db.models import (
     FileMetadata,
+    ArtifactManifest,
+    ProcessingSession, 
+    ProcessingJob,
+    StatusEnum
 )
-
-# CHANGED: Import the constant ID, not the removed class
 from e2ude_core.registry import HANDLER_REGISTRY
-from e2ude_core.db.models import ArtifactManifest, FolderMetadata
 
 logger = logging.getLogger(__name__)
-
-
-# --- Data Structures ---
 
 
 class FolderState(Enum):
@@ -27,32 +25,32 @@ class FolderState(Enum):
 @dataclass
 class WorkDelta:
     status: FolderState
-    # Tuple of (hash_id, dataset_key)
     missing_items: List[Tuple[int, str]] = field(default_factory=list)
-    # Context for why a scan is needed
     scan_reason: Optional[str] = None
-
-
-# --- State Calculation Function ---
-
-
-# ... imports ...
 
 
 def get_folder_work_delta(
     eng: sa.Engine, folder_id: int, scan_version: int = 1
 ) -> WorkDelta:
     with eng.connect() as conn:
-        # 1. Check Scan Status via FolderMetadata
-        current_scan_ver = conn.execute(
-            sa.select(FolderMetadata.scan_version).where(FolderMetadata.id == folder_id)
-        ).scalar_one_or_none()
-
-        # Handle New Folder (current_scan_ver might be None if row missing, or 0 if default)
+        # 1. Check Scan Status via ProcessingJob History
+        # Join Session -> Job to find if this folder has a completed scan job
+        scan_stmt = (
+            sa.select(sa.func.max(ProcessingJob.handler_version))
+            .join(ProcessingSession, ProcessingJob.session_id == ProcessingSession.id)
+            .where(
+                ProcessingSession.folder_id == folder_id,
+                ProcessingJob.pipeline_id == "MetadataScanHandler", 
+                ProcessingJob.status == StatusEnum.COMPLETED
+            )
+        )
+        
+        current_scan_ver = conn.execute(scan_stmt).scalar()
+        
+        # If None, it means no scan has ever completed successfully for this folder
         if current_scan_ver is None:
-            # Should technically not happen if process_zip ensures folder existence
             return WorkDelta(
-                status=FolderState.NEEDS_SCAN, scan_reason="Folder not registered"
+                status=FolderState.NEEDS_SCAN, scan_reason="New Folder (No scan history)"
             )
 
         if current_scan_ver < scan_version:
@@ -61,25 +59,18 @@ def get_folder_work_delta(
                 scan_reason=f"Outdated Scan (v{current_scan_ver} < v{scan_version})",
             )
 
-        # 2. Get ACTUAL state (From Manifest, not Jobs)
-        # Join Manifest -> FileMetadata to see what we have for *this* folder
+        # 2. Get ACTUAL state (From ArtifactManifest)
+        # What data do we actually have for files in this folder?
         actual_stmt = (
             sa.select(FileMetadata.hash_id, ArtifactManifest.target_table)
             .join(FileMetadata, FileMetadata.hash_id == ArtifactManifest.hash_id)
-            .where(
-                FileMetadata.folder_id == folder_id
-                # Implicitly, we accept ANY version in the manifest as "present",
-                # but we should filter by version if we want to force upgrades.
-            )
+            .where(FileMetadata.folder_id == folder_id)
         )
         actual_rows = conn.execute(actual_stmt).fetchall()
-
-        # If you want to enforce versioning per-file:
-        # In the loop below, you'd check if `actual_version < required_version`
-
         actual_work = {(row.hash_id, row.target_table) for row in actual_rows}
 
-        # 3. Get EXPECTED state (Same as before)
+        # 3. Get EXPECTED state
+        # What data SHOULD we have based on the file types present?
         expected_work = set()
         files = conn.execute(
             sa.select(FileMetadata.hash_id, FileMetadata.file_type).where(
