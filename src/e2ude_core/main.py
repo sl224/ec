@@ -20,23 +20,21 @@ if not STAGING_ROOT.exists():
     except:
         pass
 
-
 def main():
     setup_logging(settings)
 
-    logger.info(f"Starting Core Pipeline. Staging: {STAGING_ROOT}")
+    logger.info(f"Starting Batch Pipeline. Staging: {STAGING_ROOT}")
 
-    # Pool size = Consumers + Producer + Main
+    # Pool size: Needs to support the Process Phase workers (8) + Main thread
     main_eng = sql_io.get_engine(settings.database, default_pool_size=16)
 
     try:
-        initialize_database(main_eng, reset_tables=True)
+        initialize_database(main_eng, reset_tables=False)
 
-        # 1. Discovery (Fast Walk)
+        # 1. Discovery
         scan_root = Path(r"\\esidme24\#ESIDME24\PUBLIC\E2 Stuff\ALE RSM Data Archive")
-        # scan_root = Path(r"tests/static_assets/")
-
         valid_paths = discover_network_zips(scan_root, max_workers=1024)
+        
         if not valid_paths:
             logger.info("No zips found.")
             return
@@ -44,14 +42,17 @@ def main():
         # 2. Registration
         folder_id_map = register_folders_bulk(main_eng, valid_paths)
 
-        # 3. Execution (Pipeline)
+        # 3. Execution
+        # Batch Size 30: Good balance between network saturation and disk usage
+        # Unzip Workers 30: 1 thread per file in the batch -> Maximize parallel download
         pipeline = StagingPipeline(
             eng=main_eng,
             zip_paths=valid_paths,
             folder_id_map=folder_id_map,
             staging_root=STAGING_ROOT,
-            num_consumers=32,
-            queue_size=64
+            batch_size=30,
+            unzip_workers=30, 
+            process_workers=8 
         )
         pipeline.run()
 
@@ -60,7 +61,6 @@ def main():
     finally:
         main_eng.dispose()
         logger.info("Exiting.")
-
 
 if __name__ == "__main__":
     main()

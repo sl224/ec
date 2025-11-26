@@ -1,10 +1,9 @@
 import logging
 import shutil
-from dataclasses import dataclass
+import concurrent.futures
 from pathlib import Path
-from queue import Queue
-from threading import Event, Thread
 from typing import Dict, List
+import time
 
 import sqlalchemy as sa
 from tqdm import tqdm
@@ -14,175 +13,134 @@ from e2ude_core.orchestration.workflow import process_staged_directory
 
 logger = logging.getLogger(__name__)
 
-
-@dataclass(slots=True)
-class StagingJob:
-    folder_id: int
-    zip_path: Path
-    stage_path: Path
-    is_sentinel: bool = False
-
-
 class StagingPipeline:
+    """
+    Batch-Oriented Pipeline.
+    Processes data in discrete chunks to maximize network throughput 
+    while strictly controlling disk usage.
+    """
     def __init__(
         self,
         eng: sa.Engine,
         zip_paths: List[Path],
         folder_id_map: Dict[Path, int],
         staging_root: Path,
-        num_consumers: int = 8,
-        queue_size: int = 16,
+        batch_size: int = 30,       # How many zips to bring to SSD at once
+        unzip_workers: int = 32,    # High concurrency for Network I/O
+        process_workers: int = 8,   # Lower concurrency for DB/CPU
     ):
         self.eng = eng
         self.zip_paths = zip_paths
         self.folder_id_map = folder_id_map
         self.staging_root = staging_root
-        self.num_consumers = num_consumers
-        self.queue_size = queue_size
-
-        self.queue: Queue[StagingJob] = Queue(maxsize=queue_size)
-        self.stop_event = Event()
+        self.batch_size = batch_size
+        self.unzip_workers = unzip_workers
+        self.process_workers = process_workers
         self.ctx = EtlContext.capture()
 
     def run(self):
+        total_zips = len(self.zip_paths)
+        logger.info(f"Starting Batch Pipeline. Processing {total_zips} files in batches of {self.batch_size}.")
+
+        # Chunk the work
+        batches = [
+            self.zip_paths[i : i + self.batch_size]
+            for i in range(0, len(self.zip_paths), self.batch_size)
+        ]
+
+        with tqdm(total=total_zips, desc="Processing Archives", unit="zip") as pbar:
+            for batch_idx, batch in enumerate(batches):
+                logger.info(f"--- Starting Batch {batch_idx + 1}/{len(batches)} ({len(batch)} files) ---")
+                
+                # 1. Parallel Stage (Unzip)
+                # We map source zips to their staged directory paths
+                # Return: List of (folder_id, stage_path) tuples for successful unzips
+                staged_items = self._phase_stage_batch(batch)
+                
+                if not staged_items:
+                    pbar.update(len(batch)) # Mark all as failed/skipped
+                    continue
+
+                # 2. Parallel Process (DB Load)
+                self._phase_process_batch(staged_items, pbar)
+
+                # 3. Cleanup (Bulk Delete)
+                # We clean up immediately to free space for the next batch
+                self._phase_cleanup_batch(staged_items)
+
+    def _phase_stage_batch(self, batch: List[Path]) -> List[tuple]:
         """
-        Starts the pipeline threads and waits for completion.
-        Tracks progress using TQDM.
+        Phase 1: Flood the network with read requests to bring files to SSD.
         """
-        # We track TOTAL zips to be processed.
-        total_work = len(self.zip_paths)
+        staged_results = []
         
-        # TQDM is thread-safe for updates.
-        # We use unit='zip' to give semantic meaning to the counters.
-        with tqdm(total=total_work, desc="Processing Archives", unit="zip") as pbar:
-            
-            consumers = []
-            for i in range(self.num_consumers):
-                t = Thread(
-                    target=self._consumer_task,
-                    # Pass the pbar instance to the thread
-                    args=(f"Consumer-{i}", pbar),
-                    name=f"Consumer-{i}",
-                )
-                t.start()
-                consumers.append(t)
+        # We use a high thread count here because we are waiting on Network Latency
+        with concurrent.futures.ThreadPoolExecutor(max_workers=self.unzip_workers) as executor:
+            future_to_zip = {
+                executor.submit(self._task_unzip_one, zp): zp 
+                for zp in batch
+            }
 
-            producer = Thread(target=self._producer_task, name="Producer")
-            producer.start()
-
-            try:
-                producer.join()
-                
-                # Broadcast Sentinels (Poison Pills) to stop consumers
-                sentinel = StagingJob(0, Path(""), Path(""), is_sentinel=True)
-                for _ in range(self.num_consumers):
-                    self.queue.put(sentinel)
-
-                # Wait for all items in queue to be processed
-                self.queue.join()
-                
-                # Ensure threads exit
-                for c in consumers:
-                    c.join()
-
-            except KeyboardInterrupt:
-                logger.warning("Pipeline interrupted. Stopping threads...")
-                self.stop_event.set()
-                # Drain queue to unblock threads so they can see stop_event
-                while not self.queue.empty():
-                    try:
-                        self.queue.get_nowait()
-                        self.queue.task_done()
-                    except:
-                        pass
-                raise
-
-    def _producer_task(self):
-        """
-        Producer: Unzips -> Explodes -> Queues
-        """
-        logger.info(f"[Producer] Started. Items: {len(self.zip_paths)}")
-
-        for zip_path in self.zip_paths:
-            if self.stop_event.is_set():
-                break
-
-            folder_id = self.folder_id_map.get(zip_path)
-            if not folder_id:
-                continue
-
-            safe_name = f"{folder_id}_{zip_path.stem}"
-            local_stage_path = self.staging_root / safe_name
-
-            try:
-                if local_stage_path.exists():
-                    shutil.rmtree(local_stage_path)
-                local_stage_path.mkdir(parents=True, exist_ok=True)
-
-                logger.debug(f"[Producer] Staging {zip_path.name}...")
-
-                # 1. Unpack Outer (Network Bound)
-                shutil.unpack_archive(str(zip_path), str(local_stage_path), "zip")
-
-                # 2. Explode Inner (Disk Bound - Flattening)
-                for nested_zip in local_stage_path.rglob("*RSM_RawArchive.zip"):
-                    try:
-                        shutil.unpack_archive(
-                            str(nested_zip), str(nested_zip.parent), "zip"
-                        )
-                        nested_zip.unlink()  # Cleanup archive
-                    except Exception as e:
-                        logger.warning(f"[Producer] Failed to explode {nested_zip}: {e}")
-
-                # 3. Enqueue
-                job = StagingJob(
-                    folder_id=folder_id,
-                    zip_path=zip_path,
-                    stage_path=local_stage_path,
-                )
-                self.queue.put(job)
-
-            except Exception as e:
-                logger.error(f"[Producer] Failed to stage {zip_path}: {e}")
-                if local_stage_path.exists():
-                    shutil.rmtree(local_stage_path, ignore_errors=True)
-
-        logger.info("[Producer] Done.")
-
-    def _consumer_task(self, name: str, pbar: tqdm):
-        """
-        Consumer: Catalog -> Process -> Cleanup -> Update Progress
-        """
-        while not self.stop_event.is_set():
-            try:
-                job = self.queue.get(timeout=1)
-            except:
-                continue
-
-            if job.is_sentinel:
-                self.queue.task_done()
-                break
-
-            try:
-                # Delegate actual logic to workflow
-                process_staged_directory(
-                    self.eng, job.folder_id, job.stage_path, self.ctx
-                )
-            except Exception as e:
-                logger.error(
-                    f"[{name}] Failed processing folder {job.folder_id}: {e}"
-                )
-            finally:
-                # Immediate cleanup of SSD space
+            for future in concurrent.futures.as_completed(future_to_zip):
+                zip_path = future_to_zip[future]
                 try:
-                    if job.stage_path.exists():
-                        shutil.rmtree(job.stage_path)
-                except OSError as e:
-                    logger.warning(f"Failed to cleanup {job.stage_path}: {e}")
+                    result = future.result() # returns (folder_id, stage_path) or None
+                    if result:
+                        staged_results.append(result)
+                except Exception as e:
+                    logger.error(f"Failed to stage {zip_path}: {e}")
+        
+        return staged_results
 
-                # Mark item done in Queue
-                self.queue.task_done()
-                
-                # Update Progress Bar
-                # This reflects "One Zip Fully Processed (or Failed)"
+    def _task_unzip_one(self, zip_path: Path):
+        """Worker function for unzipping a single file."""
+        folder_id = self.folder_id_map.get(zip_path)
+        if not folder_id:
+            return None
+
+        safe_name = f"{folder_id}_{zip_path.stem}"
+        local_stage_path = self.staging_root / safe_name
+
+        # Clean slate
+        if local_stage_path.exists():
+            shutil.rmtree(local_stage_path)
+        local_stage_path.mkdir(parents=True, exist_ok=True)
+
+        # Heavy I/O: Pull from network
+        shutil.unpack_archive(str(zip_path), str(local_stage_path), "zip")
+
+        # Explode Nested (Local I/O)
+        for nested_zip in local_stage_path.rglob("*RSM_RawArchive.zip"):
+            try:
+                shutil.unpack_archive(str(nested_zip), str(nested_zip.parent), "zip")
+                nested_zip.unlink()
+            except Exception:
+                logger.warning(f"Failed to explode nested zip in {zip_path.name}")
+
+        return (folder_id, local_stage_path)
+
+    def _phase_process_batch(self, staged_items: List[tuple], pbar: tqdm):
+        """
+        Phase 2: Crunch the data on SSD and push to DB.
+        """
+        # We use fewer threads here because this is CPU/DB bound
+        with concurrent.futures.ThreadPoolExecutor(max_workers=self.process_workers) as executor:
+            futures = [
+                executor.submit(process_staged_directory, self.eng, fid, path, self.ctx)
+                for fid, path in staged_items
+            ]
+            
+            # Update progress bar as each PROCESSING task finishes
+            for _ in concurrent.futures.as_completed(futures):
                 pbar.update(1)
+
+    def _phase_cleanup_batch(self, staged_items: List[tuple]):
+        """
+        Phase 3: Nuke the staging folders.
+        """
+        for _, path in staged_items:
+            try:
+                if path.exists():
+                    shutil.rmtree(path)
+            except OSError as e:
+                logger.warning(f"Failed to cleanup {path}: {e}")
