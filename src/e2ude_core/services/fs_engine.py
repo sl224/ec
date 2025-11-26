@@ -2,7 +2,8 @@ import logging
 import os
 from concurrent.futures import ThreadPoolExecutor, wait, FIRST_COMPLETED
 from pathlib import Path
-from typing import Callable, List, TypeVar, Any, Set, Dict
+from typing import Callable, List, TypeVar, Any, Dict
+from tqdm import tqdm
 
 logger = logging.getLogger(__name__)
 
@@ -29,67 +30,64 @@ class ParallelFileScanner:
     ) -> List[T]:
         """
         Recursively scans root_path.
-        
-        Args:
-            filter_func: Predicate(os.DirEntry) -> bool.
-            action_func: Function(Path) -> T. Executed on matching files.
         """
-        # Track all active futures and their type: "SCAN" (Dir) or "ACTION" (File)
-        # Mapping: Future -> str
         futures: Dict[Any, str] = {}
         results: List[T] = []
         
-        # Metrics for heartbeat logging
         dirs_scanned = 0
         files_found = 0
 
         logger.info(f"Starting parallel scan of {root_path} ({self.max_workers} workers)")
 
         with ThreadPoolExecutor(max_workers=self.max_workers) as executor:
-            # Bootstrapping: Schedule the root directory
+            # Bootstrapping
             root_future = executor.submit(self._scan_dir, str(root_path), filter_func)
             futures[root_future] = "SCAN"
 
-            # The Event Loop
-            while futures:
-                # Wait for at least one task to finish.
-                # This prevents busy-waiting and handles completions as they stream in.
-                done, _ = wait(futures.keys(), return_when=FIRST_COMPLETED)
+            # Initialize TQDM with 1 known directory (root)
+            with tqdm(total=1, desc="Scanning Directories", unit="dir") as pbar:
+                while futures:
+                    # Wait for at least one task to finish
+                    done, _ = wait(futures.keys(), return_when=FIRST_COMPLETED)
 
-                for f in done:
-                    task_type = futures.pop(f)
+                    for f in done:
+                        task_type = futures.pop(f)
 
-                    try:
-                        if task_type == "SCAN":
-                            dirs_scanned += 1
-                            subdirs, matching_files = f.result()
+                        try:
+                            if task_type == "SCAN":
+                                dirs_scanned += 1
+                                subdirs, matching_files = f.result()
 
-                            # 1. Fan-Out: Schedule Subdirectories
-                            for d in subdirs:
-                                nf = executor.submit(self._scan_dir, d, filter_func)
-                                futures[nf] = "SCAN"
+                                # 1. Dynamic Total Adjustment
+                                if subdirs:
+                                    pbar.total += len(subdirs)
+                                    pbar.refresh() # Force redraw to show correct %
 
-                            # 2. Schedule Actions (Processing)
-                            # We submit these to the pool to parallelize heavy work (hashing)
-                            # or handle high-latency I/O (network reads).
-                            for p in matching_files:
-                                files_found += 1
-                                nf = executor.submit(action_func, Path(p))
-                                futures[nf] = "ACTION"
-                            
-                            # Periodic Heartbeat (every ~1000 dirs to avoid log spam)
-                            if dirs_scanned % 1000 == 0:
-                                logger.info(f"Scanned {dirs_scanned} dirs, found {files_found} files...")
+                                # 2. Fan-Out: Schedule Subdirectories
+                                for d in subdirs:
+                                    nf = executor.submit(self._scan_dir, d, filter_func)
+                                    futures[nf] = "SCAN"
 
-                        elif task_type == "ACTION":
-                            # Collect Result
-                            res = f.result()
-                            if res is not None:
-                                results.append(res)
+                                # 3. Schedule Actions
+                                for p in matching_files:
+                                    files_found += 1
+                                    nf = executor.submit(action_func, Path(p))
+                                    futures[nf] = "ACTION"
+                                
+                                # Update Progress
+                                pbar.update(1)
+                                pbar.set_postfix(files=files_found)
 
-                    except Exception as e:
-                        # Log but don't crash the scan
-                        logger.error(f"Task failed: {e}")
+                            elif task_type == "ACTION":
+                                res = f.result()
+                                if res is not None:
+                                    results.append(res)
+
+                        except Exception as e:
+                            logger.error(f"Task failed: {e}")
+                            # Ensure progress bar doesn't stall on error
+                            if task_type == "SCAN":
+                                pbar.update(1)
 
         logger.info(f"Scan complete. Scanned {dirs_scanned} dirs, processed {len(results)} files.")
         return results
@@ -103,8 +101,6 @@ class ParallelFileScanner:
         files = []
 
         try:
-            # os.scandir is strictly better than os.walk or pathlib.iterdir
-            # because it yields DirEntry objects with cached stat() info.
             with os.scandir(path) as it:
                 for entry in it:
                     if entry.is_dir(follow_symlinks=False):

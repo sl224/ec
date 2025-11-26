@@ -7,6 +7,7 @@ from threading import Event, Thread
 from typing import Dict, List
 
 import sqlalchemy as sa
+from tqdm import tqdm
 
 from e2ude_core.context import EtlContext
 from e2ude_core.orchestration.workflow import process_staged_directory
@@ -46,42 +47,55 @@ class StagingPipeline:
     def run(self):
         """
         Starts the pipeline threads and waits for completion.
+        Tracks progress using TQDM.
         """
-        consumers = []
-        for i in range(self.num_consumers):
-            t = Thread(
-                target=self._consumer_task,
-                args=(f"Consumer-{i}",),
-                name=f"Consumer-{i}",
-            )
-            t.start()
-            consumers.append(t)
+        # We track TOTAL zips to be processed.
+        total_work = len(self.zip_paths)
+        
+        # TQDM is thread-safe for updates.
+        # We use unit='zip' to give semantic meaning to the counters.
+        with tqdm(total=total_work, desc="Processing Archives", unit="zip") as pbar:
+            
+            consumers = []
+            for i in range(self.num_consumers):
+                t = Thread(
+                    target=self._consumer_task,
+                    # Pass the pbar instance to the thread
+                    args=(f"Consumer-{i}", pbar),
+                    name=f"Consumer-{i}",
+                )
+                t.start()
+                consumers.append(t)
 
-        producer = Thread(target=self._producer_task, name="Producer")
-        producer.start()
+            producer = Thread(target=self._producer_task, name="Producer")
+            producer.start()
 
-        try:
-            producer.join()
-            # Broadcast Sentinels
-            sentinel = StagingJob(0, Path(""), Path(""), is_sentinel=True)
-            for _ in range(self.num_consumers):
-                self.queue.put(sentinel)
+            try:
+                producer.join()
+                
+                # Broadcast Sentinels (Poison Pills) to stop consumers
+                sentinel = StagingJob(0, Path(""), Path(""), is_sentinel=True)
+                for _ in range(self.num_consumers):
+                    self.queue.put(sentinel)
 
-            self.queue.join()
-            for c in consumers:
-                c.join()
+                # Wait for all items in queue to be processed
+                self.queue.join()
+                
+                # Ensure threads exit
+                for c in consumers:
+                    c.join()
 
-        except KeyboardInterrupt:
-            logger.warning("Pipeline interrupted. Stopping threads...")
-            self.stop_event.set()
-            # Drain queue to unblock threads
-            while not self.queue.empty():
-                try:
-                    self.queue.get_nowait()
-                    self.queue.task_done()
-                except:
-                    pass
-            raise
+            except KeyboardInterrupt:
+                logger.warning("Pipeline interrupted. Stopping threads...")
+                self.stop_event.set()
+                # Drain queue to unblock threads so they can see stop_event
+                while not self.queue.empty():
+                    try:
+                        self.queue.get_nowait()
+                        self.queue.task_done()
+                    except:
+                        pass
+                raise
 
     def _producer_task(self):
         """
@@ -135,9 +149,9 @@ class StagingPipeline:
 
         logger.info("[Producer] Done.")
 
-    def _consumer_task(self, name: str):
+    def _consumer_task(self, name: str, pbar: tqdm):
         """
-        Consumer: Catalog -> Process -> Cleanup
+        Consumer: Catalog -> Process -> Cleanup -> Update Progress
         """
         while not self.stop_event.is_set():
             try:
@@ -166,4 +180,9 @@ class StagingPipeline:
                 except OSError as e:
                     logger.warning(f"Failed to cleanup {job.stage_path}: {e}")
 
+                # Mark item done in Queue
                 self.queue.task_done()
+                
+                # Update Progress Bar
+                # This reflects "One Zip Fully Processed (or Failed)"
+                pbar.update(1)
