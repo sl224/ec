@@ -47,7 +47,6 @@ def main():
         # 3. Pipeline Execution
         pipeline = StagingPipeline(
             eng=main_eng,
-            zip_paths=valid_paths,
             folder_id_map=folder_id_map,
             staging_root=STAGING_ROOT,
             # Tuning for "Selective Extraction" on 8-Core Machine:

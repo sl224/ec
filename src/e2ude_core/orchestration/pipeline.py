@@ -13,7 +13,7 @@ from tqdm import tqdm
 from e2ude_core.context import EtlContext
 from e2ude_core.orchestration.workflow import process_staged_directory
 from e2ude_core.registry import HANDLER_REGISTRY
-from e2ude_core.services.zip_io import FILE_PATTERNS
+from e2ude_core.services.zip_io import file_type_patterns 
 
 logger = logging.getLogger(__name__)
 
@@ -25,7 +25,7 @@ def _resolve_active_patterns() -> List[str]:
     active_types: Set[str] = set(HANDLER_REGISTRY.keys())
     patterns = []
 
-    for f_enum, pattern in FILE_PATTERNS:
+    for f_enum, pattern in file_type_patterns.items():
         if f_enum.value in active_types:
             patterns.append(pattern)
 
@@ -54,7 +54,6 @@ class StagingPipeline:
     def __init__(
         self,
         eng: sa.Engine,
-        zip_paths: List[Path],
         folder_id_map: Dict[Path, int],
         staging_root: Path,
         buffer_size: int = 30,
@@ -63,7 +62,6 @@ class StagingPipeline:
         db_write_workers: int = 4,
     ):
         self.eng = eng
-        self.zip_paths = zip_paths
         self.folder_id_map = folder_id_map
         self.staging_root = staging_root
 
@@ -79,21 +77,26 @@ class StagingPipeline:
         logger.info(f"Active Patterns: {len(self.active_patterns)}")
 
     def run(self):
-        total = len(self.zip_paths)
+
+        total = len(self.folder_id_map)
         logger.info(f"Starting Pipeline. Processing {total} files.")
 
         # Two pools allow us to flood the network (Unzip) without choking the DB (Process)
         unzip_pool = ThreadPoolExecutor(max_workers=self.unzip_workers, thread_name_prefix="Stage")
         process_pool = ThreadPoolExecutor(max_workers=self.process_workers, thread_name_prefix="Proc")
+        # debug 
+        LIMIT = 20
 
         try:
             with tqdm(total=total, desc="Pipeline", unit="zip") as pbar:
-                for zip_path in self.zip_paths:
-                    if self.stop_event.is_set():
+                for i, zip_path in enumerate(self.folder_id_map.values()):
+                    if self.stop_event.is_set() or i == LIMIT:
                         break
 
                     # 1. Acquire Ticket (Backpressure)
-                    self.buffer_sem.acquire()
+                    while not self.buffer_sem.acquire(timeout=0.5):
+                        if self.stop_event.is_set():
+                            break
 
                     # 2. Start Chain (Non-blocking)
                     # We submit to Unzip pool first.
