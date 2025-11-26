@@ -39,4 +39,4 @@ tests/static_assets/
 *.log*
 
 # config
-e2ude_config.toml
+*.toml
