@@ -19,14 +19,15 @@ if not STAGING_ROOT.exists():
 
 def main():
     setup_logging(settings)
-    logger.info("Starting 3-Stage High-Performance Pipeline.")
+    logger.info(f"Starting Selective Thread Pipeline. Staging: {STAGING_ROOT}")
 
-    # Pool must be large enough to handle all DB threads + overhead
+    # Ensure DB pool is large enough for 32+ concurrent connections
     main_eng = sql_io.get_engine(settings.database, default_pool_size=64)
 
     try:
         initialize_database(main_eng, reset_tables=False)
 
+        # 1. Discovery
         scan_root = Path(r"\\esidme24\#ESIDME24\PUBLIC\E2 Stuff\ALE RSM Data Archive")
         if not scan_root.exists():
             logger.error("Scan root not found.")
@@ -35,20 +36,20 @@ def main():
         valid_paths = discover_network_zips(scan_root, max_workers=1024)
         if not valid_paths: return
 
+        # 2. Registration
         folder_id_map = register_folders_bulk(main_eng, valid_paths)
 
+        # 3. Pipeline Execution
         pipeline = StagingPipeline(
             eng=main_eng,
             zip_paths=valid_paths,
             folder_id_map=folder_id_map,
             staging_root=STAGING_ROOT,
-            
-            # --- Performance Tuning ---
-            buffer_size=30,         # Keep 30 items on SSD
-            download_workers=32,    # 32 concurrent network streams
-            unzip_workers=8,        # 8 Processes (1 per Physical Core approx)
-            db_workers=8,           # 8 Files processing DB simultaneously
-            table_write_workers=4   # 4 Parallel table inserts per file
+            # Tuning for "Selective Extraction" on 8-Core Machine:
+            buffer_size=60,
+            unzip_workers=60,   # Flood Network with header requests
+            process_workers=8,  # Maximize CPU usage for parsing
+            db_write_workers=8  # parallel inserts
         )
         pipeline.run()
 
