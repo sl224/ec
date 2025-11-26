@@ -28,6 +28,7 @@ __pycache__/
 
 # Test assets
 tests/static_assets/
+temp_staging/
 
 # DB
 *.sqlite*
@@ -37,6 +38,7 @@ tests/static_assets/
 
 # log
 *.log*
+*.json
 
 # config
 *.toml

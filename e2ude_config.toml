@@ -2,16 +2,16 @@
 # Pydantic's discriminated union loader expects all keys
 # for the selected 'type' to be flat inside this section.
 [database]
-type = "sqlite3"
-db_location = "db.sqlite3"
-in_memory = false
+# type = "sqlite3"
+# db_location = "db.sqlite3"
+# in_memory = false
 
-# type = "mssql"
-# server_name = "RSSC30-DB0140"
-# db_name = "AnalyticsDataMart"
-# driver = "ODBC Driver 17 for SQL Server"
-# trusted_connection = "yes"
-# schema_name = "e2ude_core_dev"
+type = "mssql"
+server_name = "RSSC30-DB0140"
+db_name = "AnalyticsDataMart"
+driver = "ODBC Driver 17 for SQL Server"
+trusted_connection = "yes"
+schema_name = "e2ude_core_dev"
 
 # --- Logging Settings ---
 [logging]
