@@ -1,18 +1,18 @@
 import logging
 from pathlib import Path
-from typing import Any, Dict, List, Tuple
+from typing import Dict, List, Tuple
 
 import sqlalchemy as sa
 from sqlalchemy import bindparam, insert, select, update
 from sqlalchemy.exc import IntegrityError
 
-from e2ude_core.services.zip_io import RecursiveZipScanner
-from e2ude_core.db.models import FileMetadata, FileHashRegistry, FolderMetadata
+# Import from the new Catalog Service
+from e2ude_core.services.catalog import FileScanResult, catalog_staged_folder
+from e2ude_core.db.models import FileHashRegistry, FileMetadata, FolderMetadata
 from e2ude_core.orchestration.managers import JobManager
 
 logger = logging.getLogger(__name__)
 
-# Constants
 SCANNER_PIPELINE_ID = "MetadataScanHandler"
 SCANNER_VERSION = 1
 
@@ -20,38 +20,37 @@ SCANNER_VERSION = 1
 def run_metadata_scan(
     eng: sa.Engine,
     folder_id: int,
-    zip_path: Path,
+    target_path: Path,
     job_updater: JobManager,
 ):
     """
-    Scans the zip file and updates the FileMetadata table.
+    Cataloging Phase.
+    Scans the staged directory and updates DB metadata.
     """
-    job_updater.mark_running("Scanning zip archive structure...")
+    job_updater.mark_running("Scanning staged structure...")
 
-    # 1. Scan physical zip
-    scanner = RecursiveZipScanner(zip_path)
-    raw_files = scanner.scan()
+    if not target_path.is_dir():
+        logger.error(f"Scanner expects a directory: {target_path}")
+        return
+
+    # Call the Catalog Service
+    raw_files: List[FileScanResult] = catalog_staged_folder(target_path)
 
     if not raw_files:
-        logger.warning(f"Zip file {zip_path} appears empty or unreadable.")
+        logger.warning(f"Target {target_path} appears empty.")
         job_updater._rows_uploaded_in_scope = 0
         return
 
     job_updater.mark_running(f"Cataloging {len(raw_files)} files...")
 
-    # 2. Upsert Metadata
     _upsert_metadata(eng, folder_id, raw_files)
 
-    # 3. Report
     job_updater._rows_uploaded_in_scope = len(raw_files)
     logger.info(f"[{SCANNER_PIPELINE_ID}] Cataloged {len(raw_files)} files.")
 
 
+# ... (fetch_existing_files_map remains unchanged) ...
 def fetch_existing_files_map(eng: sa.Engine, folder_id: int):
-    """
-    Helper to get current DB state for this folder.
-    Returns a list of objects or dicts for the workflow to use.
-    """
     with eng.connect() as conn:
         query = select(
             FileMetadata.id,
@@ -59,18 +58,14 @@ def fetch_existing_files_map(eng: sa.Engine, folder_id: int):
             FileMetadata.file_type,
             FileMetadata.relative_path,
         ).where(FileMetadata.folder_id == folder_id)
-
-        # Return as simple dictionaries or named tuples
         return [row._mapping for row in conn.execute(query)]
 
 
-# --- Internal Helpers (Hidden from Orchestrator) ---
-
-
-def _upsert_metadata(eng: sa.Engine, folder_id: int, files: List[Dict[str, Any]]):
+def _upsert_metadata(eng: sa.Engine, folder_id: int, files: List[FileScanResult]):
     try:
         with eng.begin() as conn:
-            unique_md5s = list({f["md5"] for f in files})
+            # Access via strictly typed attributes
+            unique_md5s = list({f.md5 for f in files if f.md5})
             hash_map = _ensure_hashes_exist(conn, unique_md5s)
             to_insert, to_update = _detect_changes(conn, folder_id, files, hash_map)
             _commit_changes(conn, to_insert, to_update)
@@ -87,7 +82,9 @@ def _upsert_metadata(eng: sa.Engine, folder_id: int, files: List[Dict[str, Any]]
 
 
 def _ensure_hashes_exist(conn, unique_md5s: List[bytes]) -> Dict[bytes, int]:
-    # ... (Logic unchanged, just indented) ...
+    if not unique_md5s:
+        return {}
+
     existing_rows = conn.execute(
         select(FileHashRegistry.md5).where(FileHashRegistry.md5.in_(unique_md5s))
     ).fetchall()
@@ -112,8 +109,9 @@ def _ensure_hashes_exist(conn, unique_md5s: List[bytes]) -> Dict[bytes, int]:
     return {row.md5: row.id for row in id_rows}
 
 
-def _detect_changes(conn, folder_id, files, hash_map) -> Tuple[List, List]:
-    # ... (Logic unchanged) ...
+def _detect_changes(
+    conn, folder_id, files: List[FileScanResult], hash_map
+) -> Tuple[List, List]:
     current_state = conn.execute(
         select(FileMetadata.id, FileMetadata.relative_path, FileMetadata.hash_id).where(
             FileMetadata.folder_id == folder_id
@@ -126,8 +124,12 @@ def _detect_changes(conn, folder_id, files, hash_map) -> Tuple[List, List]:
     to_update = []
 
     for f in files:
-        path = f["relative_path"]
-        new_hid = hash_map.get(f["md5"])
+        if not f.md5:
+            continue
+
+        path = f.relative_path
+        new_hid = hash_map.get(f.md5)
+
         if not new_hid:
             continue
 
@@ -138,8 +140,8 @@ def _detect_changes(conn, folder_id, files, hash_map) -> Tuple[List, List]:
                     {
                         "b_id": db_id,
                         "b_hash_id": new_hid,
-                        "b_file_type": f["file_type"],
-                        "b_file_size": f["file_size_bytes"],
+                        "b_file_type": f.file_type,
+                        "b_file_size": f.file_size_bytes,
                     }
                 )
         else:
@@ -148,8 +150,8 @@ def _detect_changes(conn, folder_id, files, hash_map) -> Tuple[List, List]:
                     "folder_id": folder_id,
                     "relative_path": path,
                     "hash_id": new_hid,
-                    "file_type": f["file_type"],
-                    "file_size_bytes": f["file_size_bytes"],
+                    "file_type": f.file_type,
+                    "file_size_bytes": f.file_size_bytes,
                 }
             )
     return to_insert, to_update
