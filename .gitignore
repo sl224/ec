@@ -39,6 +39,7 @@ temp_staging/
 # log
 *.log*
 *.json
+*.txt
 
 # config
 *.toml

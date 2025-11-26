@@ -34,16 +34,17 @@ def get_folder_work_delta(
     eng: sa.Engine, folder_id: int, scan_version: int = 1
 ) -> WorkDelta:
     """Single-folder check (Legacy/Fallback)."""
-    # Re-use the bulk logic for consistency, just wrapping 1 item
+    # Re-use the bulk logic for consistency
     states = get_folder_states_bulk(eng, [folder_id], scan_version)
+    state = states.get(folder_id, FolderState.NEEDS_SCAN)
     
-    # Reconstruct WorkDelta from the simplified state return
-    # Note: The bulk function returns just the Enum to save memory/complexity.
-    # If we need the detailed missing items, we use the detailed logic below.
-    
-    # For the pipeline "check before process", we usually just need the status.
-    # However, if we need the *list* of missing items for the job spec, we need the details.
-    # Let's keep the original detailed logic here for the "Process" phase.
+    # If UP_TO_DATE, return immediately
+    if state == FolderState.UP_TO_DATE:
+        return WorkDelta(status=FolderState.UP_TO_DATE)
+        
+    # For the "Process" phase, we usually re-calculate delta to get the specific 'missing_items'.
+    # The bulk function returns a lightweight Enum to save memory.
+    # Below is the detailed check logic for when we actually process the folder.
     
     with eng.connect() as conn:
         # 1. Check Scan
@@ -98,86 +99,85 @@ def get_folder_states_bulk(
     scan_version: int
 ) -> Dict[int, FolderState]:
     """
-    Efficiently checks the state of multiple folders in batches.
-    Returns map {folder_id: FolderState}.
+    Efficiently checks the state of multiple folders.
+    Handles internal batching to respect SQL parameter limits.
     """
     if not folder_ids:
         return {}
 
+    # Default assumption: Everything needs a scan
     results = {fid: FolderState.NEEDS_SCAN for fid in folder_ids}
     
-    # 1. Check Scan Status (Bulk)
-    # Find all folders that HAVE a valid scan
+    # Internal Chunking for SQL safety (MSSQL limit ~2100 params)
+    SQL_BATCH_SIZE = 1500
+    
+    scanned_folder_ids = set()
+    
     with eng.connect() as conn:
-        scan_query = (
-            sa.select(ProcessingSession.folder_id)
-            .join(ProcessingJob, ProcessingJob.session_id == ProcessingSession.id)
-            .where(
-                ProcessingSession.folder_id.in_(folder_ids),
-                ProcessingJob.pipeline_id == "MetadataScanHandler",
-                ProcessingJob.status == StatusEnum.COMPLETED,
-                ProcessingJob.handler_version >= scan_version
+        # 1. Check Scan Status (Batched)
+        for i in range(0, len(folder_ids), SQL_BATCH_SIZE):
+            batch = folder_ids[i : i + SQL_BATCH_SIZE]
+            scan_query = (
+                sa.select(ProcessingSession.folder_id)
+                .join(ProcessingJob, ProcessingJob.session_id == ProcessingSession.id)
+                .where(
+                    ProcessingSession.folder_id.in_(batch),
+                    ProcessingJob.pipeline_id == "MetadataScanHandler",
+                    ProcessingJob.status == StatusEnum.COMPLETED,
+                    ProcessingJob.handler_version >= scan_version
+                )
+                .group_by(ProcessingSession.folder_id)
             )
-            .group_by(ProcessingSession.folder_id)
-        )
-        
-        scanned_folder_ids = set(conn.execute(scan_query).scalars().all())
-        
-        # If not in scanned_ids, it remains NEEDS_SCAN.
-        # We only analyze artifacts for folders that passed the scan check.
-        folders_to_check_artifacts = list(scanned_folder_ids)
-        
-        if not folders_to_check_artifacts:
-            return results # All need scan
+            scanned_folder_ids.update(conn.execute(scan_query).scalars().all())
 
-        # 2. Fetch File Metadata for scanned folders
-        # Map: folder_id -> list[(hash_id, file_type)]
+        # Folders that haven't been scanned stay as NEEDS_SCAN.
+        # We only inspect artifacts for the scanned ones.
+        folders_to_check = list(scanned_folder_ids)
+        if not folders_to_check:
+            return results
+
+        # 2. Fetch File Metadata (Batched)
         folder_files = defaultdict(list)
         all_hash_ids = set()
         
-        file_query = (
-            sa.select(FileMetadata.folder_id, FileMetadata.hash_id, FileMetadata.file_type)
-            .where(FileMetadata.folder_id.in_(folders_to_check_artifacts))
-        )
-        
-        for row in conn.execute(file_query):
-            folder_files[row.folder_id].append((row.hash_id, row.file_type))
-            all_hash_ids.add(row.hash_id)
+        for i in range(0, len(folders_to_check), SQL_BATCH_SIZE):
+            batch = folders_to_check[i : i + SQL_BATCH_SIZE]
+            file_query = (
+                sa.select(FileMetadata.folder_id, FileMetadata.hash_id, FileMetadata.file_type)
+                .where(FileMetadata.folder_id.in_(batch))
+            )
+            for row in conn.execute(file_query):
+                folder_files[row.folder_id].append((row.hash_id, row.file_type))
+                all_hash_ids.add(row.hash_id)
 
-        # 3. Fetch Artifact Manifests for RELEVANT hashes
-        # Map: hash_id -> set[target_table]
-        # Chunk hash_ids if too many (SQL parameter limits)
-        
+        # 3. Fetch Artifact Manifests (Batched)
         existing_artifacts = defaultdict(set)
         hash_id_list = list(all_hash_ids)
-        CHUNK_SIZE = 2000
         
-        for i in range(0, len(hash_id_list), CHUNK_SIZE):
-            chunk = hash_id_list[i : i + CHUNK_SIZE]
+        for i in range(0, len(hash_id_list), SQL_BATCH_SIZE):
+            batch = hash_id_list[i : i + SQL_BATCH_SIZE]
             art_query = (
                 sa.select(ArtifactManifest.hash_id, ArtifactManifest.target_table)
-                .where(ArtifactManifest.hash_id.in_(chunk))
+                .where(ArtifactManifest.hash_id.in_(batch))
             )
             for row in conn.execute(art_query):
                 existing_artifacts[row.hash_id].add(row.target_table)
 
-    # 4. Compute Logic in Memory
-    for fid in folders_to_check_artifacts:
-        # Default to UP_TO_DATE, prove otherwise
+    # 4. Compute Logic in Memory (Fast)
+    for fid in folders_to_check:
         state = FolderState.UP_TO_DATE
         
         files = folder_files.get(fid, [])
         if not files:
-            # Scanned but empty? treat as up to date (nothing to do)
+            # Scanned but no files found inside? It's technically up-to-date.
             results[fid] = FolderState.UP_TO_DATE
             continue
 
         for hash_id, file_type in files:
             spec = HANDLER_REGISTRY.get(file_type)
             if not spec:
-                continue # No handler, no work expected
+                continue 
             
-            # Check if all expected tables exist in manifest
             actual_tables = existing_artifacts.get(hash_id, set())
             
             missing_any = False
@@ -188,7 +188,7 @@ def get_folder_states_bulk(
             
             if missing_any:
                 state = FolderState.INCOMPLETE
-                break # Optimization: One missing file makes the folder incomplete
+                break 
         
         results[fid] = state
 

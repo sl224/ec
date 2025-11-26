@@ -1,4 +1,5 @@
 import logging
+import os
 import shutil
 from concurrent.futures import ThreadPoolExecutor
 from pathlib import Path
@@ -18,10 +19,21 @@ from e2ude_core.services.zip_io import file_type_patterns
 from e2ude_core.orchestration.state import get_folder_work_delta, FolderState
 from e2ude_core.pipelines.scanner import SCANNER_VERSION
 
-# --- VizTracer Import (Safe) ---
-try:
-    from viztracer import get_tracer
-except ImportError:
+# --- PERFORMANCE FIX ---
+# Increase the default buffer size for file copies from 64KB to 4MB.
+# This drastically reduces IOPS/latency overhead when extracting from Network SMB shares.
+shutil.COPY_BUFSIZE = 4 * 1024 * 1024
+
+# --- VizTracer Import (Conditional) ---
+# PRO TIP: Only import/enable tracing if the Env Var is set.
+# This avoids overhead in Production unless explicitly requested.
+if os.environ.get("ENABLE_VIZTRACER") == "1":
+    try:
+        from viztracer import get_tracer
+    except ImportError:
+        def get_tracer(): return None
+else:
+    # Zero-overhead dummy function
     def get_tracer(): return None
 
 logger = logging.getLogger(__name__)
@@ -144,6 +156,11 @@ class StagingPipeline:
 
         # --- JIT STATE CHECK ---
         try:
+            # VizTracer: Log Check
+            tracer = get_tracer()
+            if tracer:
+                tracer.log_instant("CheckDB", {"id": folder_id}, scope="t")
+
             delta = get_folder_work_delta(self.eng, folder_id, SCANNER_VERSION)
             if delta.status == FolderState.UP_TO_DATE:
                 self._finalize_item(None, pbar, skipped=True)
@@ -152,8 +169,6 @@ class StagingPipeline:
             logger.warning(f"State check failed for {folder_id}, forcing retry: {e}")
 
         # --- Proceed to Extraction ---
-        
-        # VizTracer: Log Staging Start
         tracer = get_tracer()
         if tracer:
             tracer.log_instant("Staging Start", {"zip": zip_path.name, "id": folder_id}, scope="t")
@@ -173,6 +188,8 @@ class StagingPipeline:
                 ]
                 
                 if targets:
+                    # This extractall call uses shutil.copyfileobj internally.
+                    # By setting shutil.COPY_BUFSIZE to 4MB, we force fewer, larger reads.
                     zf.extractall(local_dir, members=targets)
 
             for nested_zip in local_dir.rglob("*RSM_RawArchive.zip"):
@@ -205,7 +222,6 @@ class StagingPipeline:
             self._finalize_item(stage_path, pbar, skipped=False)
             return
 
-        # VizTracer: Log Processing Start
         tracer = get_tracer()
         if tracer:
             tracer.log_instant("Processing Start", {"id": folder_id}, scope="t")

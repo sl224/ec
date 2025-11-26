@@ -30,7 +30,6 @@ if not STAGING_ROOT.exists():
 def filter_folders_bulk(eng, folder_map: Dict[Path, int]) -> Dict[Path, int]:
     """
     Fast batch filtering of folders.
-    Queries the DB to see which folders are already UP_TO_DATE.
     """
     total = len(folder_map)
     logger.info(f"Checking state for {total} folders (Bulk Mode)...")
@@ -38,7 +37,7 @@ def filter_folders_bulk(eng, folder_map: Dict[Path, int]) -> Dict[Path, int]:
     needed = {}
     all_paths = list(folder_map.keys())
     
-    # Chunk size for MSSQL param limits (2100 params max, usually safe with 500-1000 IDs)
+    # Chunk size for MSSQL param limits
     CHUNK_SIZE = 500 
     
     with tqdm(total=total, desc="Checking DB State", unit="folder") as pbar:
@@ -57,7 +56,7 @@ def filter_folders_bulk(eng, folder_map: Dict[Path, int]) -> Dict[Path, int]:
                         
             except Exception as e:
                 logger.error(f"Failed batch state check: {e}")
-                # If check fails, assume we need to process them to be safe
+                # If check fails, assume we need to process them
                 for p, fid in zip(chunk_paths, chunk_ids):
                     needed[p] = fid
             
@@ -94,7 +93,8 @@ def main():
             logger.info("No folders registered.")
             return
 
-        # 3. Fast Filtering (The fix for "Total Count" confusion)
+        # 3. Fast Filtering
+        # This ensures the Pipeline progress bar reflects "Work to Do" vs "Work Found"
         workable_map = filter_folders_bulk(main_eng, all_folders_map)
         
         if not workable_map:
@@ -117,19 +117,23 @@ def main():
         print("\n[!] Force Quit (Ctrl+C) Detected.") 
         logger.warning("Killing all threads...")
         
-        try:
-            from viztracer import get_tracer
-            tracer = get_tracer()
-            if tracer:
-                print("Saving VizTracer data...")
-                output_file = f"trace_{int(time.time())}.json"
-                tracer.save(output_file=output_file)
-                print(f"Trace saved to {output_file}")
-        except ImportError:
-            pass
-        except Exception as e:
-            print(f"Failed to save trace: {e}")
+        # --- VIZTRACER CONTROL ---
+        # Only verify/save if ENABLE_VIZTRACER env var is set
+        if os.environ.get("ENABLE_VIZTRACER") == "1":
+            try:
+                from viztracer import get_tracer
+                tracer = get_tracer()
+                if tracer:
+                    print("Saving VizTracer data...")
+                    output_file = f"trace_{int(time.time())}.json"
+                    tracer.save(output_file=output_file)
+                    print(f"Trace saved to {output_file}")
+            except ImportError:
+                pass
+            except Exception as e:
+                print(f"Failed to save trace: {e}")
         
+        # Use sys.exit to allow cleanup hooks
         try:
             sys.exit(1)
         except SystemExit:
