@@ -1,14 +1,12 @@
 import logging
-import tempfile
 from collections import defaultdict
 from pathlib import Path
-from typing import List
 
 import sqlalchemy as sa
 
 from e2ude_core.orchestration.scopes import session_scope, job_scope
 from e2ude_core.orchestration.spec import JobSpec
-from e2ude_core.services.zip_io import extract_specific_files
+# Removed unused imports: tempfile, extract_specific_files
 from e2ude_core.registry import HANDLER_REGISTRY
 from e2ude_core.context import EtlContext
 
@@ -32,6 +30,9 @@ def process_staged_directory(
     context: EtlContext,
     db_workers: int = 4,
 ):
+    """
+    Orchestrates the processing of a fully staged (unzipped/exploded) folder.
+    """
     try:
         with session_scope(eng, folder_id, context) as session_manager:
             # --- Step 1: State Check ---
@@ -41,7 +42,8 @@ def process_staged_directory(
 
             # --- Step 2: Scan (if needed) ---
             if work_delta.status == FolderState.NEEDS_SCAN:
-                # ... (Scan logic remains the same) ...
+                logger.info(f"Scan Required: {work_delta.scan_reason}")
+                
                 scan_spec = JobSpec(
                     pipeline_id=SCANNER_PIPELINE_ID,
                     job_name=f"MetadataScan: Folder {folder_id}",
@@ -51,7 +53,20 @@ def process_staged_directory(
                 )
                 with job_scope(session_manager, scan_spec) as job:
                     if job.active:
+                        # Pass the directory path; the new scanner handles the recursion
                         run_metadata_scan(eng, folder_id, staged_path, job.manager)
+
+                # Audit Job for Registry (Log completion)
+                registry_spec = JobSpec(
+                    pipeline_id=SCANNER_PIPELINE_ID,
+                    job_name=f"MetadataScan (Registry): Folder {folder_id}",
+                    target_name=FileHashRegistry.__tablename__,
+                    handler_version=SCANNER_VERSION,
+                    file_type="METADATA_SCAN",
+                )
+                with job_scope(session_manager, registry_spec) as job:
+                    if job.active:
+                        job.manager.mark_completed("Completed via Primary Scan")
 
                 # Re-evaluate delta after scan
                 work_delta = get_folder_work_delta(
@@ -59,6 +74,7 @@ def process_staged_directory(
                 )
 
             if work_delta.status == FolderState.UP_TO_DATE:
+                logger.info("Folder is UP_TO_DATE. No further action required.")
                 return
 
             # --- Step 3: Grouping & Execution ---
@@ -67,13 +83,12 @@ def process_staged_directory(
             db_files = fetch_existing_files_map(eng, folder_id)
             files_map = {f["hash_id"]: f for f in db_files}
 
-            # Group missing tables by HashID
-            # Map: hash_id -> List[table_name]
+            # Group missing tables by HashID to avoid re-parsing the file for each table
             work_batches = defaultdict(list)
             for hash_id, table_name in work_delta.missing_items:
                 work_batches[hash_id].append(table_name)
 
-            logger.info(f"Processing {len(work_batches)} files with missing data.")
+            logger.info(f"Processing {len(work_batches)} files with pending data.")
 
             for hash_id, missing_tables in work_batches.items():
                 file_info = files_map.get(hash_id)
@@ -89,13 +104,12 @@ def process_staged_directory(
                 if not handler_spec:
                     continue
 
-                # Create ONE job for the file (processing N tables)
-                # target_name is informational here, we can join the table names or say "BATCH"
+                # Summarize target for the job log
                 target_summary = "BATCH" if len(missing_tables) > 1 else missing_tables[0]
                 
                 file_spec = JobSpec(
                     pipeline_id=handler_spec.pipeline_id,
-                    job_name=f"{handler_spec.pipeline_id}: {file_info['relative_path']}",
+                    job_name=f"{handler_spec.pipeline_id}: {file_info['relative_path']} [{target_summary}]",
                     target_name=target_summary,
                     handler_version=handler_spec.version,
                     file_id=file_info["id"],
@@ -111,8 +125,8 @@ def process_staged_directory(
                             hash_id=hash_id,
                             file_path=full_path,
                             job_updater=job.manager,
-                            target_tables=missing_tables, # Pass the list!
-                            db_workers=db_workers
+                            target_tables=missing_tables, # Pass list of specific tables
+                            db_workers=db_workers         # Enable parallel DB writes
                         )
 
     except Exception as e:
