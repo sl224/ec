@@ -89,7 +89,8 @@ class StagingPipeline:
 
         try:
             with tqdm(total=total, desc="Pipeline", unit="zip") as pbar:
-                for i, zip_path in enumerate(self.folder_id_map.values()):
+                # FIX: Iterate keys() to get the Path object, NOT the int ID from values()
+                for i, zip_path in enumerate(self.folder_id_map.keys()):
                     if self.stop_event.is_set() or i == LIMIT:
                         break
 

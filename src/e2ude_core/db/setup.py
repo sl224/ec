@@ -52,15 +52,16 @@ def initialize_database(eng: sa.Engine, reset_tables: bool = False):
 
 def register_folders_bulk(eng: sa.Engine, zip_paths: List[Path]) -> Dict[Path, int]:
     """
-    Optimized bulk registration of folders using the standard bulk_upload utility.
+    Optimized bulk registration of folders. 
+    Returns a map ONLY for folders that were newly inserted (incremental mode).
     """
     if not zip_paths:
         return {}
 
     # 1. Parse Metadata from Paths
     parsed_items = []
-
     for zp in zip_paths:
+        # Regex looks for BUNO_YYYYMMDD_HHMMSS pattern
         match = re.search(r"([0-9]+)_([0-9]{8}_[0-9]{6})", zp.name)
         if not match:
             logger.warning(f"Could not parse BUNO/Date from: {zp.name}")
@@ -71,11 +72,11 @@ def register_folders_bulk(eng: sa.Engine, zip_paths: List[Path]) -> Dict[Path, i
             dt = datetime.strptime(dt_str, "%Y%m%d_%H%M%S")
             parsed_items.append(
                 {
-                    "obj_path": zp,  # Key for the returned map
+                    "obj_path": zp,  
                     "buno": buno,
                     "folder_datetime": dt,
-                    "path": str(zp),  # String for DB insert
-                    "scan_version": 0,  # Default for new folders
+                    "path": str(zp), 
+                    "scan_version": 0,
                 }
             )
         except ValueError:
@@ -85,34 +86,33 @@ def register_folders_bulk(eng: sa.Engine, zip_paths: List[Path]) -> Dict[Path, i
     if not parsed_items:
         return {}
 
-    # 2. Fetch Existing IDs (Bulk Query)
+    # 2. Fetch Existing IDs (Bulk Query) to determine what is NOT new
     unique_bunos = {p["buno"] for p in parsed_items}
-    existing_map = {}  # Key: (buno, folder_datetime) -> Value: id
+    existing_keys = set() 
 
     with eng.connect() as conn:
         if unique_bunos:
             stmt = sa.select(
-                FolderMetadata.id, FolderMetadata.buno, FolderMetadata.folder_datetime
+                FolderMetadata.buno, FolderMetadata.folder_datetime
             ).where(FolderMetadata.buno.in_(unique_bunos))
 
             for row in conn.execute(stmt):
-                existing_map[(row.buno, row.folder_datetime)] = row.id
+                existing_keys.add((row.buno, row.folder_datetime))
 
         # 3. Diff & Prepare Inserts
         to_insert = []
-        seen_in_batch = set()
+        new_keys = set() # Track keys that we are about to insert
 
         for item in parsed_items:
             key = (item["buno"], item["folder_datetime"])
 
-            if key in existing_map:
+            if key in existing_keys:
+                continue
+            
+            if key in new_keys: # Avoid duplicates within the same batch
                 continue
 
-            if key in seen_in_batch:
-                continue
-
-            seen_in_batch.add(key)
-
+            new_keys.add(key)
             to_insert.append(
                 {
                     "buno": item["buno"],
@@ -122,32 +122,36 @@ def register_folders_bulk(eng: sa.Engine, zip_paths: List[Path]) -> Dict[Path, i
                 }
             )
 
-        # 4. Bulk Insert using sql_io.bulk_upload
+        # 4. Bulk Insert
         if to_insert:
             logger.info(f"Bulk inserting {len(to_insert)} new folders...")
-
-            # Convert to DataFrame
             df_insert = pd.DataFrame(to_insert)
-
-            # Use common utility (Handles chunking, types, etc.)
             sql_io.bulk_upload(
                 df=df_insert, conn=conn, sa_table=FolderMetadata.__table__
             )
             conn.commit()
 
-            # 5. Re-fetch IDs for the newly inserted items
-            stmt = sa.select(
-                FolderMetadata.id, FolderMetadata.buno, FolderMetadata.folder_datetime
-            ).where(FolderMetadata.buno.in_(unique_bunos))
+        # 5. Fetch IDs ONLY for the newly inserted keys
+        # We query again, but we will filter the final map based on 'new_keys'
+        if not new_keys:
+            return {}
 
-            for row in conn.execute(stmt):
-                existing_map[(row.buno, row.folder_datetime)] = row.id
+        # Fetch IDs for the BUNOs we just touched
+        id_map = {}
+        stmt = sa.select(
+            FolderMetadata.id, FolderMetadata.buno, FolderMetadata.folder_datetime
+        ).where(FolderMetadata.buno.in_(unique_bunos))
 
-    # 6. Build Result Map
+        for row in conn.execute(stmt):
+            id_map[(row.buno, row.folder_datetime)] = row.id
+
+    # 6. Build Result Map (FILTERED)
     result_map = {}
     for item in parsed_items:
         key = (item["buno"], item["folder_datetime"])
-        if key in existing_map:
-            result_map[item["obj_path"]] = existing_map[key]
+        
+        # ONLY return if it was part of the 'new_keys' set
+        if key in new_keys and key in id_map:
+            result_map[item["obj_path"]] = id_map[key]
 
     return result_map
