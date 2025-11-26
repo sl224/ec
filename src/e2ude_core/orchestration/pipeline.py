@@ -1,65 +1,54 @@
 import logging
-import shutil
 import os
-from concurrent.futures import ThreadPoolExecutor, ProcessPoolExecutor
+import shutil
+from concurrent.futures import ThreadPoolExecutor
 from pathlib import Path
 from threading import BoundedSemaphore, Event
-from typing import Dict, List
+from typing import Dict, List, Set
+from zipfile import ZipFile
 
 import sqlalchemy as sa
 from tqdm import tqdm
 
 from e2ude_core.context import EtlContext
 from e2ude_core.orchestration.workflow import process_staged_directory
+from e2ude_core.registry import HANDLER_REGISTRY
+from e2ude_core.services.zip_io import FILE_PATTERNS
 
 logger = logging.getLogger(__name__)
 
 
-# --- Process Worker (Must be module-level for pickling) ---
-def _worker_unzip_safe(zip_source: Path, extract_dest: Path) -> bool:
+def _resolve_active_patterns() -> List[str]:
     """
-    Pure CPU/Disk task running in a separate process.
-    1. Unzips the archive.
-    2. Deletes the source archive (freeing space).
-    3. Recursively explodes any nested *RSM_RawArchive.zip files.
+    Cross-references the Handler Registry with File Patterns.
     """
-    try:
-        # 1. Unpack Outer
-        shutil.unpack_archive(str(zip_source), str(extract_dest), "zip")
-        
-        # 2. Delete Source Zip (Critical for SSD space management)
-        os.remove(zip_source)
+    active_types: Set[str] = set(HANDLER_REGISTRY.keys())
+    patterns = []
 
-        # 3. Explode Nested (CPU Heavy)
-        for nested_zip in extract_dest.rglob("*RSM_RawArchive.zip"):
-            try:
-                # Extract to its parent folder
-                shutil.unpack_archive(str(nested_zip), str(nested_zip.parent), "zip")
-                nested_zip.unlink()
-            except Exception as e:
-                # Log but continue (some archives might be corrupt/partial)
-                print(f"Warning: Failed to explode nested {nested_zip}: {e}")
-        
-        return True
-    except Exception as e:
-        # Clean up mess on failure
-        if extract_dest.exists():
-            shutil.rmtree(extract_dest, ignore_errors=True)
-        raise e
+    for f_enum, pattern in FILE_PATTERNS:
+        if f_enum.value in active_types:
+            patterns.append(pattern)
+
+    patterns.append("*RSM_RawArchive.zip")
+    return patterns
+
+
+def _match_any(path_str: str, patterns: List[str]) -> bool:
+    p = Path(path_str)
+    for pat in patterns:
+        if p.match(pat):
+            return True
+    return False
 
 
 class StagingPipeline:
     """
-    High-Throughput 3-Stage Pipeline.
+    High-Throughput Continuous Pipeline (Thread-Based).
     
-    Stages:
-    1. Download (Thread): Floods Network. Copy Zip -> SSD.
-    2. Unzip (Process): Floods CPU. Extract -> Delete Zip -> Explode Nested.
-    3. Ingest (Thread): Floods DB. Parse -> Load -> Delete Files.
-    
-    Flow Control:
-    - Semaphore(N) limits total active items on SSD (Backpressure).
-    - Queues between pools absorb rate mismatches (Burst Tolerance).
+    Optimized for 'Selective Extraction':
+    - Uses High Thread Count (32) for Staging to hide Network Latency (SMB Seek/Read).
+    - Uses Lower Thread Count (8) for Processing to match CPU/DB capacity.
+    - Uses Semaphores for constant flow control.
     """
 
     def __init__(
@@ -68,79 +57,73 @@ class StagingPipeline:
         zip_paths: List[Path],
         folder_id_map: Dict[Path, int],
         staging_root: Path,
-        buffer_size: int = 30,      # Max folders on SSD
-        download_workers: int = 32, # Network Flood
-        unzip_workers: int = 8,     # CPU Bound (Processes)
-        db_workers: int = 8,        # DB Bound (Threads)
-        table_write_workers: int = 4 # Parallel tables per file
+        buffer_size: int = 30,
+        unzip_workers: int = 32,  # High concurrency for I/O
+        process_workers: int = 8, # CPU/DB Bound
+        db_write_workers: int = 4,
     ):
         self.eng = eng
         self.zip_paths = zip_paths
         self.folder_id_map = folder_id_map
         self.staging_root = staging_root
-        
-        # Pools
-        self.download_workers = download_workers
+
         self.unzip_workers = unzip_workers
-        self.db_workers = db_workers
-        self.table_write_workers = table_write_workers
-        
-        # Flow Control
+        self.process_workers = process_workers
+        self.db_write_workers = db_write_workers
+
         self.buffer_sem = BoundedSemaphore(value=buffer_size)
         self.stop_event = Event()
         self.ctx = EtlContext.capture()
+        
+        self.active_patterns = _resolve_active_patterns()
+        logger.info(f"Active Patterns: {len(self.active_patterns)}")
 
     def run(self):
         total = len(self.zip_paths)
-        logger.info(f"Starting 3-Stage Pipeline. Processing {total} files.")
+        logger.info(f"Starting Pipeline. Processing {total} files.")
 
-        # 1. Network Pool (Threads)
-        down_pool = ThreadPoolExecutor(max_workers=self.download_workers, thread_name_prefix="Net")
-        
-        # 2. Unzip Pool (Processes - Bypasses GIL)
-        unzip_pool = ProcessPoolExecutor(max_workers=self.unzip_workers)
-        
-        # 3. DB Pool (Threads)
-        db_pool = ThreadPoolExecutor(max_workers=self.db_workers, thread_name_prefix="DB")
+        # Two pools allow us to flood the network (Unzip) without choking the DB (Process)
+        unzip_pool = ThreadPoolExecutor(max_workers=self.unzip_workers, thread_name_prefix="Stage")
+        process_pool = ThreadPoolExecutor(max_workers=self.process_workers, thread_name_prefix="Proc")
 
         try:
             with tqdm(total=total, desc="Pipeline", unit="zip") as pbar:
-                
-                futures = []
-                
                 for zip_path in self.zip_paths:
-                    if self.stop_event.is_set(): break
+                    if self.stop_event.is_set():
+                        break
 
-                    # 1. Acquire Ticket (Blocks loop if SSD is full)
+                    # 1. Acquire Ticket (Backpressure)
                     self.buffer_sem.acquire()
 
-                    # 2. Submit to Download Pool
-                    f = down_pool.submit(
-                        self._task_download,
+                    # 2. Start Chain (Non-blocking)
+                    # We submit to Unzip pool first.
+                    unzip_pool.submit(
+                        self._task_stage_selective,
                         zip_path,
-                        unzip_pool,
-                        db_pool,
-                        pbar
+                        process_pool,
+                        pbar,
                     )
-                    futures.append(f)
 
-                # Wait for entry points to finish
-                down_pool.shutdown(wait=True)
-                
-                # These pools might still have chained work pending
+                # Wait for pools to drain
                 unzip_pool.shutdown(wait=True)
-                db_pool.shutdown(wait=True)
+                process_pool.shutdown(wait=True)
 
         except KeyboardInterrupt:
             logger.warning("Pipeline interrupted. Force stopping...")
             self.stop_event.set()
-            down_pool.shutdown(wait=False)
             unzip_pool.shutdown(wait=False)
-            db_pool.shutdown(wait=False)
+            process_pool.shutdown(wait=False)
             raise
 
-    def _task_download(self, zip_path, unzip_pool, db_pool, pbar):
-        """ Stage 1: Network Copy (Thread) """
+    def _task_stage_selective(
+        self, 
+        zip_path: Path, 
+        process_pool: ThreadPoolExecutor, 
+        pbar: tqdm
+    ):
+        """
+        Stage 1: Selective Network Extraction (Thread I/O Bound).
+        """
         if self.stop_event.is_set():
             self._finalize_item(None, pbar)
             return
@@ -150,76 +133,80 @@ class StagingPipeline:
             self._finalize_item(None, pbar)
             return
 
-        # Paths
         safe_name = f"{folder_id}_{zip_path.stem}"
         local_dir = self.staging_root / safe_name
-        local_zip = self.staging_root / f"{safe_name}.temp_zip"
-
+        
+        # We extract directly from Network -> SSD. 
+        # Since we filter heavily, the write volume is small.
+        
         try:
-            # Clean Prep
             if local_dir.exists(): shutil.rmtree(local_dir)
-            if local_zip.exists(): os.remove(local_zip)
             local_dir.mkdir(parents=True, exist_ok=True)
 
-            # A. Flood Network: Copy Raw Bytes
-            # shutil.copy2 is optimized for large sequential reads (SMB friendly)
-            shutil.copy2(str(zip_path), str(local_zip))
+            # --- Selective Unzip Logic ---
+            with ZipFile(zip_path) as zf:
+                # Peek at headers (Network Seek/Read)
+                members = zf.namelist()
+                targets = [
+                    m for m in members 
+                    if _match_any(m, self.active_patterns) or m.endswith("RSM_RawArchive.zip")
+                ]
+                
+                if targets:
+                    # Extract matches (Network Read -> SSD Write)
+                    zf.extractall(local_dir, members=targets)
 
-            # B. Submit to Process Pool (Chain)
-            # We use add_done_callback logic by proxy: simple chaining in a future
-            # Note: ProcessPool futures are thread-safe.
-            future = unzip_pool.submit(_worker_unzip_safe, local_zip, local_dir)
-            
-            # C. Non-blocking Wait? 
-            # We want to release THIS download thread immediately.
-            # We attach a callback to the Process Future to schedule the DB step.
-            future.add_done_callback(
-                lambda f: self._on_unzip_complete(f, folder_id, local_dir, db_pool, pbar)
-            )
+            # --- Explode Nested (Local I/O) ---
+            for nested_zip in local_dir.rglob("*RSM_RawArchive.zip"):
+                try:
+                    nested_root = nested_zip.with_suffix("")
+                    nested_root.mkdir(exist_ok=True)
+                    
+                    with ZipFile(nested_zip) as nz:
+                        nested_targets = []
+                        for name in nz.namelist():
+                            # Virtual path check
+                            if _match_any(nested_root.name + "/" + name, self.active_patterns):
+                                nested_targets.append(name)
+                        
+                        if nested_targets:
+                            nz.extractall(nested_root, members=nested_targets)
+                finally:
+                    nested_zip.unlink()
+
+            # --- Hand off to Processor ---
+            process_pool.submit(self._task_process, folder_id, local_dir, pbar)
 
         except Exception as e:
-            logger.error(f"Download failed for {zip_path}: {e}")
-            if local_zip.exists(): os.remove(local_zip)
+            logger.error(f"Staging failed for {zip_path}: {e}")
             self._finalize_item(local_dir, pbar)
 
-    def _on_unzip_complete(self, future, folder_id, local_dir, db_pool, pbar):
-        """ Callback running in a Helper Thread (managed by Future) """
-        try:
-            # Check for Unzip Exceptions
-            future.result() 
-            
-            # Submit to DB Pool
-            db_pool.submit(self._task_ingest, folder_id, local_dir, pbar)
-            
-        except Exception as e:
-            logger.error(f"Unzip failed for ID {folder_id}: {e}")
-            self._finalize_item(local_dir, pbar)
-
-    def _task_ingest(self, folder_id, local_dir, pbar):
-        """ Stage 3: Database Ingest (Thread) """
+    def _task_process(self, folder_id: int, stage_path: Path, pbar: tqdm):
+        """
+        Stage 2: Database Ingest (Thread CPU/DB Bound).
+        """
         if self.stop_event.is_set():
-            self._finalize_item(local_dir, pbar)
+            self._finalize_item(stage_path, pbar)
             return
 
         try:
             process_staged_directory(
-                self.eng, 
-                folder_id, 
-                local_dir, 
+                self.eng,
+                folder_id,
+                stage_path,
                 self.ctx,
-                db_workers=self.table_write_workers
+                db_workers=self.db_write_workers,
             )
         except Exception as e:
             logger.error(f"Ingest failed for ID {folder_id}: {e}")
         finally:
-            self._finalize_item(local_dir, pbar)
+            self._finalize_item(stage_path, pbar)
 
     def _finalize_item(self, path, pbar):
-        """ Cleanup and Ticket Return """
         if path:
             try:
                 if path.exists(): shutil.rmtree(path)
             except OSError: pass
-        
+
         self.buffer_sem.release()
         pbar.update(1)
