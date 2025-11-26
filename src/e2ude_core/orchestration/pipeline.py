@@ -89,7 +89,7 @@ class StagingPipeline:
 
         try:
             with tqdm(total=total, desc="Pipeline", unit="zip") as pbar:
-                # FIX: Iterate keys() to get the Path object, NOT the int ID from values()
+                # FIX: Iterate keys() to get the Path object
                 for i, zip_path in enumerate(self.folder_id_map.keys()):
                     if self.stop_event.is_set() or i == LIMIT:
                         break
@@ -139,9 +139,6 @@ class StagingPipeline:
 
         safe_name = f"{folder_id}_{zip_path.stem}"
         local_dir = self.staging_root / safe_name
-        
-        # We extract directly from Network -> SSD. 
-        # Since we filter heavily, the write volume is small.
         
         try:
             if local_dir.exists(): shutil.rmtree(local_dir)

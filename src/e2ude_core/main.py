@@ -2,6 +2,8 @@ import logging
 import os
 import sys
 from pathlib import Path
+from concurrent.futures import ThreadPoolExecutor
+from typing import Dict
 
 from e2ude_core.config import settings
 from e2ude_core.db import access as sql_io
@@ -9,6 +11,10 @@ from e2ude_core.db.setup import initialize_database, register_folders_bulk
 from e2ude_core.logging_conf import setup_logging
 from e2ude_core.orchestration.pipeline import StagingPipeline
 from e2ude_core.services.discovery import discover_network_zips
+
+# New imports for filtering
+from e2ude_core.orchestration.state import get_folder_work_delta, FolderState
+from e2ude_core.pipelines.scanner import SCANNER_VERSION
 
 logger = logging.getLogger(__name__)
 
@@ -18,6 +24,35 @@ if not STAGING_ROOT.exists():
         STAGING_ROOT = Path("temp_staging")
         STAGING_ROOT.mkdir(exist_ok=True)
     except: pass
+
+def filter_folders_needing_work(eng, folder_map: Dict[Path, int]) -> Dict[Path, int]:
+    """
+    Pre-flight check: Checks DB state to see which folders actually need work.
+    Filters out UP_TO_DATE folders to avoid unnecessary IO in the pipeline.
+    """
+    needed = {}
+    logger.info(f"Checking state for {len(folder_map)} folders...")
+    
+    # Use threads to check DB state in parallel (IO bound mostly)
+    with ThreadPoolExecutor(max_workers=16) as executor:
+        # Map future -> (path, id)
+        future_map = {
+            executor.submit(get_folder_work_delta, eng, fid, SCANNER_VERSION): (path, fid)
+            for path, fid in folder_map.items()
+        }
+        
+        for f in future_map:
+            path, fid = future_map[f]
+            try:
+                delta = f.result()
+                if delta.status != FolderState.UP_TO_DATE:
+                    needed[path] = fid
+            except Exception as e:
+                logger.warning(f"Failed to check state for {fid}: {e}")
+                # Assume needed if check fails? Or skip? Skipping is safer.
+    
+    logger.info(f"State Check Complete. {len(needed)} folders require processing.")
+    return needed
 
 def main():
     setup_logging(settings)
@@ -42,48 +77,46 @@ def main():
             return
 
         # 2. Registration
-        folder_id_map = register_folders_bulk(main_eng, valid_paths)
+        all_folders_map = register_folders_bulk(main_eng, valid_paths)
 
-        # 3. Pipeline Execution
+        # 3. Smart Filtering
+        # Filter the map so we only process new data or data needing updates
+        workable_map = filter_folders_needing_work(main_eng, all_folders_map)
+
+        if not workable_map:
+            logger.info("All folders are up to date.")
+            return
+
+        # 4. Pipeline Execution
         pipeline = StagingPipeline(
             eng=main_eng,
-            folder_id_map=folder_id_map,
+            folder_id_map=workable_map,
             staging_root=STAGING_ROOT,
-            # Tuning for "Selective Extraction" on 8-Core Machine:
             buffer_size=60,
-            unzip_workers=60,   # Flood Network with header requests
-            process_workers=8,  # Maximize CPU usage for parsing
-            db_write_workers=8  # parallel inserts
+            unzip_workers=60,
+            process_workers=8,
+            db_write_workers=8
         )
         pipeline.run()
 
     except KeyboardInterrupt:
         logger.warning("\n[!] Force Quit (Ctrl+C). Killing all threads immediately...")
-        
-        # --- VIZTRACER SAFETY CATCH ---
         try:
-            # We only import if needed to avoid hard dependency
             from viztracer import get_tracer
             tracer = get_tracer()
             if tracer:
-                logger.info("VizTracer active. Saving trace data before exit (this may take a moment)...")
+                logger.info("VizTracer active. Saving trace data...")
                 tracer.stop()
-                tracer.save() # Saves to default file (e.g. result.json) or CLI output arg
-                logger.info("Trace saved successfully.")
+                tracer.save()
         except ImportError:
-            pass # Viztracer not installed/used
-        except Exception as e:
-            logger.error(f"Failed to save VizTracer data: {e}")
-        # -----------------------------
-
-        # Nuclear option: Force kill the process. 
-        # This bypasses cleanup handlers (finally blocks) which hang on thread joins.
+            pass
+        except Exception:
+            pass
         os._exit(1)
 
     except Exception as e:
         logger.critical(f"Fatal Error: {e}", exc_info=True)
     finally:
-        # Note: This block is skipped if os._exit(1) is called above.
         main_eng.dispose()
         logger.info("Exiting.")
 
