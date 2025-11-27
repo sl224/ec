@@ -38,7 +38,9 @@ def filter_folders_bulk(eng, folder_map: Dict[Path, int]) -> Dict[Path, int]:
     all_paths = list(folder_map.keys())
     
     # Chunk size for MSSQL param limits
-    CHUNK_SIZE = 500 
+    # Increased to 5000 to reduce connection overhead.
+    # The inner function (get_folder_states_bulk) handles the 2000-param limit internally.
+    CHUNK_SIZE = 5000 
     
     with tqdm(total=total, desc="Checking DB State", unit="folder") as pbar:
         for i in range(0, total, CHUNK_SIZE):
@@ -46,7 +48,7 @@ def filter_folders_bulk(eng, folder_map: Dict[Path, int]) -> Dict[Path, int]:
             chunk_ids = [folder_map[p] for p in chunk_paths]
             
             try:
-                # Single DB round-trip for 500 folders
+                # Single DB round-trip for 5000 folders (internally batched)
                 states = get_folder_states_bulk(eng, chunk_ids, SCANNER_VERSION)
                 
                 for p, fid in zip(chunk_paths, chunk_ids):
@@ -68,8 +70,9 @@ def filter_folders_bulk(eng, folder_map: Dict[Path, int]) -> Dict[Path, int]:
 
 def main():
     setup_logging(settings)
-    logger.info(f"Starting Selective Thread Pipeline. Staging: {STAGING_ROOT}")
+    logger.info(f"Starting Selective Hybrid Pipeline. Staging: {STAGING_ROOT}")
 
+    # Create a local engine just for the initial setup/scanning
     main_eng = sql_io.get_engine(settings.database, default_pool_size=64)
 
     try:
@@ -94,7 +97,6 @@ def main():
             return
 
         # 3. Fast Filtering
-        # This ensures the Pipeline progress bar reflects "Work to Do" vs "Work Found"
         workable_map = filter_folders_bulk(main_eng, all_folders_map)
         
         if not workable_map:
@@ -102,14 +104,15 @@ def main():
             return
 
         # 4. Pipeline Execution
+        # CHANGED: Pass settings.database instead of main_eng
         pipeline = StagingPipeline(
-            eng=main_eng,
+            db_settings=settings.database,  # Pass the Pydantic model
             folder_id_map=workable_map,
             staging_root=STAGING_ROOT,
             buffer_size=60,
-            unzip_workers=60,
-            process_workers=8,
-            db_write_workers=8
+            unzip_workers=60,    # High I/O concurrency
+            process_workers=8,   # Matched to CPU cores
+            db_write_workers=4   # Threads inside each process
         )
         pipeline.run()
 

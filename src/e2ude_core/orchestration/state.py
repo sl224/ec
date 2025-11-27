@@ -109,7 +109,8 @@ def get_folder_states_bulk(
     results = {fid: FolderState.NEEDS_SCAN for fid in folder_ids}
     
     # Internal Chunking for SQL safety (MSSQL limit ~2100 params)
-    SQL_BATCH_SIZE = 1500
+    # Increased from 1500 to 2000 to maximize throughput per query
+    SQL_BATCH_SIZE = 2000
     
     scanned_folder_ids = set()
     
