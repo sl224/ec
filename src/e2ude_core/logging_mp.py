@@ -74,5 +74,5 @@ def listener_process(log_queue: multiprocessing.Queue, config: dict):
             import sys
             import traceback
 
-            print("Whoops! Problem:", file=sys.stderr)
+            print("Log Queue Problem:", file=sys.stderr)
             traceback.print_exc(file=sys.stderr)

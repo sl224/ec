@@ -66,7 +66,8 @@ def main():
         initialize_database(main_eng, reset_tables=False)
 
         # 1. Discovery
-        scan_root = Path(r"\\esidme24\#ESIDME24\PUBLIC\E2 Stuff\ALE RSM Data Archive")
+        # scan_root = Path(r"\\esidme24\#ESIDME24\PUBLIC\E2 Stuff\ALE RSM Data Archive")
+        scan_root = Path(r"\\Rsiny1-ilsfs\RSM")
         if not scan_root.exists():
             logger.error("Scan root not found.")
             return

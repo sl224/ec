@@ -85,13 +85,12 @@ class StagingPipeline:
         unzip_pool = ThreadPoolExecutor(max_workers=self.unzip_workers, thread_name_prefix="Stage")
         process_pool = ThreadPoolExecutor(max_workers=self.process_workers, thread_name_prefix="Proc")
         # debug 
-        LIMIT = 20
-
+        LIMIT = float('inf')
         try:
             with tqdm(total=total, desc="Pipeline", unit="zip") as pbar:
                 # FIX: Iterate keys() to get the Path object
                 for i, zip_path in enumerate(self.folder_id_map.keys()):
-                    if self.stop_event.is_set() or i == LIMIT:
+                    if self.stop_event.is_set():
                         break
 
                     # 1. Acquire Ticket (Backpressure)

@@ -40,6 +40,9 @@ def initialize_database(eng: sa.Engine, reset_tables: bool = False):
 
     # 2. Table Creation / Reset
     if reset_tables:
+        if settings.database.type == "mssql":
+            logger.error("Trying to reset tables when using mssql")
+            raise Exception("Cannot reset tables when using mssql for safety.")
         logger.info("Resetting and creating database tables...")
         # Base.metadata knows about all tables thanks to the import
         Base.metadata.drop_all(eng)
