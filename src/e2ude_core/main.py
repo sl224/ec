@@ -1,8 +1,10 @@
 import logging
 import os
+import sys
+import time
 from pathlib import Path
-from concurrent.futures import ThreadPoolExecutor
 from typing import Dict
+from tqdm import tqdm
 
 from e2ude_core.config import settings
 from e2ude_core.db import access as sql_io
@@ -11,8 +13,8 @@ from e2ude_core.logging_conf import setup_logging
 from e2ude_core.orchestration.pipeline import StagingPipeline
 from e2ude_core.services.discovery import discover_network_zips
 
-# New imports for filtering
-from e2ude_core.orchestration.state import get_folder_work_delta, FolderState
+# Import State Logic
+from e2ude_core.orchestration.state import get_folder_states_bulk, FolderState
 from e2ude_core.pipelines.scanner import SCANNER_VERSION
 
 logger = logging.getLogger(__name__)
@@ -26,34 +28,42 @@ if not STAGING_ROOT.exists():
         pass
 
 
-def filter_folders_needing_work(eng, folder_map: Dict[Path, int]) -> Dict[Path, int]:
+def filter_folders_bulk(eng, folder_map: Dict[Path, int]) -> Dict[Path, int]:
     """
-    Pre-flight check: Checks DB state to see which folders actually need work.
-    Filters out UP_TO_DATE folders to avoid unnecessary IO in the pipeline.
+    Fast batch filtering of folders.
     """
+    total = len(folder_map)
+    logger.info(f"Checking state for {total} folders (Bulk Mode)...")
+
     needed = {}
-    logger.info(f"Checking state for {len(folder_map)} folders...")
+    all_paths = list(folder_map.keys())
 
-    # Use threads to check DB state in parallel (IO bound mostly)
-    with ThreadPoolExecutor(max_workers=16) as executor:
-        # Map future -> (path, id)
-        future_map = {
-            executor.submit(get_folder_work_delta, eng, fid, SCANNER_VERSION): (
-                path,
-                fid,
-            )
-            for path, fid in folder_map.items()
-        }
+    # Chunk size for MSSQL param limits
+    # Increased to 5000 to reduce connection overhead.
+    # The inner function (get_folder_states_bulk) handles the 2000-param limit internally.
+    CHUNK_SIZE = 5000
 
-        for f in future_map:
-            path, fid = future_map[f]
+    with tqdm(total=total, desc="Checking DB State", unit="folder") as pbar:
+        for i in range(0, total, CHUNK_SIZE):
+            chunk_paths = all_paths[i : i + CHUNK_SIZE]
+            chunk_ids = [folder_map[p] for p in chunk_paths]
+
             try:
-                delta = f.result()
-                if delta.status != FolderState.UP_TO_DATE:
-                    needed[path] = fid
+                # Single DB round-trip for 5000 folders (internally batched)
+                states = get_folder_states_bulk(eng, chunk_ids, SCANNER_VERSION)
+
+                for p, fid in zip(chunk_paths, chunk_ids):
+                    state = states.get(fid, FolderState.NEEDS_SCAN)
+                    if state != FolderState.UP_TO_DATE:
+                        needed[p] = fid
+
             except Exception as e:
-                logger.warning(f"Failed to check state for {fid}: {e}")
-                # Assume needed if check fails? Or skip? Skipping is safer.
+                logger.error(f"Failed batch state check: {e}")
+                # If check fails, assume we need to process them
+                for p, fid in zip(chunk_paths, chunk_ids):
+                    needed[p] = fid
+
+            pbar.update(len(chunk_paths))
 
     logger.info(f"State Check Complete. {len(needed)} folders require processing.")
     return needed
@@ -61,10 +71,9 @@ def filter_folders_needing_work(eng, folder_map: Dict[Path, int]) -> Dict[Path, 
 
 def main():
     setup_logging(settings)
-    logger.info(f"Starting Selective Thread Pipeline. Staging: {STAGING_ROOT}")
+    logger.info(f"Starting Selective Hybrid Pipeline. Staging: {STAGING_ROOT}")
 
-    # Ensure DB pool is large enough for concurrent connections
-    # 8 process workers * 8 db write workers = 64 connections max burst
+    # Create a local engine just for the initial setup/scanning
     main_eng = sql_io.get_engine(settings.database, default_pool_size=64)
 
     try:
@@ -85,41 +94,56 @@ def main():
         # 2. Registration
         all_folders_map = register_folders_bulk(main_eng, valid_paths)
 
-        # 3. Smart Filtering
-        # Filter the map so we only process new data or data needing updates
-        workable_map = filter_folders_needing_work(main_eng, all_folders_map)
+        if not all_folders_map:
+            logger.info("No folders registered.")
+            return
+
+        # 3. Fast Filtering
+        workable_map = filter_folders_bulk(main_eng, all_folders_map)
 
         if not workable_map:
-            logger.info("All folders are up to date.")
+            logger.info("All folders are up to date. Exiting.")
             return
 
         # 4. Pipeline Execution
+        # CHANGED: Pass settings.database instead of main_eng
         pipeline = StagingPipeline(
-            eng=main_eng,
+            db_settings=settings.database,  # Pass the Pydantic model
             folder_id_map=workable_map,
             staging_root=STAGING_ROOT,
             buffer_size=60,
-            unzip_workers=60,
-            process_workers=8,
-            db_write_workers=8,
+            unzip_workers=60,  # High I/O concurrency
+            process_workers=8,  # Matched to CPU cores
+            db_write_workers=4,  # Threads inside each process
         )
         pipeline.run()
 
     except KeyboardInterrupt:
-        logger.warning("\n[!] Force Quit (Ctrl+C). Killing all threads immediately...")
-        try:
-            from viztracer import get_tracer
+        print("\n[!] Force Quit (Ctrl+C) Detected.")
+        logger.warning("Killing all threads...")
 
-            tracer = get_tracer()
-            if tracer:
-                logger.info("VizTracer active. Saving trace data...")
-                tracer.stop()
-                tracer.save()
-        except ImportError:
-            pass
-        except Exception:
-            pass
-        os._exit(1)
+        # --- VIZTRACER CONTROL ---
+        # Only verify/save if ENABLE_VIZTRACER env var is set
+        if os.environ.get("ENABLE_VIZTRACER") == "1":
+            try:
+                from viztracer import get_tracer
+
+                tracer = get_tracer()
+                if tracer:
+                    print("Saving VizTracer data...")
+                    output_file = f"trace_{int(time.time())}.json"
+                    tracer.save(output_file=output_file)
+                    print(f"Trace saved to {output_file}")
+            except ImportError:
+                pass
+            except Exception as e:
+                print(f"Failed to save trace: {e}")
+
+        # Use sys.exit to allow cleanup hooks
+        try:
+            sys.exit(1)
+        except SystemExit:
+            os._exit(1)
 
     except Exception as e:
         logger.critical(f"Fatal Error: {e}", exc_info=True)

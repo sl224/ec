@@ -11,7 +11,7 @@ from e2ude_core.config import settings
 from e2ude_core.db.base_session import Base
 from e2ude_core.db import access as sql_io
 
-# Import models to populate `Base.metadata` with table definitions
+# Import models to populate `Base.metadata`
 import e2ude_core.db.models  # noqa: F401
 from e2ude_core.db.models import FolderMetadata
 
@@ -20,8 +20,7 @@ logger = logging.getLogger(__name__)
 
 def initialize_database(eng: sa.Engine, reset_tables: bool = False):
     """
-    Ensures the necessary database schema exists (for MSSQL)
-    and optionally resets all tables.
+    Ensures the necessary database schema exists and optionally resets tables.
     """
     # 1. Schema Creation (MSSQL-specific)
     if settings.database.type == "mssql":
@@ -44,7 +43,6 @@ def initialize_database(eng: sa.Engine, reset_tables: bool = False):
             logger.error("Trying to reset tables when using mssql")
             raise Exception("Cannot reset tables when using mssql for safety.")
         logger.info("Resetting and creating database tables...")
-        # Base.metadata knows about all tables thanks to the import
         Base.metadata.drop_all(eng)
         Base.metadata.create_all(eng)
     else:
@@ -55,7 +53,7 @@ def initialize_database(eng: sa.Engine, reset_tables: bool = False):
 def register_folders_bulk(eng: sa.Engine, zip_paths: List[Path]) -> Dict[Path, int]:
     """
     Registers folders in the DB.
-    Returns a map of {Path: FolderID} for ALL provided paths (New + Existing).
+    Returns a map of {Path: FolderID} for ALL provided paths.
     """
     if not zip_paths:
         return {}
@@ -73,11 +71,10 @@ def register_folders_bulk(eng: sa.Engine, zip_paths: List[Path]) -> Dict[Path, i
             dt = datetime.strptime(dt_str, "%Y%m%d_%H%M%S")
             parsed_items.append(
                 {
-                    "obj_path": zp,  # Key for the returned map
+                    "obj_path": zp,
                     "buno": buno,
                     "folder_datetime": dt,
                     "path": str(zp),
-                    "scan_version": 0,
                 }
             )
         except ValueError:
@@ -89,7 +86,7 @@ def register_folders_bulk(eng: sa.Engine, zip_paths: List[Path]) -> Dict[Path, i
 
     # 2. Fetch Existing IDs (Bulk Query)
     unique_bunos = {p["buno"] for p in parsed_items}
-    existing_map = {}  # Key: (buno, folder_datetime) -> Value: id
+    existing_map = {}
 
     with eng.connect() as conn:
         if unique_bunos:
@@ -120,7 +117,6 @@ def register_folders_bulk(eng: sa.Engine, zip_paths: List[Path]) -> Dict[Path, i
                     "buno": item["buno"],
                     "folder_datetime": item["folder_datetime"],
                     "path": item["path"],
-                    "scan_version": item["scan_version"],
                 }
             )
 
@@ -142,7 +138,6 @@ def register_folders_bulk(eng: sa.Engine, zip_paths: List[Path]) -> Dict[Path, i
                 existing_map[(row.buno, row.folder_datetime)] = row.id
 
     # 6. Build Result Map
-    # Return IDs for ALL items passed in, so the pipeline can check them for updates.
     result_map = {}
     for item in parsed_items:
         key = (item["buno"], item["folder_datetime"])
