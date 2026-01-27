@@ -59,6 +59,7 @@ class AppSettings(BaseSettings):
     """
     Application Configuration.
     """
+
     # Global Concurrency Setting
     # This controls both the ThreadPoolExecutor size AND the default DB pool size.
     worker_threads: int = 64

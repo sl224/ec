@@ -1,7 +1,6 @@
 import json
-import sys
 import argparse
-from pathlib import Path
+
 
 def slice_trace(input_path: str, output_path: str, seconds: float):
     print(f"Loading {input_path}...")
@@ -36,25 +35,32 @@ def slice_trace(input_path: str, output_path: str, seconds: float):
     filtered_events = []
     for e in events:
         if "ts" not in e:
-            filtered_events.append(e)  # Always keep metadata (process names, thread names)
+            filtered_events.append(
+                e
+            )  # Always keep metadata (process names, thread names)
         elif e["ts"] >= min_cutoff:
             filtered_events.append(e)
 
     data["traceEvents"] = filtered_events
-    
+
     print(f"Remaining Events: {len(filtered_events)}")
 
     # 3. Save
     with open(output_path, "w") as f:
         json.dump(data, f)
-    
+
     print(f"Successfully saved clipped trace to: {output_path}")
 
+
 if __name__ == "__main__":
-    parser = argparse.ArgumentParser(description="Clip the tail end of a VizTracer JSON file.")
+    parser = argparse.ArgumentParser(
+        description="Clip the tail end of a VizTracer JSON file."
+    )
     parser.add_argument("input_file", help="Path to the large trace file")
     parser.add_argument("--out", default="clipped_trace.json", help="Output filename")
-    parser.add_argument("--seconds", type=int, default=120, help="Seconds from the end to keep")
-    
+    parser.add_argument(
+        "--seconds", type=int, default=120, help="Seconds from the end to keep"
+    )
+
     args = parser.parse_args()
     slice_trace(args.input_file, args.out, args.seconds)

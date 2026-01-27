@@ -10,10 +10,15 @@ class BadParameter(ValueError):
     pass
 
 
-def get_engine(db_settings, default_pool_size: int = 5, fast_executemany: bool = True, echo: bool = False):
+def get_engine(
+    db_settings,
+    default_pool_size: int = 5,
+    fast_executemany: bool = True,
+    echo: bool = False,
+):
     """
     Creates and returns a SQLAlchemy engine.
-    
+
     Args:
         db_settings: The database configuration object.
         default_pool_size: The fallback pool size (usually settings.worker_threads)
@@ -22,8 +27,10 @@ def get_engine(db_settings, default_pool_size: int = 5, fast_executemany: bool =
     # Determine effective pool size
     # Priority: Configured DB Pool Size > Global Worker Threads > Default(5)
     configured_size = getattr(db_settings, "pool_size", None)
-    effective_pool_size = configured_size if configured_size is not None else default_pool_size
-    
+    effective_pool_size = (
+        configured_size if configured_size is not None else default_pool_size
+    )
+
     # Base engine arguments common to most DBs
     base_args = {"echo": echo}
 
@@ -38,48 +45,51 @@ def get_engine(db_settings, default_pool_size: int = 5, fast_executemany: bool =
                     "trusted_connection": db_settings.trusted_connection,
                 },
             )
-            
+
             # Construct MSSQL specific args
             mssql_args = base_args.copy()
             mssql_args["fast_executemany"] = fast_executemany
             mssql_args["pool_size"] = effective_pool_size
-            
+
             # Since db_settings is validated as MSSQLConfig, these fields are guaranteed
             mssql_args["max_overflow"] = db_settings.max_overflow
             mssql_args["pool_timeout"] = db_settings.pool_timeout
             mssql_args["pool_pre_ping"] = db_settings.pool_pre_ping
-            
-            logger.debug(f"Initializing MSSQL Engine with pool_size={effective_pool_size}")
+
+            logger.debug(
+                f"Initializing MSSQL Engine with pool_size={effective_pool_size}"
+            )
             return create_engine(url_object, **mssql_args)
 
         case "sqlite3":
             sqlite_args = base_args.copy()
-            
+
             if db_settings.in_memory:
                 url_object = "sqlite:///:memory:"
                 from sqlalchemy.pool import StaticPool
+
                 # In-memory SQLite must use StaticPool to share state across threads
                 sqlite_args["poolclass"] = StaticPool
                 # StaticPool doesn't support sizing args, so we don't add them
             else:
                 url_object = f"sqlite:///{db_settings.db_location}"
-                # Standard SQLite file doesn't support high concurrency well, 
+                # Standard SQLite file doesn't support high concurrency well,
                 # but we can bump the pool size anyway if not using NullPool
                 sqlite_args["pool_size"] = effective_pool_size
-                
+
                 # Yes, these apply to file-based SQLite if pool_size is set (implies QueuePool)
                 if hasattr(db_settings, "max_overflow"):
                     sqlite_args["max_overflow"] = db_settings.max_overflow
                 if hasattr(db_settings, "pool_timeout"):
                     sqlite_args["pool_timeout"] = db_settings.pool_timeout
 
-            logger.debug(f"Initializing SQLite Engine ({'Memory' if db_settings.in_memory else 'File'})")
+            logger.debug(
+                f"Initializing SQLite Engine ({'Memory' if db_settings.in_memory else 'File'})"
+            )
             return create_engine(url_object, **sqlite_args)
 
         case _:
-            raise ValueError(
-                f"Unsupported DB type: {db_settings.type}"
-            )
+            raise ValueError(f"Unsupported DB type: {db_settings.type}")
 
 
 def bulk_upload(

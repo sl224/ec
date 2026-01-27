@@ -10,26 +10,32 @@ from e2ude_core.db.models import ArtifactManifest
 
 logger = logging.getLogger(__name__)
 
+
 def _upload_single_table(eng: sa.Engine, model, df, hash_id: int, version: int):
-    """ Worker: Uploads one table in its own transaction. """
+    """Worker: Uploads one table in its own transaction."""
     table_name = model.__tablename__
     with eng.begin() as conn:
         df_copy = df.copy()
         df_copy["hash_id"] = hash_id
-        
+
         if hasattr(model, "hash_id"):
             conn.execute(model.__table__.delete().where(model.hash_id == hash_id))
-            
+
         sql_io.bulk_upload(df_copy, conn, model.__table__)
 
-        conn.execute(ArtifactManifest.__table__.delete().where(
-            (ArtifactManifest.hash_id == hash_id) & 
-            (ArtifactManifest.target_table == table_name)
-        ))
-        conn.execute(ArtifactManifest.__table__.insert().values(
-            hash_id=hash_id, target_table=table_name, handler_version=version
-        ))
+        conn.execute(
+            ArtifactManifest.__table__.delete().where(
+                (ArtifactManifest.hash_id == hash_id)
+                & (ArtifactManifest.target_table == table_name)
+            )
+        )
+        conn.execute(
+            ArtifactManifest.__table__.insert().values(
+                hash_id=hash_id, target_table=table_name, handler_version=version
+            )
+        )
     return len(df)
+
 
 def process_file(
     eng: sa.Engine,
@@ -51,7 +57,9 @@ def process_file(
     # 2. Filter
     payload = []
     valid_models = {m.__tablename__: m for m in spec.expected_models}
-    tables_to_process = set(target_tables) if target_tables else set(valid_models.keys())
+    tables_to_process = (
+        set(target_tables) if target_tables else set(valid_models.keys())
+    )
 
     for model, df in model_to_df_map.items():
         if model.__tablename__ in tables_to_process and not df.empty:
@@ -68,13 +76,15 @@ def process_file(
 
     with ThreadPoolExecutor(max_workers=db_workers) as executor:
         future_map = {
-            executor.submit(_upload_single_table, eng, m, d, hash_id, spec.version): m.__tablename__
+            executor.submit(
+                _upload_single_table, eng, m, d, hash_id, spec.version
+            ): m.__tablename__
             for m, d in payload
         }
-        
+
         # Wait for ALL tables. Don't stop if one fails.
         done, _ = wait(future_map.keys(), return_when=ALL_COMPLETED)
-        
+
         for f in done:
             t_name = future_map[f]
             try:
@@ -86,5 +96,5 @@ def process_file(
     job_updater._rows_uploaded_in_scope = total_rows
     if errors:
         raise RuntimeError(f"Partial upload failure: {errors}")
-    
+
     logger.info(f"[{pipeline_id}] Complete. Total rows: {total_rows}")

@@ -9,10 +9,11 @@ logger = logging.getLogger(__name__)
 
 T = TypeVar("T")
 
+
 class ParallelFileScanner:
     """
     High-Performance Filesystem Walker.
-    
+
     Architecture:
     - Uses a single ThreadPoolExecutor for both Traversal (IO) and Processing (CPU/IO).
     - Dynamic Work Injection: Discovering a directory immediately schedules a new scan task.
@@ -33,11 +34,13 @@ class ParallelFileScanner:
         """
         futures: Dict[Any, str] = {}
         results: List[T] = []
-        
+
         dirs_scanned = 0
         files_found = 0
 
-        logger.info(f"Starting parallel scan of {root_path} ({self.max_workers} workers)")
+        logger.info(
+            f"Starting parallel scan of {root_path} ({self.max_workers} workers)"
+        )
 
         with ThreadPoolExecutor(max_workers=self.max_workers) as executor:
             # Bootstrapping
@@ -61,7 +64,7 @@ class ParallelFileScanner:
                                 # 1. Dynamic Total Adjustment
                                 if subdirs:
                                     pbar.total += len(subdirs)
-                                    pbar.refresh() # Force redraw to show correct %
+                                    pbar.refresh()  # Force redraw to show correct %
 
                                 # 2. Fan-Out: Schedule Subdirectories
                                 for d in subdirs:
@@ -73,7 +76,7 @@ class ParallelFileScanner:
                                     files_found += 1
                                     nf = executor.submit(action_func, Path(p))
                                     futures[nf] = "ACTION"
-                                
+
                                 # Update Progress
                                 pbar.update(1)
                                 pbar.set_postfix(files=files_found)
@@ -89,7 +92,9 @@ class ParallelFileScanner:
                             if task_type == "SCAN":
                                 pbar.update(1)
 
-        logger.info(f"Scan complete. Scanned {dirs_scanned} dirs, processed {len(results)} files.")
+        logger.info(
+            f"Scan complete. Scanned {dirs_scanned} dirs, processed {len(results)} files."
+        )
         return results
 
     def _scan_dir(self, path: str, filter_func: Callable[[os.DirEntry], bool]):
@@ -108,7 +113,7 @@ class ParallelFileScanner:
                     elif entry.is_file(follow_symlinks=False):
                         if filter_func(entry):
                             files.append(entry.path)
-                            
+
         except (PermissionError, OSError) as e:
             logger.debug(f"Access denied or error: {path} [{e}]")
 

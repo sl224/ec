@@ -1,5 +1,4 @@
 import logging
-import os
 import shutil
 from concurrent.futures import ThreadPoolExecutor
 from pathlib import Path
@@ -13,7 +12,7 @@ from tqdm import tqdm
 from e2ude_core.context import EtlContext
 from e2ude_core.orchestration.workflow import process_staged_directory
 from e2ude_core.registry import HANDLER_REGISTRY
-from e2ude_core.services.zip_io import file_type_patterns 
+from e2ude_core.services.zip_io import file_type_patterns
 
 logger = logging.getLogger(__name__)
 
@@ -44,7 +43,7 @@ def _match_any(path_str: str, patterns: List[str]) -> bool:
 class StagingPipeline:
     """
     High-Throughput Continuous Pipeline (Thread-Based).
-    
+
     Optimized for 'Selective Extraction':
     - Uses High Thread Count (32) for Staging to hide Network Latency (SMB Seek/Read).
     - Uses Lower Thread Count (8) for Processing to match CPU/DB capacity.
@@ -58,7 +57,7 @@ class StagingPipeline:
         staging_root: Path,
         buffer_size: int = 30,
         unzip_workers: int = 32,  # High concurrency for I/O
-        process_workers: int = 8, # CPU/DB Bound
+        process_workers: int = 8,  # CPU/DB Bound
         db_write_workers: int = 4,
     ):
         self.eng = eng
@@ -72,20 +71,23 @@ class StagingPipeline:
         self.buffer_sem = BoundedSemaphore(value=buffer_size)
         self.stop_event = Event()
         self.ctx = EtlContext.capture()
-        
+
         self.active_patterns = _resolve_active_patterns()
         logger.info(f"Active Patterns: {len(self.active_patterns)}")
 
     def run(self):
-
         total = len(self.folder_id_map)
         logger.info(f"Starting Pipeline. Processing {total} files.")
 
         # Two pools allow us to flood the network (Unzip) without choking the DB (Process)
-        unzip_pool = ThreadPoolExecutor(max_workers=self.unzip_workers, thread_name_prefix="Stage")
-        process_pool = ThreadPoolExecutor(max_workers=self.process_workers, thread_name_prefix="Proc")
-        # debug 
-        LIMIT = float('inf')
+        unzip_pool = ThreadPoolExecutor(
+            max_workers=self.unzip_workers, thread_name_prefix="Stage"
+        )
+        process_pool = ThreadPoolExecutor(
+            max_workers=self.process_workers, thread_name_prefix="Proc"
+        )
+        # debug
+        LIMIT = float("inf")
         try:
             with tqdm(total=total, desc="Pipeline", unit="zip") as pbar:
                 # FIX: Iterate keys() to get the Path object
@@ -119,10 +121,7 @@ class StagingPipeline:
             raise
 
     def _task_stage_selective(
-        self, 
-        zip_path: Path, 
-        process_pool: ThreadPoolExecutor, 
-        pbar: tqdm
+        self, zip_path: Path, process_pool: ThreadPoolExecutor, pbar: tqdm
     ):
         """
         Stage 1: Selective Network Extraction (Thread I/O Bound).
@@ -138,9 +137,10 @@ class StagingPipeline:
 
         safe_name = f"{folder_id}_{zip_path.stem}"
         local_dir = self.staging_root / safe_name
-        
+
         try:
-            if local_dir.exists(): shutil.rmtree(local_dir)
+            if local_dir.exists():
+                shutil.rmtree(local_dir)
             local_dir.mkdir(parents=True, exist_ok=True)
 
             # --- Selective Unzip Logic ---
@@ -148,10 +148,12 @@ class StagingPipeline:
                 # Peek at headers (Network Seek/Read)
                 members = zf.namelist()
                 targets = [
-                    m for m in members 
-                    if _match_any(m, self.active_patterns) or m.endswith("RSM_RawArchive.zip")
+                    m
+                    for m in members
+                    if _match_any(m, self.active_patterns)
+                    or m.endswith("RSM_RawArchive.zip")
                 ]
-                
+
                 if targets:
                     # Extract matches (Network Read -> SSD Write)
                     zf.extractall(local_dir, members=targets)
@@ -161,14 +163,16 @@ class StagingPipeline:
                 try:
                     nested_root = nested_zip.with_suffix("")
                     nested_root.mkdir(exist_ok=True)
-                    
+
                     with ZipFile(nested_zip) as nz:
                         nested_targets = []
                         for name in nz.namelist():
                             # Virtual path check
-                            if _match_any(nested_root.name + "/" + name, self.active_patterns):
+                            if _match_any(
+                                nested_root.name + "/" + name, self.active_patterns
+                            ):
                                 nested_targets.append(name)
-                        
+
                         if nested_targets:
                             nz.extractall(nested_root, members=nested_targets)
                 finally:
@@ -205,8 +209,10 @@ class StagingPipeline:
     def _finalize_item(self, path, pbar):
         if path:
             try:
-                if path.exists(): shutil.rmtree(path)
-            except OSError: pass
+                if path.exists():
+                    shutil.rmtree(path)
+            except OSError:
+                pass
 
         self.buffer_sem.release()
         pbar.update(1)

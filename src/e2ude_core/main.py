@@ -1,6 +1,5 @@
 import logging
 import os
-import sys
 from pathlib import Path
 from concurrent.futures import ThreadPoolExecutor
 from typing import Dict
@@ -23,7 +22,9 @@ if not STAGING_ROOT.exists():
     try:
         STAGING_ROOT = Path("temp_staging")
         STAGING_ROOT.mkdir(exist_ok=True)
-    except: pass
+    except:
+        pass
+
 
 def filter_folders_needing_work(eng, folder_map: Dict[Path, int]) -> Dict[Path, int]:
     """
@@ -32,15 +33,18 @@ def filter_folders_needing_work(eng, folder_map: Dict[Path, int]) -> Dict[Path, 
     """
     needed = {}
     logger.info(f"Checking state for {len(folder_map)} folders...")
-    
+
     # Use threads to check DB state in parallel (IO bound mostly)
     with ThreadPoolExecutor(max_workers=16) as executor:
         # Map future -> (path, id)
         future_map = {
-            executor.submit(get_folder_work_delta, eng, fid, SCANNER_VERSION): (path, fid)
+            executor.submit(get_folder_work_delta, eng, fid, SCANNER_VERSION): (
+                path,
+                fid,
+            )
             for path, fid in folder_map.items()
         }
-        
+
         for f in future_map:
             path, fid = future_map[f]
             try:
@@ -50,9 +54,10 @@ def filter_folders_needing_work(eng, folder_map: Dict[Path, int]) -> Dict[Path, 
             except Exception as e:
                 logger.warning(f"Failed to check state for {fid}: {e}")
                 # Assume needed if check fails? Or skip? Skipping is safer.
-    
+
     logger.info(f"State Check Complete. {len(needed)} folders require processing.")
     return needed
+
 
 def main():
     setup_logging(settings)
@@ -73,7 +78,7 @@ def main():
             return
 
         valid_paths = discover_network_zips(scan_root, max_workers=1024)
-        if not valid_paths: 
+        if not valid_paths:
             logger.info("No zips found.")
             return
 
@@ -96,7 +101,7 @@ def main():
             buffer_size=60,
             unzip_workers=60,
             process_workers=8,
-            db_write_workers=8
+            db_write_workers=8,
         )
         pipeline.run()
 
@@ -104,6 +109,7 @@ def main():
         logger.warning("\n[!] Force Quit (Ctrl+C). Killing all threads immediately...")
         try:
             from viztracer import get_tracer
+
             tracer = get_tracer()
             if tracer:
                 logger.info("VizTracer active. Saving trace data...")
@@ -120,6 +126,7 @@ def main():
     finally:
         main_eng.dispose()
         logger.info("Exiting.")
+
 
 if __name__ == "__main__":
     main()

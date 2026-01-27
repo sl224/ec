@@ -6,6 +6,7 @@ import sqlalchemy as sa
 
 from e2ude_core.orchestration.scopes import session_scope, job_scope
 from e2ude_core.orchestration.spec import JobSpec
+
 # Removed unused imports: tempfile, extract_specific_files
 from e2ude_core.registry import HANDLER_REGISTRY
 from e2ude_core.context import EtlContext
@@ -43,7 +44,7 @@ def process_staged_directory(
             # --- Step 2: Scan (if needed) ---
             if work_delta.status == FolderState.NEEDS_SCAN:
                 logger.info(f"Scan Required: {work_delta.scan_reason}")
-                
+
                 scan_spec = JobSpec(
                     pipeline_id=SCANNER_PIPELINE_ID,
                     job_name=f"MetadataScan: Folder {folder_id}",
@@ -78,7 +79,7 @@ def process_staged_directory(
                 return
 
             # --- Step 3: Grouping & Execution ---
-            
+
             # Fetch file info to map Hash -> Path/Type
             db_files = fetch_existing_files_map(eng, folder_id)
             files_map = {f["hash_id"]: f for f in db_files}
@@ -105,8 +106,10 @@ def process_staged_directory(
                     continue
 
                 # Summarize target for the job log
-                target_summary = "BATCH" if len(missing_tables) > 1 else missing_tables[0]
-                
+                target_summary = (
+                    "BATCH" if len(missing_tables) > 1 else missing_tables[0]
+                )
+
                 file_spec = JobSpec(
                     pipeline_id=handler_spec.pipeline_id,
                     job_name=f"{handler_spec.pipeline_id}: {file_info['relative_path']} [{target_summary}]",
@@ -125,8 +128,8 @@ def process_staged_directory(
                             hash_id=hash_id,
                             file_path=full_path,
                             job_updater=job.manager,
-                            target_tables=missing_tables, # Pass list of specific tables
-                            db_workers=db_workers         # Enable parallel DB writes
+                            target_tables=missing_tables,  # Pass list of specific tables
+                            db_workers=db_workers,  # Enable parallel DB writes
                         )
 
     except Exception as e:

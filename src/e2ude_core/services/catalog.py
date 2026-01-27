@@ -76,9 +76,18 @@ FILE_PATTERNS = [
     (FileType.LENG_BIT, "*_RSM_RawArchive/RSM/*_MAINT_*/*_MAINT_DAT/*_LENG_BIT"),
     (FileType.RENG_BIT, "*_RSM_RawArchive/RSM/*_MAINT_*/*_MAINT_DAT/*_RENG_BIT"),
     (FileType.VEHCL_BIT, "*_RSM_RawArchive/RSM/*_MAINT_*/*_MAINT_DAT/*_VEHCL_BIT"),
-    (FileType.DIA_MAINT_SUMMARY, "*_RSM_RawArchive/DIA_MAINTENANCE/*_maintenance_data/maint_summary_data.txt"),
-    (FileType.DIA_MAINT_DETAIL, "*_RSM_RawArchive/DIA_MAINTENANCE/*_maintenance_data/*_detailed_data.txt"),
-    (FileType.DIA_MAINT_STATUS, "*_RSM_RawArchive/DIA_MAINTENANCE/*_maintenance_data/system_snapshot_fault_status.txt"),
+    (
+        FileType.DIA_MAINT_SUMMARY,
+        "*_RSM_RawArchive/DIA_MAINTENANCE/*_maintenance_data/maint_summary_data.txt",
+    ),
+    (
+        FileType.DIA_MAINT_DETAIL,
+        "*_RSM_RawArchive/DIA_MAINTENANCE/*_maintenance_data/*_detailed_data.txt",
+    ),
+    (
+        FileType.DIA_MAINT_STATUS,
+        "*_RSM_RawArchive/DIA_MAINTENANCE/*_maintenance_data/system_snapshot_fault_status.txt",
+    ),
 ]
 
 
