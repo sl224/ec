@@ -1,0 +1,45 @@
+# Copy this file to `e2ude_config.toml` (gitignored) or
+# `e2ude_config.local.toml` and set `E2UDE_CONFIG_PATH`.
+#
+# This example is for local development and validation.
+# The routine production refresh should use the approved MSSQL production
+# config and the shared scan root at `\\Rsiny1-ilsfs\RSM`.
+
+worker_threads = 64
+
+[database]
+type = "sqlite3"
+db_location = "e2ude_core.sqlite3"
+in_memory = false
+
+# For local MSSQL development, use this shape instead:
+# type = "mssql"
+# server_name = "localhost\\SQLEXPRESS"
+# db_name = "AnalyticsDataMart"
+# driver = "ODBC Driver 17 for SQL Server"
+# trusted_connection = "yes"
+# schema_name = "e2ude_core_dev"
+
+[paths]
+# This matches the committed repo defaults. Override it if you want to
+# scan a local mirror instead of the shared production location.
+scan_root = "\\\\Rsiny1-ilsfs\\RSM"
+staging_root = "temp_staging"
+
+[runtime]
+discovery_workers = 1024
+pipeline_buffer_size = 60
+unzip_workers = 60
+process_workers = 8
+db_write_workers = 4
+
+[diagnostics]
+enable_viztracer = false
+
+[logging]
+level = "INFO"
+log_to_file = false
+log_file = "e2ude_core.log"
+rotation_size_mb = 10
+rotation_backup_count = 5
+format = "%(asctime)s - %(name)s - %(levelname)s - %(message)s"

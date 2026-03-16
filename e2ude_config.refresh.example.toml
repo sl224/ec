@@ -1,0 +1,37 @@
+# Copy this file to `e2ude_config.toml` on the shared refresh machine.
+# `scripts/refresh-data.ps1` will override only `database.schema_name`
+# so operators explicitly choose `dev` or `prod` on each run.
+
+worker_threads = 64
+
+[database]
+type = "mssql"
+server_name = "<shared-sql-server>"
+db_name = "<shared-sql-database>"
+driver = "ODBC Driver 17 for SQL Server"
+trusted_connection = "yes"
+schema_name = "e2ude_core_dev"
+
+[paths]
+# The shared scan root is already provided by repo defaults. Keep it only if
+# you want the refresh machine config to make the source explicit.
+scan_root = "\\\\Rsiny1-ilsfs\\RSM"
+staging_root = "temp_staging"
+
+[runtime]
+discovery_workers = 1024
+pipeline_buffer_size = 60
+unzip_workers = 60
+process_workers = 8
+db_write_workers = 4
+
+[diagnostics]
+enable_viztracer = false
+
+[logging]
+level = "INFO"
+log_to_file = false
+log_file = "e2ude_core.log"
+rotation_size_mb = 10
+rotation_backup_count = 5
+format = "%(asctime)s - %(name)s - %(levelname)s - %(message)s"

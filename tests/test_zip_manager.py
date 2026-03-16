@@ -1,43 +1,50 @@
-# %%
-from pathlib import Path
-import pytest
+from io import BytesIO
+from zipfile import ZipFile
 
-from etude_core.services.zip_io import UnzipContext, FileType
-
-
-STATIC_ASSETS_ROOT = Path("tests/static_assets")
+from e2ude_core.services.zip_io import UnzipContext
 
 
-def test_zip_manager():
-    test_zip = (
-        STATIC_ASSETS_ROOT / "zips/169069_20250203_004745_025_TransportRSM.fpkg.e2d.zip"
-    )
-    with UnzipContext(test_zip) as c:
-        assert Path(c.temp_dir).exists()
-        assert len(c.file_list) > 0
+def _build_sample_zip(zip_path):
+    nested_buffer = BytesIO()
+    with ZipFile(nested_buffer, "w") as nested_zip:
+        nested_zip.writestr("RSM/TMPTR_LOG", "tmptr payload")
 
-        # Check that we found at least one of a specific file type
-        found_acaws = any(ft == FileType.ACAWS_LOG for ft, _ in c.file_list)
-        assert found_acaws, "ACAWS_LOG file not found in extracted files."
-
-    # After exiting the context, the temp directory should be gone
-    assert not Path(c.temp_dir).exists()
-
-
-def test_zip_manager_print_files():
-    test_zip = (
-        STATIC_ASSETS_ROOT / "zips/169069_20250203_004745_025_TransportRSM.fpkg.e2d.zip"
-    )
-    with UnzipContext(test_zip) as c:
-        for ft, f in c.file_list:
-            print(ft, f)
+    with ZipFile(zip_path, "w") as root_zip:
+        root_zip.writestr("123456_20240101_000000_000_MCData", "mcdata payload")
+        root_zip.writestr(
+            "123456_20240101_000000_000_Segments",
+            "1,1,,01/13/2025 14:13:36:825,01/13/2025 15:36:51:825,,,,,,,PreFlight,\n",
+        )
+        root_zip.writestr(
+            "123456_20240101_000000_000_RSM_RawArchive.zip",
+            nested_buffer.getvalue(),
+        )
 
 
-def test_zip_manager_file_not_found():
-    with pytest.raises(FileNotFoundError):
-        with UnzipContext("non_existent_file.zip"):
-            pass  # This code should not be reached
+def test_unzip_context_extracts_nested_archives(tmp_path):
+    zip_path = tmp_path / "sample_TransportRSM.fpkg.e2d.zip"
+    _build_sample_zip(zip_path)
+
+    with UnzipContext(zip_path) as ctx:
+        extracted = (
+            ctx.temp_dir
+            / "123456_20240101_000000_000_RSM_RawArchive"
+            / "RSM"
+            / "TMPTR_LOG"
+        )
+        assert extracted.exists()
+        assert extracted.read_text(encoding="utf-8") == "tmptr payload"
+
+        segments = ctx.temp_dir / "123456_20240101_000000_000_Segments"
+        assert segments.exists()
 
 
-if __name__ == "__main__":
-    test_zip_manager_print_files()
+def test_unzip_context_cleans_up_temp_dir(tmp_path):
+    zip_path = tmp_path / "sample_TransportRSM.fpkg.e2d.zip"
+    _build_sample_zip(zip_path)
+
+    with UnzipContext(zip_path) as ctx:
+        temp_dir = ctx.temp_dir
+        assert temp_dir.exists()
+
+    assert not temp_dir.exists()

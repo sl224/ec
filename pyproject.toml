@@ -3,11 +3,12 @@ requires = ["uv_build>=0.9.9,<0.10.0"]
 build-backend = "uv_build"
 
 [tool.uv.build-backend]
-module-name = "e2d_core"
-namespace = true
+module-name = "e2ude_core"
+
+
 
 [project]
-name = "e2d-core"
+name = "e2ude-core"
 version = "0.1.0"
 description = "HCD-ETL framework for processing and deduplicating file archives."
 readme = "README.md"

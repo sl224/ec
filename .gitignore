@@ -28,6 +28,21 @@ __pycache__/
 
 # Test assets
 tests/static_assets/
+temp_staging/
+fixtures/
+e2ude_config.toml
+e2ude_config.local.toml
+_tmp_fixture_collision/
 
 # DB
 *.sqlite*
+
+#Scratch
+*nocheckin*
+
+# log
+*.log*
+*.json
+*.txt
+
+# config
