@@ -44,7 +44,9 @@ def _runtime_tables() -> list[sa.Table]:
 
     runtime_table_keys = {model.__table__.key for model in runtime_models}
     return [
-        table for table in Base.metadata.sorted_tables if table.key in runtime_table_keys
+        table
+        for table in Base.metadata.sorted_tables
+        if table.key in runtime_table_keys
     ]
 
 
@@ -80,9 +82,7 @@ def initialize_database(eng: sa.Engine, reset_tables: bool = False):
         Base.metadata.create_all(eng, tables=tables_to_create)
 
 
-def _iter_path_batches(
-    paths: Iterable[str], batch_size: int | None = None
-):
+def _iter_path_batches(paths: Iterable[str], batch_size: int | None = None):
     if batch_size is None:
         batch_size = FOLDER_LOOKUP_BATCH_SIZE
 

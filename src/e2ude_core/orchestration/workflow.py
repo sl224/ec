@@ -66,7 +66,9 @@ def process_staged_directory(
 
         if plan.summary.status == FolderState.UP_TO_DATE:
             logger.info("Folder is UP_TO_DATE. No further action required.")
-            return FolderExecutionResult(folder_id=folder_id, rows_uploaded=rows_uploaded)
+            return FolderExecutionResult(
+                folder_id=folder_id, rows_uploaded=rows_uploaded
+            )
 
         logger.info(f"Processing {len(plan.work_items)} files with pending data.")
 

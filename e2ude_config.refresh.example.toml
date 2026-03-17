@@ -5,9 +5,9 @@
 worker_threads = 64
 
 [database]
-type = "mssql"
-server_name = "<shared-sql-server>"
-db_name = "<shared-sql-database>"
+type = "mssql" 
+server_name = "<shared-sql-server>" # "RSSC30-DB0140"
+db_name = "<shared-sql-database>" # "AnalyticsDataMart"
 driver = "ODBC Driver 17 for SQL Server"
 trusted_connection = "yes"
 schema_name = "e2ude_core_dev"

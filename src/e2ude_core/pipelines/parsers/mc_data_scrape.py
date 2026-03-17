@@ -53,9 +53,7 @@ def scrape_rpcs_pres_record(text) -> DataFrame:
     system_time_stamp = tokens[3]
     dataset_time_stamp = tokens[4]
     if system_time_stamp and dataset_time_stamp and " " not in dataset_time_stamp:
-        dataset_time_stamp = (
-            f"{system_time_stamp.split(' ')[0]} {dataset_time_stamp}"
-        )
+        dataset_time_stamp = f"{system_time_stamp.split(' ')[0]} {dataset_time_stamp}"
 
     try:
         pri_hi_idx = tokens.index("PRI_HI", 5)
@@ -69,7 +67,12 @@ def scrape_rpcs_pres_record(text) -> DataFrame:
     secondary_high = _normalize_pressure_block(tokens[sec_hi_idx + 1 : man_pre_idx])
     manifold = _normalize_pressure_block(tokens[man_pre_idx + 1 : man_pre_idx + 11])
 
-    return [system_time_stamp, dataset_time_stamp] + primary_high + secondary_high + manifold
+    return (
+        [system_time_stamp, dataset_time_stamp]
+        + primary_high
+        + secondary_high
+        + manifold
+    )
 
 
 def scrape_pfc_db_record(text):
