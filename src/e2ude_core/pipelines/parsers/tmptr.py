@@ -10,20 +10,23 @@ def parse_tmptr_dataframe(file_path: Path) -> pd.DataFrame:
     df = pd.read_csv(
         file_path,
         header=None,
-        names=["afmc", "date", "time", "category", "temp_c_raw", "temp_f_raw"],
+        names=["afmc", "date", "time", "category", "temp_f_raw", "temp_c_raw"],
         dtype=str,
     )
 
     for col, raw_col in [("temp_f", "temp_f_raw"), ("temp_c", "temp_c_raw")]:
-        # Clean whitespace
+        # 1. Clean whitespace
         s = df[raw_col].str.strip()
 
-        # Filter for valid format (e.g., '72F') and slice off the unit char.
+        # 2. Filter: Keep only strings exactly length 4 (matches your 'if len(stoken) == 4')
+        #    and slice off the last character (the unit).
         valid_mask = s.str.len() == 4
         numeric_part = s.where(valid_mask).str[:-1]
 
-        # Convert to a nullable integer type, coercing errors to NA.
+        # 3. Convert to numeric, coercing errors (malformed numbers) to NaN
+        #    Int64 allows for integers mixed with NaN (pd.NA)
         df[col] = pd.to_numeric(numeric_part, errors="coerce").astype("Int64")
+    # --- REFACTORED SECTION END ---
 
     date_str = df["date"].str.strip()
     time_str = df["time"].str.strip()
