@@ -53,7 +53,8 @@ $exitCode = 0
 
 try {
     $env:E2UDE_CONFIG_PATH = $resolvedConfigPath
-    $env:E2UDE_DATABASE__TYPE = "mssql"
+    # $env:E2UDE_DATABASE__TYPE = "mssql"
+    $env:E2UDE_DATABASE__TYPE = "sqlite3"
     $env:E2UDE_DATABASE__SCHEMA_NAME = $schemaName
 
     if ($StagingRoot) {

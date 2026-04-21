@@ -22,11 +22,13 @@ from e2ude_core.db.models import (
     RpcsPres,
     SegmentsData,
     TmptrData,
+    EngineOnOff
 )
 from e2ude_core.pipelines.parsers import (
     parse_mcdata,
     parse_segment,
     parse_tmptr_dataframe,
+    parse_engine_on_off_dataframe,
 )
 
 
@@ -39,6 +41,7 @@ class FileType(StrEnum):
     GSEVENTS = "GS_EVENTS"
     FLIGHTSYSTEMS = "FLIGHT_SYSTEMS"
     ENGINE = "ENGINE"
+    ENGINE_ON_OFF = "ENGINE_ON_OFF"
     AR = "AR"
     AIRCRAFT_CONFIG = "AIRCRAFT_CONFIGURATION"
     ACAWS_LOG = "ACAWS_LOG"
@@ -119,55 +122,62 @@ def coerce_file_type(value: FileType | str | None) -> FileType:
 
 
 RUNTIME_FILE_SPECS: tuple[RuntimeFileSpec, ...] = (
+    # RuntimeFileSpec(
+    #     FileType.MCDATA,
+    #     ("*_MCData",),
+    #     PipelineId("mcdata"),
+    #     1,
+    #     parse_mcdata,
+    #     (
+    #         NavData,
+    #         Rpcs,
+    #         RpcsPres,
+    #         RadarState,
+    #         RotoScan,
+    #         PfcDb,
+    #         RfcDb,
+    #         LcsTemp,
+    #         McInDiscr,
+    #     ),
+    # ),
+    # RuntimeFileSpec(
+    #     FileType.SEGMENTS,
+    #     ("*_Segments",),
+    #     PipelineId("segments"),
+    #     1,
+    #     parse_segment,
+    #     (SegmentsData,),
+    # ),
+    # RuntimeFileSpec(FileType.VERSIONS, ("*_Versions.xml",)),
+    # RuntimeFileSpec(FileType.GSEVENTS, ("*_GSEvents.xml",)),
+    # RuntimeFileSpec(FileType.FLIGHTSYSTEMS, ("*_FlightSystems",)),
+    # RuntimeFileSpec(FileType.AR, ("*_AR.txt",)),
+    # RuntimeFileSpec(FileType.STATUS, ("*_Status.txt",)),
     RuntimeFileSpec(
-        FileType.MCDATA,
-        ("*_MCData",),
-        PipelineId("mcdata"),
+        FileType.ENGINE_ON_OFF,
+        ("*_Engine",),
+        PipelineId("engine_on_off"),
         1,
-        parse_mcdata,
-        (
-            NavData,
-            Rpcs,
-            RpcsPres,
-            RadarState,
-            RotoScan,
-            PfcDb,
-            RfcDb,
-            LcsTemp,
-            McInDiscr,
-        ),
+        parse_engine_on_off_dataframe,
+        (EngineOnOff,),
     ),
-    RuntimeFileSpec(
-        FileType.SEGMENTS,
-        ("*_Segments",),
-        PipelineId("segments"),
-        1,
-        parse_segment,
-        (SegmentsData,),
-    ),
-    RuntimeFileSpec(FileType.VERSIONS, ("*_Versions.xml",)),
-    RuntimeFileSpec(FileType.GSEVENTS, ("*_GSEvents.xml",)),
-    RuntimeFileSpec(FileType.FLIGHTSYSTEMS, ("*_FlightSystems",)),
-    RuntimeFileSpec(FileType.AR, ("*_AR.txt",)),
-    RuntimeFileSpec(FileType.STATUS, ("*_Status.txt",)),
-    RuntimeFileSpec(FileType.ENGINE, ("*_Engine",)),
-    RuntimeFileSpec(FileType.AIRCRAFT_CONFIG, ("*_AircraftConfiguration.xml",)),
-    RuntimeFileSpec(
-        FileType.ACAWS_LOG,
-        ("*_RSM_RawArchive/RSM/*_MAINT_*/*_MAINT_DAT/*_ACAWS_LOG",),
-    ),
-    RuntimeFileSpec(
-        FileType.MAINT_XML,
-        ("*_RSM_RawArchive/RSM/*_MAINT_*/*_MAINT.xml",),
-    ),
-    RuntimeFileSpec(
-        FileType.MAINT_EVT,
-        ("*_RSM_RawArchive/RSM/*_MAINT_*/*_MAINT.evt",),
-    ),
-    RuntimeFileSpec(
-        FileType.MAINT_PRM,
-        ("*_RSM_RawArchive/RSM/*_MAINT_*/*_MAINT.prm",),
-    ),
+    # RuntimeFileSpec(FileType.AIRCRAFT_CONFIG, ("*_AircraftConfiguration.xml",)),
+    # RuntimeFileSpec(
+    #     FileType.ACAWS_LOG,
+    #     ("*_RSM_RawArchive/RSM/*_MAINT_*/*_MAINT_DAT/*_ACAWS_LOG",),
+    # ),
+    # RuntimeFileSpec(
+    #     FileType.MAINT_XML,
+    #     ("*_RSM_RawArchive/RSM/*_MAINT_*/*_MAINT.xml",),
+    # ),
+    # RuntimeFileSpec(
+    #     FileType.MAINT_EVT,
+    #     ("*_RSM_RawArchive/RSM/*_MAINT_*/*_MAINT.evt",),
+    # ),
+    # RuntimeFileSpec(
+    #     FileType.MAINT_PRM,
+    #     ("*_RSM_RawArchive/RSM/*_MAINT_*/*_MAINT.prm",),
+    # ),
     RuntimeFileSpec(
         FileType.TMPTR_LOG,
         ("*_RSM_RawArchive/RSM/TMPTR_LOG",),
@@ -176,70 +186,70 @@ RUNTIME_FILE_SPECS: tuple[RuntimeFileSpec, ...] = (
         parse_tmptr_dataframe,
         (TmptrData,),
     ),
-    RuntimeFileSpec(FileType.MAINT_LOG, ("*_RSM_RawArchive/RSM/MAINT_LOG",)),
-    RuntimeFileSpec(FileType.METADATA_CSV, ("*.csv",)),
-    RuntimeFileSpec(
-        FileType.CSFIR_DAT,
-        ("*_RSM_RawArchive/RSM/*_MAINT_*/*_CSFIR/*_CSFIR_DAT",),
-    ),
-    RuntimeFileSpec(
-        FileType.LENG_EFF_DAT,
-        ("*_RSM_RawArchive/RSM/*_MAINT_*/*_ENG_EFF/*_LENG_EFF_DAT",),
-    ),
-    RuntimeFileSpec(
-        FileType.RENG_EFF_DAT,
-        ("*_RSM_RawArchive/RSM/*_MAINT_*/*_ENG_EFF/*_RENG_EFF_DAT",),
-    ),
-    RuntimeFileSpec(
-        FileType.LENG_PERF,
-        ("*_RSM_RawArchive/RSM/*_MAINT_*/*_ENG_PERF/*_LENG_PERF",),
-    ),
-    RuntimeFileSpec(
-        FileType.RENG_PERF,
-        ("*_RSM_RawArchive/RSM/*_MAINT_*/*_ENG_PERF/*_RENG_PERF",),
-    ),
-    RuntimeFileSpec(
-        FileType.SDRS_DAT,
-        ("*_RSM_RawArchive/RSM/*_MAINT_*/*_SDRS/*_SDRS_DAT",),
-    ),
-    RuntimeFileSpec(
-        FileType.ERR_1553,
-        ("*_RSM_RawArchive/RSM/*_MAINT_*/*_MAINT_DAT/*_1553_ERR",),
-    ),
-    RuntimeFileSpec(
-        FileType.COMM_BIT,
-        ("*_RSM_RawArchive/RSM/*_MAINT_*/*_MAINT_DAT/*_COMM_BIT",),
-    ),
-    RuntimeFileSpec(
-        FileType.INCDS_BIT,
-        ("*_RSM_RawArchive/RSM/*_MAINT_*/*_MAINT_DAT/*_INCDS_BIT",),
-    ),
-    RuntimeFileSpec(
-        FileType.LENG_BIT,
-        ("*_RSM_RawArchive/RSM/*_MAINT_*/*_MAINT_DAT/*_LENG_BIT",),
-    ),
-    RuntimeFileSpec(
-        FileType.RENG_BIT,
-        ("*_RSM_RawArchive/RSM/*_MAINT_*/*_MAINT_DAT/*_RENG_BIT",),
-    ),
-    RuntimeFileSpec(
-        FileType.VEHCL_BIT,
-        ("*_RSM_RawArchive/RSM/*_MAINT_*/*_MAINT_DAT/*_VEHCL_BIT",),
-    ),
-    RuntimeFileSpec(
-        FileType.DIA_MAINT_SUMMARY,
-        ("*_RSM_RawArchive/DIA_MAINTENANCE/*_maintenance_data/maint_summary_data.txt",),
-    ),
-    RuntimeFileSpec(
-        FileType.DIA_MAINT_DETAIL,
-        ("*_RSM_RawArchive/DIA_MAINTENANCE/*_maintenance_data/*_detailed_data.txt",),
-    ),
-    RuntimeFileSpec(
-        FileType.DIA_MAINT_STATUS,
-        (
-            "*_RSM_RawArchive/DIA_MAINTENANCE/*_maintenance_data/system_snapshot_fault_status.txt",
-        ),
-    ),
+    # RuntimeFileSpec(FileType.MAINT_LOG, ("*_RSM_RawArchive/RSM/MAINT_LOG",)),
+    # RuntimeFileSpec(FileType.METADATA_CSV, ("*.csv",)),
+    # RuntimeFileSpec(
+    #     FileType.CSFIR_DAT,
+    #     ("*_RSM_RawArchive/RSM/*_MAINT_*/*_CSFIR/*_CSFIR_DAT",),
+    # ),
+    # RuntimeFileSpec(
+    #     FileType.LENG_EFF_DAT,
+    #     ("*_RSM_RawArchive/RSM/*_MAINT_*/*_ENG_EFF/*_LENG_EFF_DAT",),
+    # ),
+    # RuntimeFileSpec(
+    #     FileType.RENG_EFF_DAT,
+    #     ("*_RSM_RawArchive/RSM/*_MAINT_*/*_ENG_EFF/*_RENG_EFF_DAT",),
+    # ),
+    # RuntimeFileSpec(
+    #     FileType.LENG_PERF,
+    #     ("*_RSM_RawArchive/RSM/*_MAINT_*/*_ENG_PERF/*_LENG_PERF",),
+    # ),
+    # RuntimeFileSpec(
+    #     FileType.RENG_PERF,
+    #     ("*_RSM_RawArchive/RSM/*_MAINT_*/*_ENG_PERF/*_RENG_PERF",),
+    # ),
+    # RuntimeFileSpec(
+    #     FileType.SDRS_DAT,
+    #     ("*_RSM_RawArchive/RSM/*_MAINT_*/*_SDRS/*_SDRS_DAT",),
+    # ),
+    # RuntimeFileSpec(
+    #     FileType.ERR_1553,
+    #     ("*_RSM_RawArchive/RSM/*_MAINT_*/*_MAINT_DAT/*_1553_ERR",),
+    # ),
+    # RuntimeFileSpec(
+    #     FileType.COMM_BIT,
+    #     ("*_RSM_RawArchive/RSM/*_MAINT_*/*_MAINT_DAT/*_COMM_BIT",),
+    # ),
+    # RuntimeFileSpec(
+    #     FileType.INCDS_BIT,
+    #     ("*_RSM_RawArchive/RSM/*_MAINT_*/*_MAINT_DAT/*_INCDS_BIT",),
+    # ),
+    # RuntimeFileSpec(
+    #     FileType.LENG_BIT,
+    #     ("*_RSM_RawArchive/RSM/*_MAINT_*/*_MAINT_DAT/*_LENG_BIT",),
+    # ),
+    # RuntimeFileSpec(
+    #     FileType.RENG_BIT,
+    #     ("*_RSM_RawArchive/RSM/*_MAINT_*/*_MAINT_DAT/*_RENG_BIT",),
+    # ),
+    # RuntimeFileSpec(
+    #     FileType.VEHCL_BIT,
+    #     ("*_RSM_RawArchive/RSM/*_MAINT_*/*_MAINT_DAT/*_VEHCL_BIT",),
+    # ),
+    # RuntimeFileSpec(
+    #     FileType.DIA_MAINT_SUMMARY,
+    #     ("*_RSM_RawArchive/DIA_MAINTENANCE/*_maintenance_data/maint_summary_data.txt",),
+    # ),
+    # RuntimeFileSpec(
+    #     FileType.DIA_MAINT_DETAIL,
+    #     ("*_RSM_RawArchive/DIA_MAINTENANCE/*_maintenance_data/*_detailed_data.txt",),
+    # ),
+    # RuntimeFileSpec(
+    #     FileType.DIA_MAINT_STATUS,
+    #     (
+    #         "*_RSM_RawArchive/DIA_MAINTENANCE/*_maintenance_data/system_snapshot_fault_status.txt",
+    #     ),
+    # ),
 )
 
 
