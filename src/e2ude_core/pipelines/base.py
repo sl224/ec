@@ -6,7 +6,7 @@ from typing import Callable, List, Optional, Type
 import sqlalchemy as sa
 from e2ude_core.orchestration.spec import JobRunResult
 from e2ude_core.db import access as sql_io
-from e2ude_core.registry import HandlerSpec
+from e2ude_core.runtime_files import RuntimeFileSpec
 from e2ude_core.db.models import ArtifactManifest, Base, FileHashRegistry
 from e2ude_core.db.base_session import DEFAULT_SCHEMA
 
@@ -139,7 +139,7 @@ def _upload_single_table(eng: sa.Engine, model, df, hash_id: int, version: int):
 
 def process_file(
     eng: sa.Engine,
-    spec: HandlerSpec,
+    spec: RuntimeFileSpec,
     hash_id: int,
     file_path: Path,
     report_progress: Callable[[str], None],

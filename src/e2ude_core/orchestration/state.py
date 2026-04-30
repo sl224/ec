@@ -4,7 +4,7 @@ import logging
 from collections import defaultdict
 from dataclasses import dataclass
 from pathlib import Path
-from typing import Callable, Dict, Iterable, Tuple, Type
+from typing import Dict, Iterable, Tuple, Type
 
 import sqlalchemy as sa
 
@@ -44,6 +44,43 @@ class FileWorkPlan:
 class ArchiveRunPlan:
     summary: ArchiveSummary
     work_items: Tuple[FileWorkPlan, ...] = ()
+
+
+def summarize_archive_facts(
+    *,
+    is_present: bool,
+    completed_scan_version: int,
+    required_scan_version: int,
+    completed_handler_generation: str | None,
+    required_handler_generation: str,
+    stored_state: ArchiveStateEnum,
+    work_reason: str | None,
+) -> ArchiveSummary:
+    if not is_present:
+        return ArchiveSummary(
+            status=ArchiveStateEnum.UP_TO_DATE,
+            work_reason="Archive not present on source share",
+        )
+
+    if completed_scan_version < required_scan_version:
+        return ArchiveSummary(
+            status=ArchiveStateEnum.NEEDS_SCAN,
+            work_reason=work_reason or "Archive scan required",
+        )
+
+    if completed_handler_generation != required_handler_generation:
+        return ArchiveSummary(
+            status=ArchiveStateEnum.NEEDS_PROCESSING,
+            work_reason=work_reason or "Archive processing required",
+        )
+
+    if stored_state == ArchiveStateEnum.UP_TO_DATE:
+        return ArchiveSummary(status=ArchiveStateEnum.UP_TO_DATE)
+
+    return ArchiveSummary(
+        status=ArchiveStateEnum.NEEDS_PROCESSING,
+        work_reason=work_reason or "Archive processing required",
+    )
 
 
 def _fetch_archive_rows(
@@ -124,30 +161,14 @@ def _summarize_archive_row(row: sa.Row | None) -> ArchiveSummary:
             work_reason="Archive missing from inventory",
         )
 
-    if not row.is_present:
-        return ArchiveSummary(
-            status=ArchiveStateEnum.UP_TO_DATE,
-            work_reason="Archive not present on source share",
-        )
-
-    if row.completed_scan_version < row.required_scan_version:
-        return ArchiveSummary(
-            status=ArchiveStateEnum.NEEDS_SCAN,
-            work_reason=row.work_reason or "Archive scan required",
-        )
-
-    if row.completed_handler_generation != row.required_handler_generation:
-        return ArchiveSummary(
-            status=ArchiveStateEnum.NEEDS_PROCESSING,
-            work_reason=row.work_reason or "Archive processing required",
-        )
-
-    if row.state == ArchiveStateEnum.UP_TO_DATE:
-        return ArchiveSummary(status=ArchiveStateEnum.UP_TO_DATE)
-
-    return ArchiveSummary(
-        status=ArchiveStateEnum.NEEDS_PROCESSING,
-        work_reason=row.work_reason or "Archive processing required",
+    return summarize_archive_facts(
+        is_present=row.is_present,
+        completed_scan_version=row.completed_scan_version,
+        required_scan_version=row.required_scan_version,
+        completed_handler_generation=row.completed_handler_generation,
+        required_handler_generation=row.required_handler_generation,
+        stored_state=row.state,
+        work_reason=row.work_reason,
     )
 
 
@@ -246,45 +267,6 @@ def plan_archive_run(eng: sa.Engine, archive_id: int) -> ArchiveRunPlan:
         summary=ArchiveSummary(status=ArchiveStateEnum.NEEDS_PROCESSING),
         work_items=ordered_items,
     )
-
-
-def select_archives_requiring_work(
-    eng: sa.Engine,
-    archive_map: Dict[Path, int],
-    *,
-    batch_size: int = 5000,
-    progress_callback: Callable[[int], None] | None = None,
-) -> Dict[Path, int]:
-    """Return the archive subset whose summaries are not UP_TO_DATE."""
-    total = len(archive_map)
-    logger.info("Checking state for %s archives...", total)
-
-    needed: Dict[Path, int] = {}
-    all_paths = list(archive_map.keys())
-
-    for i in range(0, total, batch_size):
-        chunk_paths = all_paths[i : i + batch_size]
-        chunk_ids = [archive_map[path] for path in chunk_paths]
-
-        try:
-            summaries = summarize_archives_bulk(eng, chunk_ids)
-            for path, archive_id in zip(chunk_paths, chunk_ids):
-                summary = summaries.get(
-                    archive_id,
-                    ArchiveSummary(status=ArchiveStateEnum.NEEDS_SCAN),
-                )
-                if summary.status != ArchiveStateEnum.UP_TO_DATE:
-                    needed[path] = archive_id
-        except Exception as exc:
-            logger.error("Failed batch state check: %s", exc)
-            for path, archive_id in zip(chunk_paths, chunk_ids):
-                needed[path] = archive_id
-        finally:
-            if progress_callback is not None:
-                progress_callback(len(chunk_paths))
-
-    logger.info("State check complete. %s archives require processing.", len(needed))
-    return needed
 
 
 def load_archives_requiring_work(eng: sa.Engine) -> Dict[Path, int]:

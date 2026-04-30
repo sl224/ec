@@ -10,7 +10,6 @@ from dataclasses import dataclass
 from pathlib import Path
 from threading import BoundedSemaphore, Event
 from typing import Dict, List, Set
-from zipfile import ZipFile
 
 from tqdm import tqdm
 
@@ -24,6 +23,7 @@ from e2ude_core.orchestration.workflow import (
 )
 from e2ude_core.registry import HANDLER_REGISTRY
 from e2ude_core.runtime_files import FileType, build_active_stage_patterns
+from e2ude_core.services.zip_io import extract_transport_zip
 
 shutil.COPY_BUFSIZE = 4 * 1024 * 1024
 
@@ -35,11 +35,6 @@ def _resolve_active_patterns() -> List[str]:
     return build_active_stage_patterns(
         sorted(active_types, key=lambda file_type: file_type.value)
     )
-
-
-def _match_any(path_str: str, patterns: List[str]) -> bool:
-    candidate = Path(path_str)
-    return any(candidate.match(pattern) for pattern in patterns)
 
 
 def _worker_process_task(
@@ -221,36 +216,12 @@ class StagingPipeline:
             temp_zip_local = local_dir / "temp_source.zip"
             shutil.copyfile(zip_path, temp_zip_local)
 
-            with ZipFile(temp_zip_local) as zf:
-                targets = [
-                    member
-                    for member in zf.namelist()
-                    if _match_any(member, self.active_patterns)
-                    or member.endswith("RSM_RawArchive.zip")
-                ]
-                if targets:
-                    zf.extractall(local_dir, members=targets)
-
+            extract_transport_zip(
+                temp_zip_local,
+                local_dir,
+                active_patterns=self.active_patterns,
+            )
             temp_zip_local.unlink()
-
-            for nested_zip in local_dir.rglob("*RSM_RawArchive.zip"):
-                try:
-                    nested_root = nested_zip.with_suffix("")
-                    nested_root.mkdir(exist_ok=True)
-                    with ZipFile(nested_zip) as nested_archive:
-                        nested_targets = [
-                            name
-                            for name in nested_archive.namelist()
-                            if _match_any(
-                                nested_root.name + "/" + name, self.active_patterns
-                            )
-                        ]
-                        if nested_targets:
-                            nested_archive.extractall(
-                                nested_root, members=nested_targets
-                            )
-                finally:
-                    nested_zip.unlink()
 
             return StageOutcome(archive_id=archive_id, stage_path=local_dir)
         except Exception as exc:

@@ -25,6 +25,7 @@ from e2ude_core.db.models import (
 )
 from e2ude_core.pipelines.scanner import SCANNER_VERSION
 from e2ude_core.registry import CURRENT_HANDLER_GENERATION, HANDLER_REGISTRY
+from e2ude_core.orchestration.state import summarize_archive_facts
 from e2ude_core.services.discovery import (
     DiscoveredArchive,
     DiscoveryDirectorySnapshot,
@@ -371,34 +372,29 @@ def _build_archive_update(item: dict, existing: sa.Row, seen_at: datetime) -> di
         or existing.source_mtime_ns != item["source_mtime_ns"]
     )
 
-    needs_scan = changed_source or existing.completed_scan_version < SCANNER_VERSION
-    needs_processing = (
-        existing.completed_handler_generation != CURRENT_HANDLER_GENERATION
+    completed_scan_version = 0 if changed_source else existing.completed_scan_version
+    completed_handler_generation = (
+        None if changed_source else existing.completed_handler_generation
     )
-
-    next_state = existing.state
-    next_reason = existing.work_reason
-    completed_scan_version = existing.completed_scan_version
-    completed_handler_generation = existing.completed_handler_generation
-
     if changed_source:
-        next_state = ArchiveStateEnum.NEEDS_SCAN
-        next_reason = "Source archive changed"
-        completed_scan_version = 0
-        completed_handler_generation = None
-    elif needs_scan:
-        next_state = ArchiveStateEnum.NEEDS_SCAN
-        next_reason = "Scanner version changed"
-    elif needs_processing and existing.state == ArchiveStateEnum.UP_TO_DATE:
-        next_state = ArchiveStateEnum.NEEDS_PROCESSING
-        next_reason = "Handler generation changed"
-    elif existing.state == ArchiveStateEnum.NEEDS_PROCESSING:
-        next_state = ArchiveStateEnum.NEEDS_PROCESSING
-    elif existing.state == ArchiveStateEnum.NEEDS_SCAN:
-        next_state = ArchiveStateEnum.NEEDS_SCAN
+        reason = "Source archive changed"
+    elif completed_scan_version < SCANNER_VERSION:
+        reason = "Scanner version changed"
+    elif completed_handler_generation != CURRENT_HANDLER_GENERATION:
+        reason = "Handler generation changed"
     else:
-        next_state = ArchiveStateEnum.UP_TO_DATE
-        next_reason = None
+        reason = existing.work_reason
+
+    summary = summarize_archive_facts(
+        is_present=True,
+        completed_scan_version=completed_scan_version,
+        required_scan_version=SCANNER_VERSION,
+        completed_handler_generation=completed_handler_generation,
+        required_handler_generation=CURRENT_HANDLER_GENERATION,
+        stored_state=existing.state,
+        work_reason=reason,
+    )
+    next_reason = None if summary.status == ArchiveStateEnum.UP_TO_DATE else reason
 
     return {
         "b_id": existing.id,
@@ -412,7 +408,7 @@ def _build_archive_update(item: dict, existing: sa.Row, seen_at: datetime) -> di
         "b_completed_scan_version": completed_scan_version,
         "b_required_handler_generation": CURRENT_HANDLER_GENERATION,
         "b_completed_handler_generation": completed_handler_generation,
-        "b_state": next_state,
+        "b_state": summary.status,
         "b_work_reason": next_reason,
         "b_last_error_at": None,
         "b_last_error_message": None,

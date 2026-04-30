@@ -712,7 +712,6 @@ from e2ude_core.db.models import (
 from e2ude_core.db.setup import initialize_database, register_archives_bulk
 from e2ude_core.orchestration.state import (
     plan_archive_run,
-    select_archives_requiring_work,
     summarize_archive,
     summarize_archives_bulk,
 )
@@ -762,9 +761,6 @@ with eng.begin() as conn:
 summary = summarize_archive(eng, archive_id)
 bulk_summary = summarize_archives_bulk(eng, [archive_id])[archive_id]
 plan = plan_archive_run(eng, archive_id)
-pending_count = len(
-    select_archives_requiring_work(eng, {zip_path: archive_id})
-)
 missing_items = [
     [item.hash_id, model.__tablename__]
     for item in plan.work_items
@@ -776,7 +772,6 @@ print(
         {
             "bulk_status": bulk_summary.status.name,
             "summary_status": summary.status.name,
-            "pending_count": pending_count,
             "missing_items": missing_items,
             "work_items": [
                 {
@@ -804,7 +799,6 @@ print(
 
     assert payload["bulk_status"] == "NEEDS_PROCESSING"
     assert payload["summary_status"] == "NEEDS_PROCESSING"
-    assert payload["pending_count"] == 1
     assert payload["missing_items"]
     assert payload["work_items"] == [
         {
