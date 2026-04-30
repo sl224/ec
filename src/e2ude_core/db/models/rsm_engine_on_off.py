@@ -10,7 +10,7 @@ from e2ude_core.db.base_session import Base, schema_fkey
 DATETIME2_MS = DateTime().with_variant(DATETIME2(0), "mssql")
 
 class EngineOnOff(Base):
-    __tablename__ = "rsmdata_engine_on_off4"
+    __tablename__ = "rsmdata_engine_on_off5"
 
     # Use `schema_fkey` to create a schema-qualified foreign key reference.
     hash_id = Column(
