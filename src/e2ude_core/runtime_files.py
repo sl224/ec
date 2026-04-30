@@ -178,14 +178,14 @@ RUNTIME_FILE_SPECS: tuple[RuntimeFileSpec, ...] = (
     #     FileType.MAINT_PRM,
     #     ("*_RSM_RawArchive/RSM/*_MAINT_*/*_MAINT.prm",),
     # ),
-    RuntimeFileSpec(
-        FileType.TMPTR_LOG,
-        ("*_RSM_RawArchive/RSM/TMPTR_LOG",),
-        PipelineId("tmptr_log"),
-        1,
-        parse_tmptr_dataframe,
-        (TmptrData,),
-    ),
+    # RuntimeFileSpec(
+    #     FileType.TMPTR_LOG,
+    #     ("*_RSM_RawArchive/RSM/TMPTR_LOG",),
+    #     PipelineId("tmptr_log"),
+    #     1,
+    #     parse_tmptr_dataframe,
+    #     (TmptrData,),
+    # ),
     # RuntimeFileSpec(FileType.MAINT_LOG, ("*_RSM_RawArchive/RSM/MAINT_LOG",)),
     # RuntimeFileSpec(FileType.METADATA_CSV, ("*.csv",)),
     # RuntimeFileSpec(

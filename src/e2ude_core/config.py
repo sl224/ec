@@ -35,7 +35,8 @@ class SQLiteConfig(BaseModel):
 
 class MSSQLConfig(BaseModel):
     type: Literal["mssql"] = "mssql"
-    server_name: str = "localhost"
+    # server_name: str = "localhost"
+    server_name: str = "RSSC30-DB0140"
     db_name: str = "AnalyticsDataMart"
     driver: str = "ODBC Driver 17 for SQL Server"
     trusted_connection: str = "yes"
