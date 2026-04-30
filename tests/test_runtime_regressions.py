@@ -406,6 +406,32 @@ def test_register_archives_bulk_chunks_large_existing_path_lookups(
     assert [len(batch) for batch in seen_batches] == [2, 2, 1, 2, 2, 1]
 
 
+def test_register_archives_bulk_batches_new_archive_inserts(monkeypatch, tmp_path):
+    db_path = tmp_path / "register_insert_chunk.sqlite3"
+    eng = sa.create_engine(f"sqlite:///{db_path}")
+    ArchiveMetadata.__table__.create(eng)
+
+    zip_paths = [
+        tmp_path / f"16987{idx}_20231107_02421{idx}_{idx:03d}_TransportRSM.fpkg.e2d.zip"
+        for idx in range(5)
+    ]
+
+    insert_batch_sizes: list[int] = []
+
+    @sa.event.listens_for(eng, "before_cursor_execute")
+    def record_insert_batch(conn, cursor, statement, parameters, context, executemany):
+        if not statement.lstrip().lower().startswith("insert into metadata_archive"):
+            return
+        insert_batch_sizes.append(len(parameters) if executemany else 1)
+
+    monkeypatch.setattr(db_setup, "ARCHIVE_INSERT_BATCH_SIZE", 2)
+
+    archive_map = db_setup.register_archives_bulk(eng, zip_paths)
+
+    assert len(archive_map) == len(zip_paths)
+    assert insert_batch_sizes == [2, 2, 1]
+
+
 def test_incremental_discovery_enumerates_known_archives_each_run_for_correctness(
     tmp_path,
 ):

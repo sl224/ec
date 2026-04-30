@@ -34,6 +34,7 @@ from e2ude_core.services.discovery import (
 logger = logging.getLogger(__name__)
 
 ARCHIVE_LOOKUP_BATCH_SIZE = 1000
+ARCHIVE_INSERT_BATCH_SIZE = 1000
 ARCHIVE_NAME_PATTERN = re.compile(r"([0-9]+)_([0-9]{8}_[0-9]{6})")
 
 
@@ -345,14 +346,29 @@ def _insert_new_archives(conn: sa.Connection, rows: list[dict]) -> None:
         return
 
     insert_stmt = sa.insert(ArchiveMetadata)
-    for row in rows:
+    inserted_count = 0
+
+    for i in range(0, len(rows), ARCHIVE_INSERT_BATCH_SIZE):
+        batch = rows[i : i + ARCHIVE_INSERT_BATCH_SIZE]
         try:
-            conn.execute(insert_stmt.values(**row))
+            conn.execute(insert_stmt, batch)
         except IntegrityError:
-            # A concurrent refresh may have inserted this source_path after the
-            # prefetch step. Treat that as a benign race and let the final id
-            # reload pick up the existing row.
-            continue
+            logger.info(
+                "Archive batch insert hit an integrity race; falling back to "
+                "row-by-row insert for this %s-row batch.",
+                len(batch),
+            )
+            for row in batch:
+                try:
+                    conn.execute(insert_stmt.values(**row))
+                except IntegrityError:
+                    # A concurrent refresh may have inserted this source_path after the
+                    # prefetch step. Treat that as a benign race and let the final id
+                    # reload pick up the existing row.
+                    continue
+
+        inserted_count += len(batch)
+        logger.info("Inserted %s/%s new archive rows...", inserted_count, len(rows))
 
 
 def _mark_absent_archives_for_scanned_directories(
