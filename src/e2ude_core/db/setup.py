@@ -35,6 +35,7 @@ logger = logging.getLogger(__name__)
 
 ARCHIVE_LOOKUP_BATCH_SIZE = 1000
 ARCHIVE_INSERT_BATCH_SIZE = 1000
+DIRECTORY_SNAPSHOT_BATCH_SIZE = 1000
 ARCHIVE_NAME_PATTERN = re.compile(r"([0-9]+)_([0-9]{8}_[0-9]{6})")
 
 
@@ -167,6 +168,87 @@ def load_directory_scan_cache(
         }
 
 
+def _load_existing_directory_paths(
+    conn: sa.Connection, paths: Iterable[str]
+) -> set[str]:
+    existing: set[str] = set()
+    for batch in _iter_path_batches(paths, DIRECTORY_SNAPSHOT_BATCH_SIZE):
+        stmt = sa.select(DiscoveryDirectoryMetadata.path).where(
+            DiscoveryDirectoryMetadata.path.in_(batch)
+        )
+        existing.update(row.path for row in conn.execute(stmt))
+    return existing
+
+
+def _update_directory_snapshots(conn: sa.Connection, rows: list[dict]) -> None:
+    if not rows:
+        return
+
+    scanned_rows = [row for row in rows if row["b_last_scanned_at"] is not None]
+    unscanned_rows = [row for row in rows if row["b_last_scanned_at"] is None]
+
+    base_values = {
+        "mtime_ns": bindparam("b_mtime_ns"),
+        "contains_archives": bindparam("b_contains_archives"),
+        "last_checked_at": bindparam("b_last_checked_at"),
+    }
+
+    if unscanned_rows:
+        stmt = (
+            sa.update(DiscoveryDirectoryMetadata)
+            .where(DiscoveryDirectoryMetadata.path == bindparam("b_path"))
+            .values(**base_values)
+        )
+        for i in range(0, len(unscanned_rows), DIRECTORY_SNAPSHOT_BATCH_SIZE):
+            conn.execute(stmt, unscanned_rows[i : i + DIRECTORY_SNAPSHOT_BATCH_SIZE])
+
+    if scanned_rows:
+        stmt = (
+            sa.update(DiscoveryDirectoryMetadata)
+            .where(DiscoveryDirectoryMetadata.path == bindparam("b_path"))
+            .values(
+                **base_values,
+                last_scanned_at=bindparam("b_last_scanned_at"),
+            )
+        )
+        for i in range(0, len(scanned_rows), DIRECTORY_SNAPSHOT_BATCH_SIZE):
+            conn.execute(stmt, scanned_rows[i : i + DIRECTORY_SNAPSHOT_BATCH_SIZE])
+
+
+def _directory_insert_to_update_row(row: dict) -> dict:
+    return {
+        "b_path": row["path"],
+        "b_mtime_ns": row["mtime_ns"],
+        "b_contains_archives": row["contains_archives"],
+        "b_last_checked_at": row["last_checked_at"],
+        "b_last_scanned_at": row["last_scanned_at"],
+    }
+
+
+def _insert_directory_snapshots(conn: sa.Connection, rows: list[dict]) -> None:
+    if not rows:
+        return
+
+    insert_stmt = sa.insert(DiscoveryDirectoryMetadata)
+    for i in range(0, len(rows), DIRECTORY_SNAPSHOT_BATCH_SIZE):
+        batch = rows[i : i + DIRECTORY_SNAPSHOT_BATCH_SIZE]
+        try:
+            conn.execute(insert_stmt, batch)
+        except IntegrityError:
+            logger.info(
+                "Directory snapshot batch insert hit an integrity race; "
+                "falling back to row-by-row insert for this %s-row batch.",
+                len(batch),
+            )
+            for row in batch:
+                try:
+                    conn.execute(insert_stmt.values(**row))
+                except IntegrityError:
+                    _update_directory_snapshots(
+                        conn, [_directory_insert_to_update_row(row)]
+                    )
+
+
 def record_directory_snapshots(
     eng: sa.Engine,
     snapshots: Iterable[DiscoveryDirectorySnapshot],
@@ -181,45 +263,41 @@ def record_directory_snapshots(
     seen_at = datetime.now(UTC).replace(tzinfo=None)
 
     with eng.begin() as conn:
-        for snapshot in snapshot_list:
-            normalized_path = str(snapshot.path)
-            update_values = {
-                "mtime_ns": snapshot.mtime_ns,
-                "contains_archives": snapshot.contains_archives,
-                "last_checked_at": seen_at,
-            }
-            insert_values = {
-                "path": normalized_path,
-                "mtime_ns": snapshot.mtime_ns,
-                "contains_archives": snapshot.contains_archives,
-                "last_checked_at": seen_at,
-                "last_scanned_at": seen_at if snapshot.scanned else None,
-            }
-            if snapshot.scanned:
-                update_values["last_scanned_at"] = seen_at
+        snapshot_by_path = {str(snapshot.path): snapshot for snapshot in snapshot_list}
+        existing_paths = _load_existing_directory_paths(conn, snapshot_by_path.keys())
 
-            result = conn.execute(
-                sa.update(DiscoveryDirectoryMetadata)
-                .where(DiscoveryDirectoryMetadata.path == normalized_path)
-                .values(**update_values)
-            )
+        to_insert: list[dict] = []
+        to_update: list[dict] = []
 
-            if result.rowcount:
+        for normalized_path, snapshot in snapshot_by_path.items():
+            update_row = {
+                "b_path": normalized_path,
+                "b_mtime_ns": snapshot.mtime_ns,
+                "b_contains_archives": snapshot.contains_archives,
+                "b_last_checked_at": seen_at,
+                "b_last_scanned_at": seen_at if snapshot.scanned else None,
+            }
+            if normalized_path in existing_paths:
+                to_update.append(update_row)
                 continue
 
-            try:
-                conn.execute(
-                    sa.insert(DiscoveryDirectoryMetadata).values(**insert_values)
-                )
-            except IntegrityError:
-                conn.execute(
-                    sa.update(DiscoveryDirectoryMetadata)
-                    .where(DiscoveryDirectoryMetadata.path == normalized_path)
-                    .values(**update_values)
-                )
+            to_insert.append(
+                {
+                    "path": normalized_path,
+                    "mtime_ns": snapshot.mtime_ns,
+                    "contains_archives": snapshot.contains_archives,
+                    "last_checked_at": seen_at,
+                    "last_scanned_at": seen_at if snapshot.scanned else None,
+                }
+            )
+
+        _update_directory_snapshots(conn, to_update)
+        _insert_directory_snapshots(conn, to_insert)
 
         if missing_path_list:
-            for batch in _iter_path_batches(missing_path_list):
+            for batch in _iter_path_batches(
+                missing_path_list, DIRECTORY_SNAPSHOT_BATCH_SIZE
+            ):
                 conn.execute(
                     DiscoveryDirectoryMetadata.__table__.delete().where(
                         DiscoveryDirectoryMetadata.path.in_(batch)

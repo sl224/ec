@@ -11,6 +11,7 @@ import sqlalchemy as sa
 import e2ude_core.main as app_main
 import e2ude_core.db.setup as db_setup
 from e2ude_core.db.models import ArchiveMetadata, ArchiveStateEnum, PfcDb, SegmentsData
+from e2ude_core.db.models import DiscoveryDirectoryMetadata
 from e2ude_core.db.schema_safety import (
     SchemaClassification,
     format_target_banner,
@@ -29,7 +30,11 @@ from e2ude_core.runtime_files import (
     compute_metadata_catalog_generation,
 )
 from e2ude_core.pipelines.scanner import SCANNER_VERSION
-from e2ude_core.services.discovery import DiscoveryMode, discover_archives
+from e2ude_core.services.discovery import (
+    DiscoveryDirectorySnapshot,
+    DiscoveryMode,
+    discover_archives,
+)
 
 
 def test_build_job_target_hashes_multi_table_batches_stably():
@@ -430,6 +435,71 @@ def test_register_archives_bulk_batches_new_archive_inserts(monkeypatch, tmp_pat
 
     assert len(archive_map) == len(zip_paths)
     assert insert_batch_sizes == [2, 2, 1]
+
+
+def test_record_directory_snapshots_batches_inserts_and_preserves_scan_time(
+    monkeypatch, tmp_path
+):
+    db_path = tmp_path / "directory_snapshot_chunk.sqlite3"
+    eng = sa.create_engine(f"sqlite:///{db_path}")
+    DiscoveryDirectoryMetadata.__table__.create(eng)
+
+    snapshots = [
+        DiscoveryDirectorySnapshot(
+            path=tmp_path / f"dir_{idx}",
+            mtime_ns=idx,
+            contains_archives=idx % 2 == 0,
+            scanned=idx % 2 == 0,
+        )
+        for idx in range(5)
+    ]
+
+    insert_batch_sizes: list[int] = []
+
+    @sa.event.listens_for(eng, "before_cursor_execute")
+    def record_insert_batch(conn, cursor, statement, parameters, context, executemany):
+        if not statement.lstrip().lower().startswith(
+            "insert into metadata_discovery_directory"
+        ):
+            return
+        insert_batch_sizes.append(len(parameters) if executemany else 1)
+
+    monkeypatch.setattr(db_setup, "DIRECTORY_SNAPSHOT_BATCH_SIZE", 2)
+
+    db_setup.record_directory_snapshots(eng, snapshots)
+
+    assert insert_batch_sizes == [2, 2, 1]
+
+    scanned_path = str(snapshots[0].path)
+    with eng.connect() as conn:
+        first_scan_time = conn.execute(
+            sa.select(DiscoveryDirectoryMetadata.last_scanned_at).where(
+                DiscoveryDirectoryMetadata.path == scanned_path
+            )
+        ).scalar_one()
+
+    db_setup.record_directory_snapshots(
+        eng,
+        [
+            DiscoveryDirectorySnapshot(
+                path=snapshots[0].path,
+                mtime_ns=999,
+                contains_archives=True,
+                scanned=False,
+            )
+        ],
+    )
+
+    with eng.connect() as conn:
+        updated = conn.execute(
+            sa.select(
+                DiscoveryDirectoryMetadata.mtime_ns,
+                DiscoveryDirectoryMetadata.last_scanned_at,
+            ).where(DiscoveryDirectoryMetadata.path == scanned_path)
+        ).one()
+
+    assert updated.mtime_ns == 999
+    assert updated.last_scanned_at == first_scan_time
 
 
 def test_incremental_discovery_enumerates_known_archives_each_run_for_correctness(
