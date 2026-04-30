@@ -1,5 +1,6 @@
 import sys
 import os
+import tempfile
 from typing import Union, Literal, Tuple, Callable, Type, Optional
 from pathlib import Path
 
@@ -50,12 +51,17 @@ class MSSQLConfig(BaseModel):
 DatabaseConfig = Union[SQLiteConfig, MSSQLConfig]
 
 
+def _default_staging_root() -> Path:
+    return Path(tempfile.gettempdir()) / "e2ude_core_staging"
+
+
 class PathsConfig(BaseModel):
     scan_root: Path | None = None
-    staging_root: Path = Path("temp_staging")
+    staging_root: Path = Field(default_factory=_default_staging_root)
 
 
 class RuntimeConfig(BaseModel):
+    discovery_mode: Literal["incremental", "reconcile"] = "incremental"
     discovery_workers: int = Field(default=1024, gt=0)
     pipeline_buffer_size: int = Field(default=60, gt=0)
     unzip_workers: int = Field(default=60, gt=0)

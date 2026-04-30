@@ -40,7 +40,7 @@ class ProcessingSession(Base):
     __tablename__ = "processing_sessions"
     id = Column(Integer, primary_key=True)
 
-    folder_id = Column(Integer, nullable=False, index=True)
+    archive_id = Column(Integer, nullable=False, index=True)
     git_hash = Column(String(40), nullable=True, index=True)
     user_name = Column(String(40), nullable=True)
     host_name = Column(String(40), nullable=True)

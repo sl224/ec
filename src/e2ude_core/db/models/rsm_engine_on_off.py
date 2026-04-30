@@ -1,4 +1,4 @@
-from sqlalchemy import Column, Integer, Float, Boolean, String, ForeignKey
+from sqlalchemy import Column, Integer, String, ForeignKey
 from sqlalchemy.dialects.mssql import DATETIME2
 from sqlalchemy.sql.sqltypes import DateTime
 
@@ -8,6 +8,7 @@ from e2ude_core.db.base_session import Base, schema_fkey
 
 # DATETIME2 variant for MSSQL compatibility.
 DATETIME2_MS = DateTime().with_variant(DATETIME2(0), "mssql")
+
 
 class EngineOnOff(Base):
     __tablename__ = "rsmdata_engine_on_off5"
@@ -27,4 +28,3 @@ class EngineOnOff(Base):
     # run_time = Column("run_time", DateTime)
     segment_number = Column("segment_number", Integer)
     ifpm_version = Column("ifpm_version", String)
-     

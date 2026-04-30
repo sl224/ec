@@ -1,11 +1,11 @@
-# Copy this file to `e2ude_config.toml` on the shared refresh machine.
+# Copy this file to `e2ude_config.toml` on any machine you use for routine refreshes.
 # `scripts/refresh-data.ps1` will override only `database.schema_name`
 # so operators explicitly choose `dev` or `prod` on each run.
 
 worker_threads = 64
 
 [database]
-type = "mssql" 
+type = "mssql"
 server_name = "<shared-sql-server>" # "RSSC30-DB0140"
 db_name = "<shared-sql-database>" # "AnalyticsDataMart"
 driver = "ODBC Driver 17 for SQL Server"
@@ -16,9 +16,12 @@ schema_name = "e2ude_core_dev"
 # The shared scan root is already provided by repo defaults. Keep it only if
 # you want the refresh machine config to make the source explicit.
 scan_root = "\\\\Rsiny1-ilsfs\\RSM"
-staging_root = "temp_staging"
+# Optional. If omitted, refresh runs stage under the OS temp area in an
+# `e2ude_core_staging` subdirectory. Set this only if you need a specific disk.
+# staging_root = "D:/E2UDE_STAGING"
 
 [runtime]
+discovery_mode = "incremental"
 discovery_workers = 1024
 pipeline_buffer_size = 60
 unzip_workers = 60

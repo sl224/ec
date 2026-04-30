@@ -24,9 +24,12 @@ in_memory = false
 # This matches the committed repo defaults. Override it if you want to
 # scan a local mirror instead of the shared production location.
 scan_root = "\\\\Rsiny1-ilsfs\\RSM"
-staging_root = "temp_staging"
+# Optional. If omitted, staging defaults to the OS temp area under
+# an `e2ude_core_staging` subdirectory.
+# staging_root = "D:/E2UDE_STAGING"
 
 [runtime]
+discovery_mode = "incremental"
 discovery_workers = 1024
 pipeline_buffer_size = 60
 unzip_workers = 60

@@ -3,37 +3,30 @@ from __future__ import annotations
 import logging
 from collections import defaultdict
 from dataclasses import dataclass
-from enum import Enum, auto
 from pathlib import Path
-from typing import Callable, Dict, Iterable, List, Optional, Tuple, Type
+from typing import Callable, Dict, Iterable, Tuple, Type
 
 import sqlalchemy as sa
 
 from e2ude_core.db.base_session import Base
 from e2ude_core.db.models import (
+    ArchiveMetadata,
+    ArchiveStateEnum,
     ArtifactManifest,
     FileMetadata,
-    ProcessingJob,
-    ProcessingSession,
-    StatusEnum,
 )
-from e2ude_core.pipelines.scanner import SCANNER_PIPELINE_ID
-from e2ude_core.registry import HANDLER_REGISTRY
+from e2ude_core.registry import CURRENT_HANDLER_GENERATION, HANDLER_REGISTRY
 from e2ude_core.runtime_files import FileType, PipelineId, coerce_file_type
 
 logger = logging.getLogger(__name__)
 
-
-class FolderState(Enum):
-    UP_TO_DATE = auto()
-    INCOMPLETE = auto()
-    NEEDS_SCAN = auto()
+SQL_BATCH_SIZE = 2000
 
 
 @dataclass(frozen=True)
-class FolderSummary:
-    status: FolderState
-    scan_reason: Optional[str] = None
+class ArchiveSummary:
+    status: ArchiveStateEnum
+    work_reason: str | None = None
 
 
 @dataclass(frozen=True)
@@ -48,64 +41,58 @@ class FileWorkPlan:
 
 
 @dataclass(frozen=True)
-class FolderRunPlan:
-    summary: FolderSummary
+class ArchiveRunPlan:
+    summary: ArchiveSummary
     work_items: Tuple[FileWorkPlan, ...] = ()
 
 
-SQL_BATCH_SIZE = 2000
-
-
-def _fetch_completed_scan_versions(
-    conn: sa.Connection, folder_ids: Iterable[int]
-) -> Dict[int, int]:
-    folder_id_list = list(folder_ids)
-    if not folder_id_list:
+def _fetch_archive_rows(
+    conn: sa.Connection, archive_ids: Iterable[int]
+) -> Dict[int, sa.Row]:
+    archive_id_list = list(archive_ids)
+    if not archive_id_list:
         return {}
 
-    versions: Dict[int, int] = {}
-    for i in range(0, len(folder_id_list), SQL_BATCH_SIZE):
-        batch = folder_id_list[i : i + SQL_BATCH_SIZE]
-        query = (
-            sa.select(
-                ProcessingSession.folder_id,
-                sa.func.max(ProcessingJob.handler_version).label("scan_version"),
-            )
-            .join(ProcessingJob, ProcessingJob.session_id == ProcessingSession.id)
-            .where(
-                ProcessingSession.folder_id.in_(batch),
-                ProcessingJob.pipeline_id == SCANNER_PIPELINE_ID.value,
-                ProcessingJob.status == StatusEnum.COMPLETED,
-            )
-            .group_by(ProcessingSession.folder_id)
-        )
-        for row in conn.execute(query):
-            versions[row.folder_id] = row.scan_version
-
-    return versions
-
-
-def _fetch_folder_files(
-    conn: sa.Connection, folder_ids: Iterable[int]
-) -> Dict[int, list]:
-    folder_id_list = list(folder_ids)
-    if not folder_id_list:
-        return {}
-
-    folder_files = defaultdict(list)
-    for i in range(0, len(folder_id_list), SQL_BATCH_SIZE):
-        batch = folder_id_list[i : i + SQL_BATCH_SIZE]
+    rows: Dict[int, sa.Row] = {}
+    for i in range(0, len(archive_id_list), SQL_BATCH_SIZE):
+        batch = archive_id_list[i : i + SQL_BATCH_SIZE]
         query = sa.select(
-            FileMetadata.folder_id,
+            ArchiveMetadata.id,
+            ArchiveMetadata.state,
+            ArchiveMetadata.work_reason,
+            ArchiveMetadata.required_scan_version,
+            ArchiveMetadata.completed_scan_version,
+            ArchiveMetadata.required_handler_generation,
+            ArchiveMetadata.completed_handler_generation,
+            ArchiveMetadata.is_present,
+        ).where(ArchiveMetadata.id.in_(batch))
+        for row in conn.execute(query):
+            rows[row.id] = row
+
+    return rows
+
+
+def _fetch_archive_files(
+    conn: sa.Connection, archive_ids: Iterable[int]
+) -> Dict[int, list]:
+    archive_id_list = list(archive_ids)
+    if not archive_id_list:
+        return {}
+
+    archive_files = defaultdict(list)
+    for i in range(0, len(archive_id_list), SQL_BATCH_SIZE):
+        batch = archive_id_list[i : i + SQL_BATCH_SIZE]
+        query = sa.select(
+            FileMetadata.archive_id,
             FileMetadata.id,
             FileMetadata.hash_id,
             FileMetadata.file_type,
             FileMetadata.relative_path,
-        ).where(FileMetadata.folder_id.in_(batch))
+        ).where(FileMetadata.archive_id.in_(batch))
         for row in conn.execute(query):
-            folder_files[row.folder_id].append(row)
+            archive_files[row.archive_id].append(row)
 
-    return folder_files
+    return archive_files
 
 
 def _fetch_artifact_versions(
@@ -130,108 +117,80 @@ def _fetch_artifact_versions(
     return artifacts
 
 
-def summarize_folders_bulk(
-    eng: sa.Engine, folder_ids: List[int], scan_version: int
-) -> Dict[int, FolderSummary]:
-    if not folder_ids:
-        return {}
-
-    results = {
-        folder_id: FolderSummary(status=FolderState.NEEDS_SCAN)
-        for folder_id in folder_ids
-    }
-
-    with eng.connect() as conn:
-        scan_versions = _fetch_completed_scan_versions(conn, folder_ids)
-
-        ready_for_data_check = [
-            folder_id
-            for folder_id in folder_ids
-            if scan_versions.get(folder_id, 0) >= scan_version
-        ]
-
-        if not ready_for_data_check:
-            return results
-
-        folder_files = _fetch_folder_files(conn, ready_for_data_check)
-        artifacts = _fetch_artifact_versions(
-            conn,
-            (row.hash_id for rows in folder_files.values() for row in rows),
+def _summarize_archive_row(row: sa.Row | None) -> ArchiveSummary:
+    if row is None:
+        return ArchiveSummary(
+            status=ArchiveStateEnum.NEEDS_SCAN,
+            work_reason="Archive missing from inventory",
         )
 
-    for folder_id in ready_for_data_check:
-        files = folder_files.get(folder_id, [])
-        if not files:
-            results[folder_id] = FolderSummary(status=FolderState.UP_TO_DATE)
-            continue
-
-        seen_keys: set[tuple[int, FileType]] = set()
-        status = FolderState.UP_TO_DATE
-        for row in files:
-            file_type = coerce_file_type(row.file_type)
-            dedupe_key = (row.hash_id, file_type)
-            if dedupe_key in seen_keys:
-                continue
-            seen_keys.add(dedupe_key)
-
-            handler_spec = HANDLER_REGISTRY.get(file_type)
-            if not handler_spec:
-                continue
-
-            actual_tables = artifacts.get(row.hash_id, {})
-            if any(
-                actual_tables.get(model.__tablename__, 0) < handler_spec.version
-                for model in handler_spec.expected_models
-            ):
-                status = FolderState.INCOMPLETE
-                break
-
-        results[folder_id] = FolderSummary(status=status)
-
-    return results
-
-
-def summarize_folder(
-    eng: sa.Engine, folder_id: int, scan_version: int = 1
-) -> FolderSummary:
-    with eng.connect() as conn:
-        current_scan_version = _fetch_completed_scan_versions(conn, [folder_id]).get(
-            folder_id
+    if not row.is_present:
+        return ArchiveSummary(
+            status=ArchiveStateEnum.UP_TO_DATE,
+            work_reason="Archive not present on source share",
         )
 
-    if current_scan_version is None:
-        return FolderSummary(
-            status=FolderState.NEEDS_SCAN,
-            scan_reason="New Folder",
+    if row.completed_scan_version < row.required_scan_version:
+        return ArchiveSummary(
+            status=ArchiveStateEnum.NEEDS_SCAN,
+            work_reason=row.work_reason or "Archive scan required",
         )
 
-    if current_scan_version < scan_version:
-        return FolderSummary(
-            status=FolderState.NEEDS_SCAN,
-            scan_reason="Outdated Scan",
+    if row.completed_handler_generation != row.required_handler_generation:
+        return ArchiveSummary(
+            status=ArchiveStateEnum.NEEDS_PROCESSING,
+            work_reason=row.work_reason or "Archive processing required",
         )
 
-    return summarize_folders_bulk(eng, [folder_id], scan_version).get(
-        folder_id, FolderSummary(status=FolderState.NEEDS_SCAN)
+    if row.state == ArchiveStateEnum.UP_TO_DATE:
+        return ArchiveSummary(status=ArchiveStateEnum.UP_TO_DATE)
+
+    return ArchiveSummary(
+        status=ArchiveStateEnum.NEEDS_PROCESSING,
+        work_reason=row.work_reason or "Archive processing required",
     )
 
 
-def plan_folder_run(
-    eng: sa.Engine, folder_id: int, scan_version: int = 1
-) -> FolderRunPlan:
-    summary = summarize_folder(eng, folder_id, scan_version)
-    if summary.status == FolderState.NEEDS_SCAN:
-        return FolderRunPlan(summary=summary)
+def summarize_archives_bulk(
+    eng: sa.Engine,
+    archive_ids: list[int],
+) -> Dict[int, ArchiveSummary]:
+    if not archive_ids:
+        return {}
 
     with eng.connect() as conn:
-        file_rows = _fetch_folder_files(conn, [folder_id]).get(folder_id, [])
+        archive_rows = _fetch_archive_rows(conn, archive_ids)
+
+    return {
+        archive_id: _summarize_archive_row(archive_rows.get(archive_id))
+        for archive_id in archive_ids
+    }
+
+
+def summarize_archive(eng: sa.Engine, archive_id: int) -> ArchiveSummary:
+    return summarize_archives_bulk(eng, [archive_id]).get(
+        archive_id,
+        ArchiveSummary(
+            status=ArchiveStateEnum.NEEDS_SCAN,
+            work_reason="Archive missing from inventory",
+        ),
+    )
+
+
+def plan_archive_run(eng: sa.Engine, archive_id: int) -> ArchiveRunPlan:
+    summary = summarize_archive(eng, archive_id)
+    if summary.status == ArchiveStateEnum.NEEDS_SCAN:
+        return ArchiveRunPlan(summary=summary)
+
+    with eng.connect() as conn:
+        file_rows = _fetch_archive_files(conn, [archive_id]).get(archive_id, [])
         artifact_versions = _fetch_artifact_versions(
             conn, (row.hash_id for row in file_rows)
         )
 
     if not file_rows:
-        return FolderRunPlan(
-            summary=FolderSummary(status=FolderState.UP_TO_DATE),
+        return ArchiveRunPlan(
+            summary=ArchiveSummary(status=ArchiveStateEnum.UP_TO_DATE),
             work_items=(),
         )
 
@@ -275,54 +234,122 @@ def plan_folder_run(
         )
 
     if not work_items:
-        return FolderRunPlan(
-            summary=FolderSummary(status=FolderState.UP_TO_DATE),
+        return ArchiveRunPlan(
+            summary=ArchiveSummary(status=ArchiveStateEnum.UP_TO_DATE),
             work_items=(),
         )
 
     ordered_items = tuple(
         sorted(work_items, key=lambda item: (item.relative_path, item.file_type.value))
     )
-    return FolderRunPlan(
-        summary=FolderSummary(status=FolderState.INCOMPLETE),
+    return ArchiveRunPlan(
+        summary=ArchiveSummary(status=ArchiveStateEnum.NEEDS_PROCESSING),
         work_items=ordered_items,
     )
 
 
-def select_folders_requiring_work(
+def select_archives_requiring_work(
     eng: sa.Engine,
-    folder_map: Dict[Path, int],
-    scan_version: int,
+    archive_map: Dict[Path, int],
     *,
     batch_size: int = 5000,
     progress_callback: Callable[[int], None] | None = None,
 ) -> Dict[Path, int]:
-    """Return the folder subset whose summaries are not UP_TO_DATE."""
-    total = len(folder_map)
-    logger.info("Checking state for %s folders (Bulk Mode)...", total)
+    """Return the archive subset whose summaries are not UP_TO_DATE."""
+    total = len(archive_map)
+    logger.info("Checking state for %s archives...", total)
 
     needed: Dict[Path, int] = {}
-    all_paths = list(folder_map.keys())
+    all_paths = list(archive_map.keys())
 
     for i in range(0, total, batch_size):
         chunk_paths = all_paths[i : i + batch_size]
-        chunk_ids = [folder_map[path] for path in chunk_paths]
+        chunk_ids = [archive_map[path] for path in chunk_paths]
 
         try:
-            summaries = summarize_folders_bulk(eng, chunk_ids, scan_version)
-            for path, folder_id in zip(chunk_paths, chunk_ids):
+            summaries = summarize_archives_bulk(eng, chunk_ids)
+            for path, archive_id in zip(chunk_paths, chunk_ids):
                 summary = summaries.get(
-                    folder_id, FolderSummary(status=FolderState.NEEDS_SCAN)
+                    archive_id,
+                    ArchiveSummary(status=ArchiveStateEnum.NEEDS_SCAN),
                 )
-                if summary.status != FolderState.UP_TO_DATE:
-                    needed[path] = folder_id
+                if summary.status != ArchiveStateEnum.UP_TO_DATE:
+                    needed[path] = archive_id
         except Exception as exc:
             logger.error("Failed batch state check: %s", exc)
-            for path, folder_id in zip(chunk_paths, chunk_ids):
-                needed[path] = folder_id
+            for path, archive_id in zip(chunk_paths, chunk_ids):
+                needed[path] = archive_id
         finally:
             if progress_callback is not None:
                 progress_callback(len(chunk_paths))
 
-    logger.info("State check complete. %s folders require processing.", len(needed))
+    logger.info("State check complete. %s archives require processing.", len(needed))
     return needed
+
+
+def load_archives_requiring_work(eng: sa.Engine) -> Dict[Path, int]:
+    """Load all present archives whose canonical work state is not up to date."""
+    with eng.connect() as conn:
+        rows = conn.execute(
+            sa.select(ArchiveMetadata.id, ArchiveMetadata.source_path).where(
+                ArchiveMetadata.is_present == sa.true(),
+                ArchiveMetadata.state != ArchiveStateEnum.UP_TO_DATE,
+            )
+        ).fetchall()
+
+    return {Path(row.source_path): row.id for row in rows}
+
+
+def mark_archive_scan_complete(
+    eng: sa.Engine,
+    archive_id: int,
+    *,
+    work_reason: str | None = None,
+) -> None:
+    with eng.begin() as conn:
+        conn.execute(
+            sa.update(ArchiveMetadata)
+            .where(ArchiveMetadata.id == archive_id)
+            .values(
+                completed_scan_version=ArchiveMetadata.required_scan_version,
+                state=ArchiveStateEnum.NEEDS_PROCESSING,
+                work_reason=work_reason,
+                last_error_at=None,
+                last_error_message=None,
+            )
+        )
+
+
+def mark_archive_processing_complete(eng: sa.Engine, archive_id: int) -> None:
+    with eng.begin() as conn:
+        conn.execute(
+            sa.update(ArchiveMetadata)
+            .where(ArchiveMetadata.id == archive_id)
+            .values(
+                completed_handler_generation=CURRENT_HANDLER_GENERATION,
+                state=ArchiveStateEnum.UP_TO_DATE,
+                work_reason=None,
+                last_success_at=sa.func.now(),
+                last_error_at=None,
+                last_error_message=None,
+            )
+        )
+
+
+def mark_archive_error(
+    eng: sa.Engine,
+    archive_id: int,
+    *,
+    state: ArchiveStateEnum,
+    error_message: str,
+) -> None:
+    with eng.begin() as conn:
+        conn.execute(
+            sa.update(ArchiveMetadata)
+            .where(ArchiveMetadata.id == archive_id)
+            .values(
+                state=state,
+                last_error_at=sa.func.now(),
+                last_error_message=error_message,
+            )
+        )

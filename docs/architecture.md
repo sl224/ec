@@ -4,10 +4,10 @@
 
 The runtime path is:
 
-1. `src/e2ude_core/main.py` discovers transport archives and registers folders.
-2. `src/e2ude_core/orchestration/state.py` decides which folders need work and builds per-folder plans.
+1. `src/e2ude_core/main.py` relists known archive directories, checks the non-archive directory frontier for membership changes, records directory snapshots in `metadata_discovery_directory`, and upserts archive inventory/work state.
+2. `src/e2ude_core/orchestration/state.py` decides which archives need work and builds per-archive plans.
 3. `src/e2ude_core/orchestration/pipeline.py` stages the files needed for active handlers and owns worker cleanup.
-4. `src/e2ude_core/orchestration/workflow.py` runs one folder end to end and returns a folder-level result.
+4. `src/e2ude_core/orchestration/workflow.py` runs one archive end to end and returns an archive-level result.
 5. `src/e2ude_core/pipelines/base.py` writes target tables and artifact metadata.
 
 ## Key Modules
@@ -18,14 +18,15 @@ The runtime path is:
 | Runtime file specs | `src/e2ude_core/runtime_files.py` |
 | Handler lookup | `src/e2ude_core/registry.py` |
 | File typing and hashing | `src/e2ude_core/services/file_catalog.py` |
-| Folder planning | `src/e2ude_core/orchestration/state.py` |
-| Folder execution | `src/e2ude_core/orchestration/workflow.py` |
+| Archive planning | `src/e2ude_core/orchestration/state.py` |
+| Archive execution | `src/e2ude_core/orchestration/workflow.py` |
 | Session/job persistence | `src/e2ude_core/orchestration/managers.py` |
 | Parser execution and upload | `src/e2ude_core/pipelines/base.py` |
 
 ## Core Tables
 
-- `metadata_folder`
+- `metadata_archive`
+- `metadata_discovery_directory`
 - `metadata_hash_registry`
 - `metadata_file`
 - `metadata_artifact_manifest`

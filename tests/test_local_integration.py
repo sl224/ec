@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import json
+import os
 import subprocess
 import shutil
 import sys
@@ -39,6 +40,83 @@ def _write_transport_rsm_zip(zip_path, *, tmptr_payload: str):
         outer_zip.writestr(raw_archive_name, nested_buffer.getvalue())
 
 
+def _write_archive_copies(source_zip, scan_root, *, count: int):
+    created = []
+    for i in range(count):
+        zip_path = scan_root / (
+            f"169871_202311{7 + i:02d}_024218_000_TransportRSM.fpkg.e2d.zip"
+        )
+        shutil.copy2(source_zip, zip_path)
+        created.append(zip_path)
+    return created
+
+
+def _build_repo_env(repo_root, extra_env=None):
+    env = os.environ.copy()
+    env["PYTHONPATH"] = str(repo_root / "src") + os.pathsep + env.get("PYTHONPATH", "")
+    if extra_env:
+        env.update({key: str(value) for key, value in extra_env.items()})
+    return env
+
+
+def _load_mssql_schema_metrics(run_repo_python, extra_env):
+    payload = run_repo_python(
+        """
+import json
+import sqlalchemy as sa
+from e2ude_core.config import settings
+from e2ude_core.db.access import get_engine
+from e2ude_core.db.base_session import DEFAULT_SCHEMA
+
+eng = get_engine(settings.database)
+with eng.connect() as conn:
+    table_names = [
+        row.name
+        for row in conn.execute(
+            sa.text(
+                '''
+                SELECT t.name
+                FROM sys.tables AS t
+                INNER JOIN sys.schemas AS s ON s.schema_id = t.schema_id
+                WHERE s.name = :schema_name
+                ORDER BY t.name
+                '''
+            ),
+            {"schema_name": DEFAULT_SCHEMA},
+        ).fetchall()
+    ]
+    data_tables = [name for name in table_names if name.startswith("rsmdata_")]
+    data_counts = {
+        table_name: conn.execute(
+            sa.text(f"SELECT COUNT(*) FROM [{DEFAULT_SCHEMA}].[{table_name}]")
+        ).scalar_one()
+        for table_name in data_tables
+    }
+    artifact_rows = conn.execute(
+        sa.text(
+            f"SELECT target_table, COUNT(*) AS artifact_count "
+            f"FROM [{DEFAULT_SCHEMA}].[metadata_artifact_manifest] "
+            f"GROUP BY target_table"
+        )
+    ).fetchall()
+    payload = {
+        "archive_rows": conn.execute(sa.text(f"SELECT COUNT(*) FROM [{DEFAULT_SCHEMA}].[metadata_archive]")).scalar_one(),
+        "sessions": conn.execute(sa.text(f"SELECT COUNT(*) FROM [{DEFAULT_SCHEMA}].[processing_sessions]")).scalar_one(),
+        "error_sessions": conn.execute(sa.text(f"SELECT COUNT(*) FROM [{DEFAULT_SCHEMA}].[processing_sessions] WHERE status = 'ERROR'")).scalar_one(),
+        "error_jobs": conn.execute(sa.text(f"SELECT COUNT(*) FROM [{DEFAULT_SCHEMA}].[processing_jobs] WHERE status = 'ERROR'")).scalar_one(),
+        "hashes": conn.execute(sa.text(f"SELECT COUNT(*) FROM [{DEFAULT_SCHEMA}].[metadata_hash_registry]")).scalar_one(),
+        "artifacts_total": conn.execute(sa.text(f"SELECT COUNT(*) FROM [{DEFAULT_SCHEMA}].[metadata_artifact_manifest]")).scalar_one(),
+        "artifact_counts": {row.target_table: row.artifact_count for row in artifact_rows},
+        "data_counts": data_counts,
+    }
+
+print(json.dumps(payload))
+""",
+        extra_env,
+    ).stdout.strip()
+    return json.loads(payload)
+
+
 def test_fixture_pipeline_smoke_sqlite(local_fixture_root, run_repo_python, tmp_path):
     fixture_zip = _first_fixture_zip(local_fixture_root)
     sqlite_path = tmp_path / "fixture_smoke.sqlite3"
@@ -51,17 +129,17 @@ from e2ude_core.config import settings
 from e2ude_core.context import EtlContext
 from e2ude_core.db.access import get_engine
 from e2ude_core.db.models import LcsTemp, PfcDb
-from e2ude_core.db.setup import initialize_database, register_folders_bulk
-from e2ude_core.orchestration.workflow import process_staged_directory
+from e2ude_core.db.setup import initialize_database, register_archives_bulk
+from e2ude_core.orchestration.workflow import process_staged_archive
 from e2ude_core.services.zip_io import UnzipContext
 
 zip_path = Path(os.environ["E2UDE_TEST_FIXTURE_ZIP"])
 eng = get_engine(settings.database)
 initialize_database(eng, reset_tables=True)
-folder_id = register_folders_bulk(eng, [zip_path])[zip_path]
+archive_id = register_archives_bulk(eng, [zip_path])[zip_path]
 
 with UnzipContext(zip_path) as ctx:
-    process_staged_directory(eng, folder_id, Path(ctx.temp_dir), EtlContext.capture())
+    process_staged_archive(eng, archive_id, Path(ctx.temp_dir), EtlContext.capture())
 
 with eng.connect() as conn:
     counts = {
@@ -232,8 +310,8 @@ from e2ude_core.context import EtlContext
 from e2ude_core.db.access import get_engine
 from e2ude_core.db.base_session import Base, DEFAULT_SCHEMA
 from e2ude_core.db.models import LcsTemp, PfcDb
-from e2ude_core.db.setup import initialize_database, register_folders_bulk
-from e2ude_core.orchestration.workflow import process_staged_directory
+from e2ude_core.db.setup import initialize_database, register_archives_bulk
+from e2ude_core.orchestration.workflow import process_staged_archive
 from e2ude_core.services.zip_io import UnzipContext
 
 zip_path = Path(os.environ["E2UDE_TEST_FIXTURE_ZIP"])
@@ -241,10 +319,10 @@ eng = get_engine(settings.database)
 
 try:
     initialize_database(eng, reset_tables=False)
-    folder_id = register_folders_bulk(eng, [zip_path])[zip_path]
+    archive_id = register_archives_bulk(eng, [zip_path])[zip_path]
 
     with UnzipContext(zip_path) as ctx:
-        process_staged_directory(eng, folder_id, Path(ctx.temp_dir), EtlContext.capture())
+        process_staged_archive(eng, archive_id, Path(ctx.temp_dir), EtlContext.capture())
 
     with eng.connect() as conn:
         counts = {
@@ -754,3 +832,290 @@ print(
                 "E2UDE_DATABASE__SCHEMA_NAME": schema_name,
             },
         )
+
+
+@pytest.mark.local_mssql
+def test_two_main_processes_can_overlap_on_same_schema_without_tmptr_corruption(
+    repo_root,
+    local_mssql_server,
+    local_mssql_database,
+    local_mssql_driver,
+    run_repo_command,
+    run_repo_python,
+    write_app_config,
+    tmp_path,
+):
+    scan_root = tmp_path / "scan_root"
+    scan_root.mkdir(parents=True, exist_ok=True)
+
+    line_count = 400
+    tmptr_payload = "\n".join(
+        [
+            (
+                f"AFMC1,20231003,04:59:09.{i:03d},IPM & P2 Connectors,"
+                f"{20 + (i % 10):03d}C,{70 + (i % 10):03d}F"
+            )
+            for i in range(line_count)
+        ]
+    )
+
+    zip_count = 8
+    for i in range(zip_count):
+        zip_path = scan_root / (
+            f"169871_202311{7 + i:02d}_024218_{i:03d}_TransportRSM.fpkg.e2d.zip"
+        )
+        _write_transport_rsm_zip(zip_path, tmptr_payload=tmptr_payload)
+
+    schema_name = f"e2ude_overlap_{uuid.uuid4().hex[:8]}"
+    config_path_a = write_app_config(
+        database={
+            "type": "mssql",
+            "server_name": local_mssql_server,
+            "db_name": local_mssql_database,
+            "driver": local_mssql_driver,
+            "trusted_connection": "yes",
+            "schema_name": schema_name,
+        },
+        paths={
+            "scan_root": scan_root,
+            "staging_root": tmp_path / "staging_a",
+        },
+    )
+    config_path_b = write_app_config(
+        database={
+            "type": "mssql",
+            "server_name": local_mssql_server,
+            "db_name": local_mssql_database,
+            "driver": local_mssql_driver,
+            "trusted_connection": "yes",
+            "schema_name": schema_name,
+        },
+        paths={
+            "scan_root": scan_root,
+            "staging_root": tmp_path / "staging_b",
+        },
+    )
+
+    common_overrides = {
+        "E2UDE_RUNTIME__DISCOVERY_WORKERS": 4,
+        "E2UDE_RUNTIME__UNZIP_WORKERS": 4,
+        "E2UDE_RUNTIME__PROCESS_WORKERS": 4,
+        "E2UDE_RUNTIME__DB_WRITE_WORKERS": 1,
+        "E2UDE_RUNTIME__PIPELINE_BUFFER_SIZE": 4,
+    }
+
+    run_repo_python(
+        """
+from e2ude_core.config import settings
+from e2ude_core.db.access import get_engine
+from e2ude_core.db.setup import initialize_database
+
+eng = get_engine(settings.database)
+initialize_database(eng, reset_tables=False)
+""",
+        {
+            "E2UDE_CONFIG_PATH": config_path_a,
+        },
+    )
+
+    proc_a = proc_b = None
+    try:
+        proc_a = subprocess.Popen(
+            [sys.executable, "-m", "e2ude_core.main"],
+            cwd=repo_root,
+            env=_build_repo_env(
+                repo_root,
+                {
+                    "E2UDE_CONFIG_PATH": config_path_a,
+                    **common_overrides,
+                },
+            ),
+            stdout=subprocess.PIPE,
+            stderr=subprocess.PIPE,
+            text=True,
+        )
+        proc_b = subprocess.Popen(
+            [sys.executable, "-m", "e2ude_core.main"],
+            cwd=repo_root,
+            env=_build_repo_env(
+                repo_root,
+                {
+                    "E2UDE_CONFIG_PATH": config_path_b,
+                    **common_overrides,
+                },
+            ),
+            stdout=subprocess.PIPE,
+            stderr=subprocess.PIPE,
+            text=True,
+        )
+
+        stdout_a, stderr_a = proc_a.communicate(timeout=180)
+        stdout_b, stderr_b = proc_b.communicate(timeout=180)
+
+        assert proc_a.returncode == 0, (
+            "First overlapping main run failed.\n"
+            f"STDOUT:\n{stdout_a}\nSTDERR:\n{stderr_a}"
+        )
+        assert proc_b.returncode == 0, (
+            "Second overlapping main run failed.\n"
+            f"STDOUT:\n{stdout_b}\nSTDERR:\n{stderr_b}"
+        )
+
+        payload = _load_mssql_schema_metrics(
+            run_repo_python,
+            {
+                "E2UDE_CONFIG_PATH": config_path_a,
+            },
+        )
+
+        assert payload["error_sessions"] == 0
+        assert payload["error_jobs"] == 0
+        assert payload["hashes"] >= 1
+        assert payload["artifact_counts"].get("rsmdata_tmptr") == 1
+        assert payload["data_counts"].get("rsmdata_tmptr") == line_count
+        assert zip_count <= payload["sessions"] <= zip_count * 2
+    finally:
+        for proc in (proc_a, proc_b):
+            if proc is not None and proc.poll() is None:
+                proc.kill()
+                proc.communicate()
+
+        run_repo_command(
+            [
+                sys.executable,
+                "scripts/cleanup_mssql_schema.py",
+                "--schema-name",
+                schema_name,
+                "--yes",
+                "--confirm-schema",
+                schema_name,
+            ],
+            {
+                "E2UDE_CONFIG_PATH": config_path_a,
+                "E2UDE_DATABASE__SCHEMA_NAME": schema_name,
+            },
+        )
+
+
+@pytest.mark.local_mssql
+def test_parallel_duplicate_fixture_archives_do_not_duplicate_multi_table_outputs(
+    local_fixture_root,
+    local_mssql_server,
+    local_mssql_database,
+    local_mssql_driver,
+    run_repo_command,
+    run_repo_python,
+    write_app_config,
+    tmp_path,
+):
+    fixture_zip = _first_fixture_zip(local_fixture_root)
+
+    baseline_scan_root = tmp_path / "baseline_scan_root"
+    duplicate_scan_root = tmp_path / "duplicate_scan_root"
+    baseline_scan_root.mkdir(parents=True, exist_ok=True)
+    duplicate_scan_root.mkdir(parents=True, exist_ok=True)
+
+    _write_archive_copies(fixture_zip, baseline_scan_root, count=1)
+    duplicate_count = 4
+    _write_archive_copies(fixture_zip, duplicate_scan_root, count=duplicate_count)
+
+    baseline_schema = f"e2ude_fixture_base_{uuid.uuid4().hex[:8]}"
+    duplicate_schema = f"e2ude_fixture_dupe_{uuid.uuid4().hex[:8]}"
+
+    baseline_config = write_app_config(
+        database={
+            "type": "mssql",
+            "server_name": local_mssql_server,
+            "db_name": local_mssql_database,
+            "driver": local_mssql_driver,
+            "trusted_connection": "yes",
+            "schema_name": baseline_schema,
+        },
+        paths={
+            "scan_root": baseline_scan_root,
+            "staging_root": tmp_path / "baseline_staging",
+        },
+    )
+    duplicate_config = write_app_config(
+        database={
+            "type": "mssql",
+            "server_name": local_mssql_server,
+            "db_name": local_mssql_database,
+            "driver": local_mssql_driver,
+            "trusted_connection": "yes",
+            "schema_name": duplicate_schema,
+        },
+        paths={
+            "scan_root": duplicate_scan_root,
+            "staging_root": tmp_path / "duplicate_staging",
+        },
+    )
+
+    try:
+        run_repo_command(
+            [sys.executable, "-m", "e2ude_core.main"],
+            {
+                "E2UDE_CONFIG_PATH": baseline_config,
+                "E2UDE_RUNTIME__DISCOVERY_WORKERS": 4,
+                "E2UDE_RUNTIME__UNZIP_WORKERS": 2,
+                "E2UDE_RUNTIME__PROCESS_WORKERS": 1,
+                "E2UDE_RUNTIME__DB_WRITE_WORKERS": 1,
+                "E2UDE_RUNTIME__PIPELINE_BUFFER_SIZE": 2,
+            },
+        )
+        baseline_metrics = _load_mssql_schema_metrics(
+            run_repo_python,
+            {
+                "E2UDE_CONFIG_PATH": baseline_config,
+            },
+        )
+
+        run_repo_command(
+            [sys.executable, "-m", "e2ude_core.main"],
+            {
+                "E2UDE_CONFIG_PATH": duplicate_config,
+                "E2UDE_RUNTIME__DISCOVERY_WORKERS": 4,
+                "E2UDE_RUNTIME__UNZIP_WORKERS": 4,
+                "E2UDE_RUNTIME__PROCESS_WORKERS": 4,
+                "E2UDE_RUNTIME__DB_WRITE_WORKERS": 1,
+                "E2UDE_RUNTIME__PIPELINE_BUFFER_SIZE": 4,
+            },
+        )
+        duplicate_metrics = _load_mssql_schema_metrics(
+            run_repo_python,
+            {
+                "E2UDE_CONFIG_PATH": duplicate_config,
+            },
+        )
+
+        assert baseline_metrics["error_sessions"] == 0
+        assert baseline_metrics["error_jobs"] == 0
+        assert duplicate_metrics["error_sessions"] == 0
+        assert duplicate_metrics["error_jobs"] == 0
+
+        assert any(count > 0 for count in baseline_metrics["data_counts"].values())
+        assert duplicate_metrics["data_counts"] == baseline_metrics["data_counts"]
+        assert duplicate_metrics["artifact_counts"] == baseline_metrics["artifact_counts"]
+        assert duplicate_metrics["hashes"] == baseline_metrics["hashes"]
+        assert duplicate_metrics["artifacts_total"] == baseline_metrics["artifacts_total"]
+        assert duplicate_metrics["archive_rows"] == duplicate_count
+    finally:
+        for schema_name, config_path in (
+            (baseline_schema, baseline_config),
+            (duplicate_schema, duplicate_config),
+        ):
+            run_repo_command(
+                [
+                    sys.executable,
+                    "scripts/cleanup_mssql_schema.py",
+                    "--schema-name",
+                    schema_name,
+                    "--yes",
+                    "--confirm-schema",
+                    schema_name,
+                ],
+                {
+                    "E2UDE_CONFIG_PATH": config_path,
+                    "E2UDE_DATABASE__SCHEMA_NAME": schema_name,
+                },
+            )

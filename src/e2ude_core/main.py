@@ -3,17 +3,19 @@ import sys
 import time
 from pathlib import Path
 
-from tqdm import tqdm
-
 from e2ude_core.config import settings
 from e2ude_core.db import access as sql_io
-from e2ude_core.db.setup import initialize_database, register_folders_bulk
+from e2ude_core.db.setup import (
+    initialize_database,
+    load_directory_scan_cache,
+    record_directory_snapshots,
+    register_archives_bulk,
+)
 from e2ude_core.logging_conf import setup_logging
 from e2ude_core.orchestration.managers import cull_stale_runs
 from e2ude_core.orchestration.pipeline import StagingPipeline
-from e2ude_core.orchestration.state import select_folders_requiring_work
-from e2ude_core.services.discovery import discover_network_zips
-from e2ude_core.pipelines.scanner import SCANNER_VERSION
+from e2ude_core.orchestration.state import load_archives_requiring_work
+from e2ude_core.services.discovery import DiscoveryMode, discover_archives
 
 logger = logging.getLogger(__name__)
 
@@ -52,39 +54,50 @@ def main():
             logger.error(f"Scan root not found: {scan_root}")
             return
 
-        valid_paths = discover_network_zips(
+        discovery_started_at = time.perf_counter()
+        known_directory_states = load_directory_scan_cache(
+            main_eng, root_path=scan_root
+        )
+        discovery_result = discover_archives(
             scan_root,
+            known_directory_states=known_directory_states,
+            mode=DiscoveryMode(settings.runtime.discovery_mode),
             max_workers=settings.runtime.discovery_workers,
         )
-        if not valid_paths:
-            logger.info("No zips found.")
-            return
+        record_directory_snapshots(
+            main_eng,
+            discovery_result.directory_snapshots,
+            missing_paths=discovery_result.missing_directory_paths,
+        )
 
-        all_folders_map = register_folders_bulk(main_eng, valid_paths)
+        register_archives_bulk(
+            main_eng,
+            list(discovery_result.archives),
+            scanned_directory_paths=discovery_result.scanned_directory_paths,
+            missing_directory_paths=discovery_result.missing_directory_paths,
+        )
+        logger.info(
+            "Discovery summary: duration=%.2fs archives=%s scanned_dirs=%s "
+            "archive_dir_scans=%s frontier_dir_scans=%s skipped_dirs=%s "
+            "missing_dirs=%s",
+            time.perf_counter() - discovery_started_at,
+            len(discovery_result.archives),
+            discovery_result.scanned_directory_count,
+            discovery_result.archive_directory_scan_count,
+            discovery_result.frontier_directory_scan_count,
+            discovery_result.skipped_directory_count,
+            len(discovery_result.missing_directory_paths),
+        )
 
-        if not all_folders_map:
-            logger.info("No folders registered.")
-            return
-
-        with tqdm(
-            total=len(all_folders_map),
-            desc="Checking DB State",
-            unit="folder",
-        ) as pbar:
-            workable_map = select_folders_requiring_work(
-                main_eng,
-                all_folders_map,
-                SCANNER_VERSION,
-                progress_callback=pbar.update,
-            )
+        workable_map = load_archives_requiring_work(main_eng)
 
         if not workable_map:
-            logger.info("All folders are up to date. Exiting.")
+            logger.info("All archives are up to date. Exiting.")
             return
 
         pipeline = StagingPipeline(
             db_settings=settings.database,
-            folder_id_map=workable_map,
+            archive_id_map=workable_map,
             staging_root=staging_root,
             buffer_size=settings.runtime.pipeline_buffer_size,
             unzip_workers=settings.runtime.unzip_workers,
@@ -121,6 +134,7 @@ def main():
 
     except Exception as e:
         logger.critical(f"Fatal Error: {e}", exc_info=True)
+        raise SystemExit(1) from e
     finally:
         main_eng.dispose()
         logger.info("Exiting.")

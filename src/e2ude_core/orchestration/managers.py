@@ -107,7 +107,7 @@ def cull_stale_runs(eng, max_age: timedelta = timedelta(hours=24)) -> dict[str, 
 class SessionManager:
     """Manages a ProcessingSession and its associated jobs."""
 
-    def __init__(self, eng, folder_id: int, ctx: EtlContext = None):
+    def __init__(self, eng, archive_id: int, ctx: EtlContext = None):
         if ctx is None:
             user = host = gh = None
         else:
@@ -120,22 +120,24 @@ class SessionManager:
         self.git_hash = gh
         self.user_name = user
         self.host_name = host
-        self.session_id = self._create_session(folder_id)
+        self.session_id = self._create_session(archive_id)
 
-    def _create_session(self, folder_id: int) -> int:
+    def _create_session(self, archive_id: int) -> int:
         session = self.Session()
         try:
             new_session = ProcessingSession(
                 git_hash=self.git_hash,
                 status=StatusEnum.RUNNING,
-                folder_id=folder_id,
+                archive_id=archive_id,
                 user_name=self.user_name,
                 host_name=self.host_name,
             )
             session.add(new_session)
             session.commit()
             logger.info(
-                f"Created new session with ID: {new_session.id} for FolderID: {folder_id}"
+                "Created new session with ID: %s for ArchiveID: %s",
+                new_session.id,
+                archive_id,
             )
             return new_session.id
         except Exception as e:

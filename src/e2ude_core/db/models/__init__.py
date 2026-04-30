@@ -1,6 +1,12 @@
 from e2ude_core.db.base_session import Base, SessionLocal
 
-from .file import FileHashRegistry, FileMetadata, FolderMetadata
+from .file import (
+    ArchiveMetadata,
+    ArchiveStateEnum,
+    DiscoveryDirectoryMetadata,
+    FileHashRegistry,
+    FileMetadata,
+)
 from .manager import ProcessingJob, ProcessingSession, StatusEnum, ArtifactManifest
 
 from .rsm_engine_on_off import EngineOnOff
@@ -23,11 +29,14 @@ __all__ = [
     "Base",
     "SessionLocal",
     "StatusEnum",
-    "FolderMetadata",
+    "ArchiveMetadata",
+    "ArchiveStateEnum",
+    "DiscoveryDirectoryMetadata",
     "FileHashRegistry",
     "FileMetadata",
     "ProcessingSession",
     "ProcessingJob",
+    "EngineOnOff",
     "TmptrData",
     "Rpcs",
     "RpcsPres",

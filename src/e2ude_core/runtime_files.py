@@ -4,7 +4,9 @@ from __future__ import annotations
 
 from dataclasses import dataclass
 from enum import StrEnum
+from hashlib import sha1
 from pathlib import Path
+from pathlib import PurePosixPath
 from typing import Callable, Iterable, Sequence, Type
 
 import pandas as pd
@@ -22,13 +24,13 @@ from e2ude_core.db.models import (
     RpcsPres,
     SegmentsData,
     TmptrData,
-    EngineOnOff
+    EngineOnOff,
 )
 from e2ude_core.pipelines.parsers import (
+    parse_engine_on_off_dataframe,
     parse_mcdata,
     parse_segment,
     parse_tmptr_dataframe,
-    parse_engine_on_off_dataframe,
 )
 
 
@@ -122,37 +124,37 @@ def coerce_file_type(value: FileType | str | None) -> FileType:
 
 
 RUNTIME_FILE_SPECS: tuple[RuntimeFileSpec, ...] = (
-    # RuntimeFileSpec(
-    #     FileType.MCDATA,
-    #     ("*_MCData",),
-    #     PipelineId("mcdata"),
-    #     1,
-    #     parse_mcdata,
-    #     (
-    #         NavData,
-    #         Rpcs,
-    #         RpcsPres,
-    #         RadarState,
-    #         RotoScan,
-    #         PfcDb,
-    #         RfcDb,
-    #         LcsTemp,
-    #         McInDiscr,
-    #     ),
-    # ),
-    # RuntimeFileSpec(
-    #     FileType.SEGMENTS,
-    #     ("*_Segments",),
-    #     PipelineId("segments"),
-    #     1,
-    #     parse_segment,
-    #     (SegmentsData,),
-    # ),
-    # RuntimeFileSpec(FileType.VERSIONS, ("*_Versions.xml",)),
-    # RuntimeFileSpec(FileType.GSEVENTS, ("*_GSEvents.xml",)),
-    # RuntimeFileSpec(FileType.FLIGHTSYSTEMS, ("*_FlightSystems",)),
-    # RuntimeFileSpec(FileType.AR, ("*_AR.txt",)),
-    # RuntimeFileSpec(FileType.STATUS, ("*_Status.txt",)),
+    RuntimeFileSpec(
+        FileType.MCDATA,
+        ("*_MCData",),
+        PipelineId("mcdata"),
+        1,
+        parse_mcdata,
+        (
+            NavData,
+            Rpcs,
+            RpcsPres,
+            RadarState,
+            RotoScan,
+            PfcDb,
+            RfcDb,
+            LcsTemp,
+            McInDiscr,
+        ),
+    ),
+    RuntimeFileSpec(
+        FileType.SEGMENTS,
+        ("*_Segments",),
+        PipelineId("segments"),
+        1,
+        parse_segment,
+        (SegmentsData,),
+    ),
+    RuntimeFileSpec(FileType.VERSIONS, ("*_Versions.xml",)),
+    RuntimeFileSpec(FileType.GSEVENTS, ("*_GSEvents.xml",)),
+    RuntimeFileSpec(FileType.FLIGHTSYSTEMS, ("*_FlightSystems",)),
+    RuntimeFileSpec(FileType.AR, ("*_AR.txt",)),
+    RuntimeFileSpec(FileType.STATUS, ("*_Status.txt",)),
     RuntimeFileSpec(
         FileType.ENGINE_ON_OFF,
         ("*_Engine",),
@@ -161,95 +163,95 @@ RUNTIME_FILE_SPECS: tuple[RuntimeFileSpec, ...] = (
         parse_engine_on_off_dataframe,
         (EngineOnOff,),
     ),
-    # RuntimeFileSpec(FileType.AIRCRAFT_CONFIG, ("*_AircraftConfiguration.xml",)),
-    # RuntimeFileSpec(
-    #     FileType.ACAWS_LOG,
-    #     ("*_RSM_RawArchive/RSM/*_MAINT_*/*_MAINT_DAT/*_ACAWS_LOG",),
-    # ),
-    # RuntimeFileSpec(
-    #     FileType.MAINT_XML,
-    #     ("*_RSM_RawArchive/RSM/*_MAINT_*/*_MAINT.xml",),
-    # ),
-    # RuntimeFileSpec(
-    #     FileType.MAINT_EVT,
-    #     ("*_RSM_RawArchive/RSM/*_MAINT_*/*_MAINT.evt",),
-    # ),
-    # RuntimeFileSpec(
-    #     FileType.MAINT_PRM,
-    #     ("*_RSM_RawArchive/RSM/*_MAINT_*/*_MAINT.prm",),
-    # ),
-    # RuntimeFileSpec(
-    #     FileType.TMPTR_LOG,
-    #     ("*_RSM_RawArchive/RSM/TMPTR_LOG",),
-    #     PipelineId("tmptr_log"),
-    #     1,
-    #     parse_tmptr_dataframe,
-    #     (TmptrData,),
-    # ),
-    # RuntimeFileSpec(FileType.MAINT_LOG, ("*_RSM_RawArchive/RSM/MAINT_LOG",)),
-    # RuntimeFileSpec(FileType.METADATA_CSV, ("*.csv",)),
-    # RuntimeFileSpec(
-    #     FileType.CSFIR_DAT,
-    #     ("*_RSM_RawArchive/RSM/*_MAINT_*/*_CSFIR/*_CSFIR_DAT",),
-    # ),
-    # RuntimeFileSpec(
-    #     FileType.LENG_EFF_DAT,
-    #     ("*_RSM_RawArchive/RSM/*_MAINT_*/*_ENG_EFF/*_LENG_EFF_DAT",),
-    # ),
-    # RuntimeFileSpec(
-    #     FileType.RENG_EFF_DAT,
-    #     ("*_RSM_RawArchive/RSM/*_MAINT_*/*_ENG_EFF/*_RENG_EFF_DAT",),
-    # ),
-    # RuntimeFileSpec(
-    #     FileType.LENG_PERF,
-    #     ("*_RSM_RawArchive/RSM/*_MAINT_*/*_ENG_PERF/*_LENG_PERF",),
-    # ),
-    # RuntimeFileSpec(
-    #     FileType.RENG_PERF,
-    #     ("*_RSM_RawArchive/RSM/*_MAINT_*/*_ENG_PERF/*_RENG_PERF",),
-    # ),
-    # RuntimeFileSpec(
-    #     FileType.SDRS_DAT,
-    #     ("*_RSM_RawArchive/RSM/*_MAINT_*/*_SDRS/*_SDRS_DAT",),
-    # ),
-    # RuntimeFileSpec(
-    #     FileType.ERR_1553,
-    #     ("*_RSM_RawArchive/RSM/*_MAINT_*/*_MAINT_DAT/*_1553_ERR",),
-    # ),
-    # RuntimeFileSpec(
-    #     FileType.COMM_BIT,
-    #     ("*_RSM_RawArchive/RSM/*_MAINT_*/*_MAINT_DAT/*_COMM_BIT",),
-    # ),
-    # RuntimeFileSpec(
-    #     FileType.INCDS_BIT,
-    #     ("*_RSM_RawArchive/RSM/*_MAINT_*/*_MAINT_DAT/*_INCDS_BIT",),
-    # ),
-    # RuntimeFileSpec(
-    #     FileType.LENG_BIT,
-    #     ("*_RSM_RawArchive/RSM/*_MAINT_*/*_MAINT_DAT/*_LENG_BIT",),
-    # ),
-    # RuntimeFileSpec(
-    #     FileType.RENG_BIT,
-    #     ("*_RSM_RawArchive/RSM/*_MAINT_*/*_MAINT_DAT/*_RENG_BIT",),
-    # ),
-    # RuntimeFileSpec(
-    #     FileType.VEHCL_BIT,
-    #     ("*_RSM_RawArchive/RSM/*_MAINT_*/*_MAINT_DAT/*_VEHCL_BIT",),
-    # ),
-    # RuntimeFileSpec(
-    #     FileType.DIA_MAINT_SUMMARY,
-    #     ("*_RSM_RawArchive/DIA_MAINTENANCE/*_maintenance_data/maint_summary_data.txt",),
-    # ),
-    # RuntimeFileSpec(
-    #     FileType.DIA_MAINT_DETAIL,
-    #     ("*_RSM_RawArchive/DIA_MAINTENANCE/*_maintenance_data/*_detailed_data.txt",),
-    # ),
-    # RuntimeFileSpec(
-    #     FileType.DIA_MAINT_STATUS,
-    #     (
-    #         "*_RSM_RawArchive/DIA_MAINTENANCE/*_maintenance_data/system_snapshot_fault_status.txt",
-    #     ),
-    # ),
+    RuntimeFileSpec(FileType.AIRCRAFT_CONFIG, ("*_AircraftConfiguration.xml",)),
+    RuntimeFileSpec(
+        FileType.ACAWS_LOG,
+        ("*_RSM_RawArchive/RSM/*_MAINT_*/*_MAINT_DAT/*_ACAWS_LOG",),
+    ),
+    RuntimeFileSpec(
+        FileType.MAINT_XML,
+        ("*_RSM_RawArchive/RSM/*_MAINT_*/*_MAINT.xml",),
+    ),
+    RuntimeFileSpec(
+        FileType.MAINT_EVT,
+        ("*_RSM_RawArchive/RSM/*_MAINT_*/*_MAINT.evt",),
+    ),
+    RuntimeFileSpec(
+        FileType.MAINT_PRM,
+        ("*_RSM_RawArchive/RSM/*_MAINT_*/*_MAINT.prm",),
+    ),
+    RuntimeFileSpec(
+        FileType.TMPTR_LOG,
+        ("*_RSM_RawArchive/RSM/TMPTR_LOG",),
+        PipelineId("tmptr_log"),
+        1,
+        parse_tmptr_dataframe,
+        (TmptrData,),
+    ),
+    RuntimeFileSpec(FileType.MAINT_LOG, ("*_RSM_RawArchive/RSM/MAINT_LOG",)),
+    RuntimeFileSpec(FileType.METADATA_CSV, ("*.csv",)),
+    RuntimeFileSpec(
+        FileType.CSFIR_DAT,
+        ("*_RSM_RawArchive/RSM/*_MAINT_*/*_CSFIR/*_CSFIR_DAT",),
+    ),
+    RuntimeFileSpec(
+        FileType.LENG_EFF_DAT,
+        ("*_RSM_RawArchive/RSM/*_MAINT_*/*_ENG_EFF/*_LENG_EFF_DAT",),
+    ),
+    RuntimeFileSpec(
+        FileType.RENG_EFF_DAT,
+        ("*_RSM_RawArchive/RSM/*_MAINT_*/*_ENG_EFF/*_RENG_EFF_DAT",),
+    ),
+    RuntimeFileSpec(
+        FileType.LENG_PERF,
+        ("*_RSM_RawArchive/RSM/*_MAINT_*/*_ENG_PERF/*_LENG_PERF",),
+    ),
+    RuntimeFileSpec(
+        FileType.RENG_PERF,
+        ("*_RSM_RawArchive/RSM/*_MAINT_*/*_ENG_PERF/*_RENG_PERF",),
+    ),
+    RuntimeFileSpec(
+        FileType.SDRS_DAT,
+        ("*_RSM_RawArchive/RSM/*_MAINT_*/*_SDRS/*_SDRS_DAT",),
+    ),
+    RuntimeFileSpec(
+        FileType.ERR_1553,
+        ("*_RSM_RawArchive/RSM/*_MAINT_*/*_MAINT_DAT/*_1553_ERR",),
+    ),
+    RuntimeFileSpec(
+        FileType.COMM_BIT,
+        ("*_RSM_RawArchive/RSM/*_MAINT_*/*_MAINT_DAT/*_COMM_BIT",),
+    ),
+    RuntimeFileSpec(
+        FileType.INCDS_BIT,
+        ("*_RSM_RawArchive/RSM/*_MAINT_*/*_MAINT_DAT/*_INCDS_BIT",),
+    ),
+    RuntimeFileSpec(
+        FileType.LENG_BIT,
+        ("*_RSM_RawArchive/RSM/*_MAINT_*/*_MAINT_DAT/*_LENG_BIT",),
+    ),
+    RuntimeFileSpec(
+        FileType.RENG_BIT,
+        ("*_RSM_RawArchive/RSM/*_MAINT_*/*_MAINT_DAT/*_RENG_BIT",),
+    ),
+    RuntimeFileSpec(
+        FileType.VEHCL_BIT,
+        ("*_RSM_RawArchive/RSM/*_MAINT_*/*_MAINT_DAT/*_VEHCL_BIT",),
+    ),
+    RuntimeFileSpec(
+        FileType.DIA_MAINT_SUMMARY,
+        ("*_RSM_RawArchive/DIA_MAINTENANCE/*_maintenance_data/maint_summary_data.txt",),
+    ),
+    RuntimeFileSpec(
+        FileType.DIA_MAINT_DETAIL,
+        ("*_RSM_RawArchive/DIA_MAINTENANCE/*_maintenance_data/*_detailed_data.txt",),
+    ),
+    RuntimeFileSpec(
+        FileType.DIA_MAINT_STATUS,
+        (
+            "*_RSM_RawArchive/DIA_MAINTENANCE/*_maintenance_data/system_snapshot_fault_status.txt",
+        ),
+    ),
 )
 
 
@@ -260,11 +262,80 @@ STAGE_DEPENDENCIES: tuple[StageDependencySpec, ...] = (
 
 RUNTIME_FILE_SPECS_BY_TYPE = {spec.file_type: spec for spec in RUNTIME_FILE_SPECS}
 
-CATALOG_FILE_PATTERNS: tuple[tuple[FileType, str], ...] = tuple(
-    (spec.file_type, pattern)
-    for spec in RUNTIME_FILE_SPECS
-    for pattern in spec.match_patterns
-)
+
+def _pattern_sort_key(pattern: str) -> tuple[int, int, int, int, int, str]:
+    posix_path = PurePosixPath(pattern)
+    parts = posix_path.parts
+    wildcard_chars = sum(1 for char in pattern if char in "*?[")
+    literal_chars = len(pattern) - wildcard_chars
+    literal_parts = sum(1 for part in parts if not any(char in part for char in "*?["))
+    return (
+        -literal_parts,
+        -len(parts),
+        -literal_chars,
+        wildcard_chars,
+        -len(pattern),
+        pattern,
+    )
+
+
+def _build_catalog_patterns(
+    specs: Iterable[RuntimeFileSpec] | None = None,
+) -> tuple[tuple[FileType, str], ...]:
+    specs = RUNTIME_FILE_SPECS if specs is None else specs
+    patterns = [
+        (spec.file_type, pattern) for spec in specs for pattern in spec.match_patterns
+    ]
+    return tuple(
+        sorted(
+            patterns,
+            key=lambda item: (_pattern_sort_key(item[1]), item[0].value),
+        )
+    )
+
+
+CATALOG_FILE_PATTERNS: tuple[tuple[FileType, str], ...] = _build_catalog_patterns()
+
+
+def compute_metadata_catalog_generation(
+    specs: Iterable[RuntimeFileSpec] | None = None,
+    stage_dependencies: Iterable[StageDependencySpec] | None = None,
+) -> int:
+    specs_tuple = tuple(RUNTIME_FILE_SPECS if specs is None else specs)
+    stage_dependencies_tuple = tuple(
+        STAGE_DEPENDENCIES if stage_dependencies is None else stage_dependencies
+    )
+    catalog_patterns = _build_catalog_patterns(specs_tuple)
+    active_patterns = tuple(
+        sorted(
+            (
+                (spec.file_type, pattern)
+                for spec in specs_tuple
+                if spec.is_handled
+                for pattern in spec.match_patterns
+            ),
+            key=lambda item: (_pattern_sort_key(item[1]), item[0].value),
+        )
+    )
+
+    signature_parts = ["logic:2"]
+    signature_parts.extend(
+        f"catalog:{file_type.value}|{pattern}"
+        for file_type, pattern in catalog_patterns
+    )
+    signature_parts.extend(
+        f"active:{file_type.value}|{pattern}" for file_type, pattern in active_patterns
+    )
+    signature_parts.extend(
+        f"stage:{dependency.name}|{pattern}"
+        for dependency in stage_dependencies_tuple
+        for pattern in dependency.match_patterns
+    )
+    digest = sha1("\n".join(signature_parts).encode("utf-8")).hexdigest()
+    return int(digest[:7], 16) or 1
+
+
+CURRENT_METADATA_CATALOG_GENERATION = compute_metadata_catalog_generation()
 
 
 def iter_handled_file_specs() -> Iterable[RuntimeFileSpec]:

@@ -8,7 +8,7 @@ from sqlalchemy import bindparam, insert, select, update
 from sqlalchemy.exc import IntegrityError
 
 from e2ude_core.db.base_session import DEFAULT_SCHEMA
-from e2ude_core.runtime_files import PipelineId
+from e2ude_core.runtime_files import CURRENT_METADATA_CATALOG_GENERATION, PipelineId
 from e2ude_core.services.file_catalog import FileScanResult, catalog_staged_folder
 from e2ude_core.db.models import FileHashRegistry, FileMetadata
 from e2ude_core.orchestration.spec import JobRunResult
@@ -16,7 +16,8 @@ from e2ude_core.orchestration.spec import JobRunResult
 logger = logging.getLogger(__name__)
 
 SCANNER_PIPELINE_ID = PipelineId("MetadataScanHandler")
-SCANNER_VERSION = 1
+# Existing archive scan fields track the derived metadata-catalog generation.
+SCANNER_VERSION = CURRENT_METADATA_CATALOG_GENERATION
 MAX_METADATA_DEADLOCK_RETRIES = 4
 METADATA_DEADLOCK_RETRY_DELAY_SECONDS = 0.2
 
@@ -28,7 +29,7 @@ def _is_mssql_deadlock(exc: Exception) -> bool:
 
 def run_metadata_scan(
     eng: sa.Engine,
-    folder_id: int,
+    archive_id: int,
     target_path: Path,
     report_progress: Callable[[str], None],
 ) -> JobRunResult:
@@ -56,7 +57,7 @@ def run_metadata_scan(
 
     report_progress(f"Cataloging {len(raw_files)} files...")
 
-    _upsert_metadata(eng, folder_id, raw_files)
+    _upsert_metadata(eng, archive_id, raw_files)
 
     logger.info("[%s] Cataloged %s files.", SCANNER_PIPELINE_ID, len(raw_files))
     return JobRunResult(
@@ -65,21 +66,23 @@ def run_metadata_scan(
     )
 
 
-def _upsert_metadata(eng: sa.Engine, folder_id: int, files: List[FileScanResult]):
+def _upsert_metadata(eng: sa.Engine, archive_id: int, files: List[FileScanResult]):
     for attempt in range(1, MAX_METADATA_DEADLOCK_RETRIES + 1):
         try:
             with eng.begin() as conn:
                 unique_md5s = sorted({f.md5 for f in files if f.md5})
                 hash_map = _ensure_hashes_exist(conn, unique_md5s)
-                to_insert, to_update = _detect_changes(conn, folder_id, files, hash_map)
-                _commit_changes(conn, to_insert, to_update)
+                to_insert, to_update, to_delete = _detect_changes(
+                    conn, archive_id, files, hash_map
+                )
+                _commit_changes(conn, to_insert, to_update, to_delete)
             return
         except Exception as exc:
             if attempt < MAX_METADATA_DEADLOCK_RETRIES and _is_mssql_deadlock(exc):
                 delay = METADATA_DEADLOCK_RETRY_DELAY_SECONDS * attempt
                 logger.warning(
-                    "Deadlock upserting metadata for folder %s; retrying in %.1fs (%s/%s).",
-                    folder_id,
+                    "Deadlock upserting metadata for archive %s; retrying in %.1fs (%s/%s).",
+                    archive_id,
                     delay,
                     attempt,
                     MAX_METADATA_DEADLOCK_RETRIES - 1,
@@ -130,15 +133,16 @@ def _get_or_create_hash_id(conn, md5: bytes) -> int:
 
 
 def _detect_changes(
-    conn, folder_id, files: List[FileScanResult], hash_map
-) -> Tuple[List, List]:
+    conn, archive_id, files: List[FileScanResult], hash_map
+) -> Tuple[List, List, List]:
     current_state = conn.execute(
         select(FileMetadata.id, FileMetadata.relative_path, FileMetadata.hash_id).where(
-            FileMetadata.folder_id == folder_id
+            FileMetadata.archive_id == archive_id
         )
     ).fetchall()
 
     existing_map = {row.relative_path: (row.id, row.hash_id) for row in current_state}
+    seen_paths = set()
 
     to_insert = []
     to_update = []
@@ -149,6 +153,7 @@ def _detect_changes(
 
         path = f.relative_path
         new_hid = hash_map.get(f.md5)
+        seen_paths.add(path)
 
         if not new_hid:
             continue
@@ -167,17 +172,22 @@ def _detect_changes(
         else:
             to_insert.append(
                 {
-                    "folder_id": folder_id,
+                    "archive_id": archive_id,
                     "relative_path": path,
                     "hash_id": new_hid,
                     "file_type": f.file_type.value,
                     "file_size_bytes": f.file_size_bytes,
                 }
             )
-    return to_insert, to_update
+    to_delete = [
+        {"b_id": db_id}
+        for path, (db_id, _db_hid) in existing_map.items()
+        if path not in seen_paths
+    ]
+    return to_insert, to_update, to_delete
 
 
-def _commit_changes(conn, to_insert, to_update):
+def _commit_changes(conn, to_insert, to_update, to_delete):
     if to_insert:
         conn.execute(insert(FileMetadata), to_insert)
     if to_update:
@@ -191,3 +201,8 @@ def _commit_changes(conn, to_insert, to_update):
             )
         )
         conn.execute(stmt, to_update)
+    if to_delete:
+        stmt = FileMetadata.__table__.delete().where(
+            FileMetadata.id == bindparam("b_id")
+        )
+        conn.execute(stmt, to_delete)

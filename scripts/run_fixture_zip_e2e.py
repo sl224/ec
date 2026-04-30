@@ -14,9 +14,9 @@ from e2ude_core.db.models import (
     ProcessingSession,
     StatusEnum,
 )
-from e2ude_core.db.setup import initialize_database, register_folders_bulk
+from e2ude_core.db.setup import initialize_database, register_archives_bulk
 from e2ude_core.logging_conf import setup_logging
-from e2ude_core.orchestration.workflow import process_staged_directory
+from e2ude_core.orchestration.workflow import process_staged_archive
 from e2ude_core.services.zip_io import UnzipContext
 
 
@@ -38,7 +38,7 @@ def _collect_counts(eng: sa.Engine, schema_name: str | None) -> dict[str, int]:
     return counts
 
 
-def _collect_run_status(eng: sa.Engine, folder_id: int) -> dict[str, object]:
+def _collect_run_status(eng: sa.Engine, archive_id: int) -> dict[str, object]:
     with eng.connect() as conn:
         session_row = conn.execute(
             sa.select(
@@ -47,7 +47,7 @@ def _collect_run_status(eng: sa.Engine, folder_id: int) -> dict[str, object]:
                 ProcessingSession.start_time,
                 ProcessingSession.end_time,
             )
-            .where(ProcessingSession.folder_id == folder_id)
+            .where(ProcessingSession.archive_id == archive_id)
             .order_by(ProcessingSession.id.desc())
             .limit(1)
         ).first()
@@ -103,18 +103,18 @@ def main():
 
     try:
         initialize_database(eng, reset_tables=False)
-        folder_map = register_folders_bulk(eng, [zip_path])
-        if zip_path not in folder_map:
+        archive_map = register_archives_bulk(eng, [zip_path])
+        if zip_path not in archive_map:
             raise ValueError(
                 "Zip filename must match the expected archive pattern, for example "
                 "'169871_20231107_024218_987_TransportRSM.fpkg.e2d.zip'."
             )
-        folder_id = folder_map[zip_path]
+        archive_id = archive_map[zip_path]
 
         with UnzipContext(zip_path) as ctx:
-            process_staged_directory(
+            process_staged_archive(
                 eng=eng,
-                folder_id=folder_id,
+                archive_id=archive_id,
                 staged_path=Path(ctx.temp_dir),
                 context=EtlContext.capture(),
                 db_workers=args.db_workers,
@@ -130,8 +130,8 @@ def main():
             "database_type": settings.database.type,
             "schema_name": DEFAULT_SCHEMA,
             "zip_path": str(zip_path),
-            "folder_id": folder_id,
-            "run_status": _collect_run_status(eng, folder_id),
+            "archive_id": archive_id,
+            "run_status": _collect_run_status(eng, archive_id),
             "table_counts": table_counts,
             "materialized_tables": materialized_tables,
         }
