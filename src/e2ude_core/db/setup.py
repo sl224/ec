@@ -1,5 +1,4 @@
 import logging
-import os
 import re
 from datetime import UTC, datetime
 from pathlib import Path
@@ -445,69 +444,59 @@ def _insert_new_archives(conn: sa.Connection, rows: list[dict]) -> None:
         logger.info("Inserted %s/%s new archive rows...", inserted_count, len(rows))
 
 
-def _mark_absent_archives_for_scanned_directories(
+def _mark_absent_archives(
     conn: sa.Connection,
     scanned_directory_paths: Iterable[str],
+    missing_directory_paths: Iterable[str],
     seen_source_paths: set[str],
-) -> int:
-    absent_ids: list[int] = []
-    for dir_path in scanned_directory_paths:
-        prefix = f"{dir_path}{os.sep}%"
-        stmt = sa.select(ArchiveMetadata.id, ArchiveMetadata.source_path).where(
-            ArchiveMetadata.source_path.like(prefix)
-        )
-        for row in conn.execute(stmt):
-            source_path = row.source_path
-            if str(Path(source_path).parent) != dir_path:
-                continue
-            if source_path not in seen_source_paths:
-                absent_ids.append(row.id)
+) -> tuple[int, int]:
+    scanned_dirs = set(scanned_directory_paths)
+    missing_dirs = set(missing_directory_paths)
+    if not scanned_dirs and not missing_dirs:
+        return 0, 0
 
-    if absent_ids:
+    absent_from_scanned: list[int] = []
+    absent_from_missing: list[int] = []
+    rows = conn.execute(
+        sa.select(ArchiveMetadata.id, ArchiveMetadata.source_path).where(
+            ArchiveMetadata.is_present == sa.true()
+        )
+    )
+    for row in rows:
+        source_path = row.source_path
+        parent_dir = str(Path(source_path).parent)
+        if parent_dir in missing_dirs:
+            absent_from_missing.append(row.id)
+        elif parent_dir in scanned_dirs and source_path not in seen_source_paths:
+            absent_from_scanned.append(row.id)
+
+    updates = (
+        (
+            absent_from_scanned,
+            "Archive missing from scanned directory",
+        ),
+        (
+            absent_from_missing,
+            "Archive directory missing from source share",
+        ),
+    )
+    for absent_ids, reason in updates:
         for i in range(0, len(absent_ids), ARCHIVE_LOOKUP_BATCH_SIZE):
-            batch = absent_ids[i : i + ARCHIVE_LOOKUP_BATCH_SIZE]
             conn.execute(
                 sa.update(ArchiveMetadata)
-                .where(ArchiveMetadata.id.in_(batch))
+                .where(
+                    ArchiveMetadata.id.in_(
+                        absent_ids[i : i + ARCHIVE_LOOKUP_BATCH_SIZE]
+                    )
+                )
                 .values(
                     is_present=False,
                     state=ArchiveStateEnum.UP_TO_DATE,
-                    work_reason="Archive missing from scanned directory",
+                    work_reason=reason,
                 )
             )
-    return len(absent_ids)
 
-
-def _mark_absent_archives_for_missing_directories(
-    conn: sa.Connection, missing_directory_paths: Iterable[str]
-) -> int:
-    absent_total = 0
-    for dir_path in missing_directory_paths:
-        prefix = f"{dir_path}{os.sep}%"
-        stmt = sa.select(ArchiveMetadata.id, ArchiveMetadata.source_path).where(
-            ArchiveMetadata.source_path.like(prefix)
-        )
-        absent_ids = [
-            row.id
-            for row in conn.execute(stmt)
-            if str(Path(row.source_path).parent) == dir_path
-        ]
-        if not absent_ids:
-            continue
-        absent_total += len(absent_ids)
-
-        for i in range(0, len(absent_ids), ARCHIVE_LOOKUP_BATCH_SIZE):
-            batch = absent_ids[i : i + ARCHIVE_LOOKUP_BATCH_SIZE]
-            conn.execute(
-                sa.update(ArchiveMetadata)
-                .where(ArchiveMetadata.id.in_(batch))
-                .values(
-                    is_present=False,
-                    state=ArchiveStateEnum.UP_TO_DATE,
-                    work_reason="Archive directory missing from source share",
-                )
-            )
-    return absent_total
+    return len(absent_from_scanned), len(absent_from_missing)
 
 
 def register_archives_bulk(
@@ -600,20 +589,19 @@ def register_archives_bulk(
             )
             conn.execute(stmt, to_update)
 
-        absent_from_scanned_dirs = 0
-        if normalized_scanned_dirs:
-            absent_from_scanned_dirs = _mark_absent_archives_for_scanned_directories(
-                conn,
-                normalized_scanned_dirs,
-                seen_source_paths,
-            )
-        absent_from_missing_dirs = 0
-        if normalized_missing_dirs:
-            absent_from_missing_dirs = _mark_absent_archives_for_missing_directories(
-                conn,
-                normalized_missing_dirs,
-            )
+        logger.info(
+            "Reconciling archive presence for %s scanned dirs and %s missing dirs...",
+            len(normalized_scanned_dirs),
+            len(normalized_missing_dirs),
+        )
+        absent_from_scanned_dirs, absent_from_missing_dirs = _mark_absent_archives(
+            conn,
+            normalized_scanned_dirs,
+            normalized_missing_dirs,
+            seen_source_paths,
+        )
 
+        logger.info("Loading IDs for %s discovered archives...", len(unique_paths))
         archive_id_map = _load_archive_id_map(conn, unique_paths)
 
     logger.info(
