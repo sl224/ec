@@ -47,7 +47,8 @@ def _collect_run_status(eng: sa.Engine, archive_id: int) -> dict[str, object]:
                 ProcessingSession.start_time,
                 ProcessingSession.end_time,
             )
-            .where(ProcessingSession.archive_id == archive_id)
+            .join(ProcessingJob, ProcessingJob.session_id == ProcessingSession.id)
+            .where(ProcessingJob.archive_id == archive_id)
             .order_by(ProcessingSession.id.desc())
             .limit(1)
         ).first()
@@ -86,12 +87,6 @@ def main():
         )
     )
     parser.add_argument("zip_path", type=Path, help="Path to a TransportRSM fixture zip")
-    parser.add_argument(
-        "--db-workers",
-        type=int,
-        default=4,
-        help="Parallel DB writer count for the file-processing stage",
-    )
     args = parser.parse_args()
 
     zip_path = args.zip_path.expanduser().resolve()
@@ -117,7 +112,6 @@ def main():
                 archive_id=archive_id,
                 staged_path=Path(ctx.temp_dir),
                 context=EtlContext.capture(),
-                db_workers=args.db_workers,
             )
 
         table_counts = _collect_counts(eng, DEFAULT_SCHEMA)

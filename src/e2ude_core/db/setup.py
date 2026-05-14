@@ -1,12 +1,13 @@
 import logging
 import re
+import time
 from datetime import UTC, datetime
 from pathlib import Path
 from typing import Dict, Iterable, List
 
 import sqlalchemy as sa
 from sqlalchemy import bindparam
-from sqlalchemy.exc import IntegrityError
+from sqlalchemy.exc import DBAPIError, IntegrityError
 from sqlalchemy.schema import CreateSchema
 
 from e2ude_core.config import settings
@@ -14,7 +15,6 @@ from e2ude_core.db.base_session import Base
 import e2ude_core.db.models  # noqa: F401
 from e2ude_core.db.models import (
     ArchiveMetadata,
-    ArchiveStateEnum,
     DiscoveryDirectoryMetadata,
     ArtifactManifest,
     FileHashRegistry,
@@ -23,8 +23,7 @@ from e2ude_core.db.models import (
     ProcessingSession,
 )
 from e2ude_core.pipelines.scanner import SCANNER_VERSION
-from e2ude_core.runtime_files import CURRENT_HANDLER_GENERATION, HANDLED_FILE_SPECS
-from e2ude_core.orchestration.state import summarize_archive_facts
+from e2ude_core.runtime_files import HANDLED_FILE_SPECS
 from e2ude_core.services.discovery import (
     DiscoveredArchive,
     DiscoveryDirectorySnapshot,
@@ -36,6 +35,8 @@ logger = logging.getLogger(__name__)
 ARCHIVE_LOOKUP_BATCH_SIZE = 1000
 ARCHIVE_INSERT_BATCH_SIZE = 1000
 DIRECTORY_SNAPSHOT_BATCH_SIZE = 1000
+ARCHIVE_REGISTRATION_DEADLOCK_RETRIES = 4
+ARCHIVE_REGISTRATION_DEADLOCK_DELAY_SECONDS = 0.2
 ARCHIVE_NAME_PATTERN = re.compile(r"([0-9]+)_([0-9]{8}_[0-9]{6})")
 
 
@@ -162,10 +163,6 @@ def _load_existing_archive_rows(
             ArchiveMetadata.source_mtime_ns,
             ArchiveMetadata.required_scan_version,
             ArchiveMetadata.completed_scan_version,
-            ArchiveMetadata.required_handler_generation,
-            ArchiveMetadata.completed_handler_generation,
-            ArchiveMetadata.state,
-            ArchiveMetadata.work_reason,
             ArchiveMetadata.is_present,
         ).where(ArchiveMetadata.source_path.in_(batch))
         for row in conn.execute(stmt):
@@ -403,10 +400,6 @@ def _build_archive_insert(item: dict, seen_at: datetime) -> dict:
         "is_present": True,
         "required_scan_version": SCANNER_VERSION,
         "completed_scan_version": 0,
-        "required_handler_generation": CURRENT_HANDLER_GENERATION,
-        "completed_handler_generation": None,
-        "state": ArchiveStateEnum.NEEDS_SCAN,
-        "work_reason": "New archive discovered",
     }
 
 
@@ -417,29 +410,6 @@ def _build_archive_update(item: dict, existing: sa.Row, seen_at: datetime) -> di
     )
 
     completed_scan_version = 0 if changed_source else existing.completed_scan_version
-    completed_handler_generation = (
-        None if changed_source else existing.completed_handler_generation
-    )
-    if changed_source:
-        reason = "Source archive changed"
-    elif existing.required_scan_version != SCANNER_VERSION:
-        reason = "Scanner version changed"
-    elif existing.required_handler_generation != CURRENT_HANDLER_GENERATION:
-        reason = "Handler generation changed"
-    else:
-        reason = existing.work_reason
-
-    summary = summarize_archive_facts(
-        is_present=True,
-        completed_scan_version=completed_scan_version,
-        required_scan_version=SCANNER_VERSION,
-        completed_handler_generation=completed_handler_generation,
-        required_handler_generation=CURRENT_HANDLER_GENERATION,
-        stored_state=existing.state,
-        work_reason=reason,
-    )
-    next_reason = None if summary.status == ArchiveStateEnum.UP_TO_DATE else reason
-
     return {
         "b_id": existing.id,
         "b_buno": item["buno"],
@@ -450,12 +420,6 @@ def _build_archive_update(item: dict, existing: sa.Row, seen_at: datetime) -> di
         "b_is_present": True,
         "b_required_scan_version": SCANNER_VERSION,
         "b_completed_scan_version": completed_scan_version,
-        "b_required_handler_generation": CURRENT_HANDLER_GENERATION,
-        "b_completed_handler_generation": completed_handler_generation,
-        "b_state": summary.status,
-        "b_work_reason": next_reason,
-        "b_last_error_at": None,
-        "b_last_error_message": None,
     }
 
 
@@ -489,6 +453,11 @@ def _insert_new_archives(conn: sa.Connection, rows: list[dict]) -> None:
         logger.info("Inserted %s/%s new archive rows...", inserted_count, len(rows))
 
 
+def _is_mssql_deadlock(exc: Exception) -> bool:
+    message = str(exc).lower()
+    return "deadlock victim" in message or "(1205)" in message
+
+
 def _mark_absent_archives(
     conn: sa.Connection,
     scanned_directory_paths: Iterable[str],
@@ -515,17 +484,7 @@ def _mark_absent_archives(
         elif parent_dir in scanned_dirs and source_path not in seen_source_paths:
             absent_from_scanned.append(row.id)
 
-    updates = (
-        (
-            absent_from_scanned,
-            "Archive missing from scanned directory",
-        ),
-        (
-            absent_from_missing,
-            "Archive directory missing from source share",
-        ),
-    )
-    for absent_ids, reason in updates:
+    for absent_ids in (absent_from_scanned, absent_from_missing):
         for i in range(0, len(absent_ids), ARCHIVE_LOOKUP_BATCH_SIZE):
             conn.execute(
                 sa.update(ArchiveMetadata)
@@ -536,8 +495,6 @@ def _mark_absent_archives(
                 )
                 .values(
                     is_present=False,
-                    state=ArchiveStateEnum.UP_TO_DATE,
-                    work_reason=reason,
                 )
             )
 
@@ -556,6 +513,39 @@ def register_archives_bulk(
 
     Returns a map of {Path: archive_id} for all discovered and parseable archives.
     """
+    for attempt in range(1, ARCHIVE_REGISTRATION_DEADLOCK_RETRIES + 1):
+        try:
+            return _register_archives_bulk_once(
+                eng,
+                discovered_archives,
+                scanned_directory_paths=scanned_directory_paths,
+                missing_directory_paths=missing_directory_paths,
+            )
+        except DBAPIError as exc:
+            if attempt < ARCHIVE_REGISTRATION_DEADLOCK_RETRIES and _is_mssql_deadlock(
+                exc
+            ):
+                delay = ARCHIVE_REGISTRATION_DEADLOCK_DELAY_SECONDS * attempt
+                logger.warning(
+                    "Deadlock registering archives; retrying in %.1fs (%s/%s).",
+                    delay,
+                    attempt,
+                    ARCHIVE_REGISTRATION_DEADLOCK_RETRIES - 1,
+                )
+                time.sleep(delay)
+                continue
+            raise
+
+    raise RuntimeError("Archive registration retry loop exited unexpectedly")
+
+
+def _register_archives_bulk_once(
+    eng: sa.Engine,
+    discovered_archives: List[DiscoveredArchive | Path],
+    *,
+    scanned_directory_paths: Iterable[Path] = (),
+    missing_directory_paths: Iterable[Path] = (),
+) -> Dict[Path, int]:
     if not discovered_archives:
         return {}
 
@@ -603,12 +593,6 @@ def register_archives_bulk(
                 != update_row["b_required_scan_version"]
                 or existing.completed_scan_version
                 != update_row["b_completed_scan_version"]
-                or existing.required_handler_generation
-                != update_row["b_required_handler_generation"]
-                or existing.completed_handler_generation
-                != update_row["b_completed_handler_generation"]
-                or existing.state != update_row["b_state"]
-                or existing.work_reason != update_row["b_work_reason"]
             )
             if not update_needed:
                 skipped_existing_count += 1
@@ -634,16 +618,6 @@ def register_archives_bulk(
                     is_present=bindparam("b_is_present"),
                     required_scan_version=bindparam("b_required_scan_version"),
                     completed_scan_version=bindparam("b_completed_scan_version"),
-                    required_handler_generation=bindparam(
-                        "b_required_handler_generation"
-                    ),
-                    completed_handler_generation=bindparam(
-                        "b_completed_handler_generation"
-                    ),
-                    state=bindparam("b_state"),
-                    work_reason=bindparam("b_work_reason"),
-                    last_error_at=bindparam("b_last_error_at"),
-                    last_error_message=bindparam("b_last_error_message"),
                 )
             )
             conn.execute(stmt, to_update)

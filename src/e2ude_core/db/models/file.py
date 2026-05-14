@@ -1,10 +1,7 @@
-from enum import Enum as PyEnum
-
 from sqlalchemy import (
     BigInteger,
     Boolean,
     Column,
-    Enum,
     ForeignKey,
     Index,
     Integer,
@@ -14,45 +11,25 @@ from sqlalchemy import (
 )
 from sqlalchemy.orm import relationship
 
-from e2ude_core.db.base_session import Base, schema_fkey, DEFAULT_SCHEMA, E2UDE_DATETIME
-
-
-class ArchiveStateEnum(PyEnum):
-    NEEDS_SCAN = "NEEDS_SCAN"
-    NEEDS_PROCESSING = "NEEDS_PROCESSING"
-    UP_TO_DATE = "UP_TO_DATE"
+from e2ude_core.db.base_session import Base, DEFAULT_SCHEMA, E2UDE_DATETIME, schema_fkey
 
 
 class ArchiveMetadata(Base):
-    """
-    Canonical inventory and hot-path work state for one source archive.
-    """
+    """Source archive inventory plus metadata scan freshness."""
 
     __tablename__ = "metadata_archive"
-    id = Column("id", Integer, primary_key=True)
-    buno = Column("buno", String(6), nullable=False)
-    archive_datetime = Column("archive_datetime", E2UDE_DATETIME(0), nullable=False)
-    source_path = Column("source_path", String(500), unique=True, nullable=False)
+
+    id = Column(Integer, primary_key=True)
+    buno = Column(String(6), nullable=False)
+    archive_datetime = Column(E2UDE_DATETIME(0), nullable=False)
+    source_path = Column(String(500), unique=True, nullable=False)
     source_size_bytes = Column(BigInteger, nullable=False)
     source_mtime_ns = Column(BigInteger, nullable=False)
     first_seen_at = Column(E2UDE_DATETIME(), nullable=False, server_default=func.now())
     last_seen_at = Column(E2UDE_DATETIME(), nullable=False, server_default=func.now())
     is_present = Column(Boolean, nullable=False, default=True, server_default="1")
-
     required_scan_version = Column(Integer, nullable=False, default=1)
     completed_scan_version = Column(Integer, nullable=False, default=0)
-    required_handler_generation = Column(String(40), nullable=False)
-    completed_handler_generation = Column(String(40), nullable=True)
-    state = Column(
-        Enum(ArchiveStateEnum),
-        nullable=False,
-        default=ArchiveStateEnum.NEEDS_SCAN,
-        index=True,
-    )
-    work_reason = Column(String(255), nullable=True)
-    last_success_at = Column(E2UDE_DATETIME(), nullable=True)
-    last_error_at = Column(E2UDE_DATETIME(), nullable=True)
-    last_error_message = Column(String, nullable=True)
 
     files = relationship("FileMetadata", back_populates="archive")
 
@@ -83,9 +60,7 @@ class DiscoveryDirectoryMetadata(Base):
 
 
 class FileHashRegistry(Base):
-    """
-    Registry of unique file content hashes (MD5).
-    """
+    """Registry of unique file content hashes."""
 
     __tablename__ = "metadata_hash_registry"
 
@@ -94,32 +69,26 @@ class FileHashRegistry(Base):
 
 
 class FileMetadata(Base):
-    """
-    Links a specific file instance to its unique content hash.
-    """
+    """Links one archived file instance to its content hash."""
 
     __tablename__ = "metadata_file"
 
     id = Column(Integer, primary_key=True)
-
     archive_id = Column(
         Integer,
         ForeignKey(schema_fkey("metadata_archive.id")),
         nullable=False,
         index=True,
     )
-
     hash_id = Column(
         Integer,
         ForeignKey(schema_fkey("metadata_hash_registry.id")),
         nullable=False,
         index=True,
     )
-
     relative_path = Column(String(500), nullable=False)
     file_type = Column(String(50), index=True)
     file_size_bytes = Column(Integer)
 
-    # Relationships
     archive = relationship("ArchiveMetadata", back_populates="files")
     hash_info = relationship("FileHashRegistry")

@@ -10,8 +10,8 @@ from sqlalchemy.exc import IntegrityError
 from e2ude_core.db.base_session import DEFAULT_SCHEMA
 from e2ude_core.runtime_files import CURRENT_METADATA_CATALOG_GENERATION, PipelineId
 from e2ude_core.services.file_catalog import FileScanResult, catalog_staged_folder
-from e2ude_core.db.models import FileHashRegistry, FileMetadata
-from e2ude_core.orchestration.spec import JobRunResult
+from e2ude_core.db.models import ArchiveMetadata, FileHashRegistry, FileMetadata
+from e2ude_core.orchestration.runs import JobRunResult
 
 logger = logging.getLogger(__name__)
 
@@ -70,12 +70,14 @@ def _upsert_metadata(eng: sa.Engine, archive_id: int, files: List[FileScanResult
     for attempt in range(1, MAX_METADATA_DEADLOCK_RETRIES + 1):
         try:
             with eng.begin() as conn:
+                _lock_archive_row(conn, archive_id)
                 unique_md5s = sorted({f.md5 for f in files if f.md5})
                 hash_map = _ensure_hashes_exist(conn, unique_md5s)
                 to_insert, to_update, to_delete = _detect_changes(
                     conn, archive_id, files, hash_map
                 )
                 _commit_changes(conn, to_insert, to_update, to_delete)
+                _mark_archive_scan_complete(conn, archive_id)
             return
         except Exception as exc:
             if attempt < MAX_METADATA_DEADLOCK_RETRIES and _is_mssql_deadlock(exc):
@@ -92,6 +94,30 @@ def _upsert_metadata(eng: sa.Engine, archive_id: int, files: List[FileScanResult
 
             logger.error("Failed to upsert metadata.", exc_info=True)
             raise
+
+
+def _lock_archive_row(conn, archive_id: int) -> None:
+    if conn.dialect.name == "mssql":
+        conn.execute(
+            sa.text(
+                f"SELECT id FROM [{DEFAULT_SCHEMA}].[metadata_archive] "
+                "WITH (UPDLOCK, HOLDLOCK) WHERE id = :archive_id"
+            ),
+            {"archive_id": archive_id},
+        ).scalar_one()
+        return
+
+    conn.execute(
+        select(ArchiveMetadata.id).where(ArchiveMetadata.id == archive_id)
+    ).scalar_one()
+
+
+def _mark_archive_scan_complete(conn, archive_id: int) -> None:
+    conn.execute(
+        update(ArchiveMetadata)
+        .where(ArchiveMetadata.id == archive_id)
+        .values(completed_scan_version=ArchiveMetadata.required_scan_version)
+    )
 
 
 def _ensure_hashes_exist(conn, unique_md5s: List[bytes]) -> Dict[bytes, int]:

@@ -60,7 +60,7 @@ def _build_repo_env(repo_root, extra_env=None):
 
 
 @pytest.mark.local_mssql
-def test_cli_schema_clone_check_promote_workflow(
+def test_cli_schema_check_promote_workflow(
     local_mssql_server,
     local_mssql_database,
     local_mssql_driver,
@@ -68,7 +68,6 @@ def test_cli_schema_clone_check_promote_workflow(
     run_repo_python,
     write_app_config,
 ):
-    source_schema = f"e2ude_src_{uuid.uuid4().hex[:8]}"
     candidate_schema = f"e2ude_candidate_{uuid.uuid4().hex[:8]}"
     stable_schema = f"e2ude_stable_{uuid.uuid4().hex[:8]}"
     archive_schema = f"e2ude_archive_{uuid.uuid4().hex[:8]}"
@@ -79,7 +78,7 @@ def test_cli_schema_clone_check_promote_workflow(
             "db_name": local_mssql_database,
             "driver": local_mssql_driver,
             "trusted_connection": "yes",
-            "schema_name": source_schema,
+            "schema_name": candidate_schema,
         }
     )
 
@@ -107,7 +106,7 @@ with eng.begin() as conn:
         sa.insert(ArtifactManifest).values(
             hash_id=hash_id,
             target_table="rsmdata_segments",
-            handler_version=1,
+            parser_version=1,
             row_count=0,
         )
     )
@@ -122,24 +121,11 @@ with eng.begin() as conn:
 """,
             {
                 "E2UDE_CONFIG_PATH": config_path,
-                "E2UDE_DATABASE__SCHEMA_NAME": source_schema,
+                "E2UDE_DATABASE__SCHEMA_NAME": candidate_schema,
                 "STABLE_SCHEMA": stable_schema,
             },
         )
 
-        run_repo_command(
-            [
-                sys.executable,
-                "-m",
-                "e2ude_core.cli",
-                "schema",
-                "clone",
-                source_schema,
-                candidate_schema,
-                "--config",
-                str(config_path),
-            ]
-        )
         run_repo_command(
             [
                 sys.executable,
@@ -224,7 +210,6 @@ print(json.dumps(result))
         }
     finally:
         for schema_name in (
-            source_schema,
             candidate_schema,
             stable_schema,
             archive_schema,
@@ -286,6 +271,19 @@ with eng.connect() as conn:
             f"GROUP BY target_table"
         )
     ).fetchall()
+    error_session_rows = conn.execute(
+        sa.text(
+            f"SELECT id, status FROM [{DEFAULT_SCHEMA}].[processing_sessions] "
+            f"WHERE status = 'ERROR' ORDER BY id"
+        )
+    ).fetchall()
+    error_job_rows = conn.execute(
+        sa.text(
+            f"SELECT id, session_id, parser_id, target_table, message "
+            f"FROM [{DEFAULT_SCHEMA}].[processing_jobs] "
+            f"WHERE status = 'ERROR' ORDER BY id"
+        )
+    ).fetchall()
     payload = {
         "archive_rows": conn.execute(sa.text(f"SELECT COUNT(*) FROM [{DEFAULT_SCHEMA}].[metadata_archive]")).scalar_one(),
         "sessions": conn.execute(sa.text(f"SELECT COUNT(*) FROM [{DEFAULT_SCHEMA}].[processing_sessions]")).scalar_one(),
@@ -295,6 +293,8 @@ with eng.connect() as conn:
         "artifacts_total": conn.execute(sa.text(f"SELECT COUNT(*) FROM [{DEFAULT_SCHEMA}].[metadata_artifact_manifest]")).scalar_one(),
         "artifact_counts": {row.target_table: row.artifact_count for row in artifact_rows},
         "data_counts": data_counts,
+        "error_session_rows": [dict(row._mapping) for row in error_session_rows],
+        "error_job_rows": [dict(row._mapping) for row in error_job_rows],
     }
 
 print(json.dumps(payload))
@@ -408,7 +408,6 @@ def test_main_pipeline_smoke_sqlite(
             "E2UDE_RUNTIME__DISCOVERY_WORKERS": 8,
             "E2UDE_RUNTIME__UNZIP_WORKERS": 2,
             "E2UDE_RUNTIME__PROCESS_WORKERS": 1,
-            "E2UDE_RUNTIME__DB_WRITE_WORKERS": 1,
             "E2UDE_RUNTIME__PIPELINE_BUFFER_SIZE": 2,
         },
     )
@@ -637,7 +636,6 @@ with eng.begin() as conn:
                 "E2UDE_RUNTIME__DISCOVERY_WORKERS": 8,
                 "E2UDE_RUNTIME__UNZIP_WORKERS": 2,
                 "E2UDE_RUNTIME__PROCESS_WORKERS": 1,
-                "E2UDE_RUNTIME__DB_WRITE_WORKERS": 1,
                 "E2UDE_RUNTIME__PIPELINE_BUFFER_SIZE": 2,
             },
         )
@@ -948,7 +946,6 @@ def test_main_pipeline_parallel_duplicate_tmptr_hashes_are_serialized(
                 "E2UDE_RUNTIME__DISCOVERY_WORKERS": 4,
                 "E2UDE_RUNTIME__UNZIP_WORKERS": 4,
                 "E2UDE_RUNTIME__PROCESS_WORKERS": 4,
-                "E2UDE_RUNTIME__DB_WRITE_WORKERS": 1,
                 "E2UDE_RUNTIME__PIPELINE_BUFFER_SIZE": 4,
             },
         )
@@ -976,7 +973,7 @@ with eng.connect() as conn:
     tmptr_job_statuses = conn.execute(
         sa.text(
             f"SELECT status FROM [{DEFAULT_SCHEMA}].[processing_jobs] "
-            f"WHERE pipeline_id = 'tmptr_log' ORDER BY id"
+            f"WHERE parser_id = 'tmptr_log' ORDER BY id"
         )
     ).fetchall()
 
@@ -1087,7 +1084,6 @@ def test_two_main_processes_can_overlap_on_same_schema_without_tmptr_corruption(
         "E2UDE_RUNTIME__DISCOVERY_WORKERS": 4,
         "E2UDE_RUNTIME__UNZIP_WORKERS": 4,
         "E2UDE_RUNTIME__PROCESS_WORKERS": 4,
-        "E2UDE_RUNTIME__DB_WRITE_WORKERS": 1,
         "E2UDE_RUNTIME__PIPELINE_BUFFER_SIZE": 4,
     }
 
@@ -1155,8 +1151,8 @@ initialize_database(eng, reset_tables=False)
             },
         )
 
-        assert payload["error_sessions"] == 0
-        assert payload["error_jobs"] == 0
+        assert payload["error_sessions"] == 0, payload
+        assert payload["error_jobs"] == 0, payload
         assert payload["hashes"] >= 1
         assert payload["artifact_counts"].get("rsmdata_tmptr") == 1
         assert payload["data_counts"].get("rsmdata_tmptr") == line_count
@@ -1246,7 +1242,6 @@ def test_parallel_duplicate_fixture_archives_do_not_duplicate_multi_table_output
                 "E2UDE_RUNTIME__DISCOVERY_WORKERS": 4,
                 "E2UDE_RUNTIME__UNZIP_WORKERS": 2,
                 "E2UDE_RUNTIME__PROCESS_WORKERS": 1,
-                "E2UDE_RUNTIME__DB_WRITE_WORKERS": 1,
                 "E2UDE_RUNTIME__PIPELINE_BUFFER_SIZE": 2,
             },
         )
@@ -1264,7 +1259,6 @@ def test_parallel_duplicate_fixture_archives_do_not_duplicate_multi_table_output
                 "E2UDE_RUNTIME__DISCOVERY_WORKERS": 4,
                 "E2UDE_RUNTIME__UNZIP_WORKERS": 4,
                 "E2UDE_RUNTIME__PROCESS_WORKERS": 4,
-                "E2UDE_RUNTIME__DB_WRITE_WORKERS": 1,
                 "E2UDE_RUNTIME__PIPELINE_BUFFER_SIZE": 4,
             },
         )
@@ -1282,9 +1276,13 @@ def test_parallel_duplicate_fixture_archives_do_not_duplicate_multi_table_output
 
         assert any(count > 0 for count in baseline_metrics["data_counts"].values())
         assert duplicate_metrics["data_counts"] == baseline_metrics["data_counts"]
-        assert duplicate_metrics["artifact_counts"] == baseline_metrics["artifact_counts"]
+        assert (
+            duplicate_metrics["artifact_counts"] == baseline_metrics["artifact_counts"]
+        )
         assert duplicate_metrics["hashes"] == baseline_metrics["hashes"]
-        assert duplicate_metrics["artifacts_total"] == baseline_metrics["artifacts_total"]
+        assert (
+            duplicate_metrics["artifacts_total"] == baseline_metrics["artifacts_total"]
+        )
         assert duplicate_metrics["archive_rows"] == duplicate_count
     finally:
         for schema_name, config_path in (

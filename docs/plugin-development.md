@@ -9,10 +9,10 @@ That file defines:
 - file type
 - match patterns
 - parser function
-- handler version
+- parser version
 - expected output models
 
-Those specs are also the handler lookup table used by planning, preview, upload,
+Those specs are also the parser lookup table used by planning, preview, upload,
 and table creation.
 
 ## Workflow
@@ -53,20 +53,21 @@ uv run e2ude parser backfill segments --schema e2ude_candidate_segments --dry-ru
 uv run e2ude parser backfill segments --schema e2ude_candidate_segments --limit 50
 ```
 
-Backfill writes audit rows and artifact manifest rows, but it does not mark the containing archive globally complete. Run a normal refresh when you want archive-level state to settle.
+Backfill writes audit rows and artifact manifest rows. A normal refresh uses the
+same artifact planner after archive scans.
 
 ## Versioning
 
-Bump the handler version in `src/e2ude_core/runtime_files.py` when existing hashes should be reprocessed for that output.
+Bump the parser version in `src/e2ude_core/runtime_files.py` when existing hashes should be reprocessed for that output.
 
-The planner compares handler versions against `metadata_artifact_manifest`. If the stored version is behind, the file hash is scheduled again for that parser.
+The planner compares parser versions against `metadata_artifact_manifest`. If the stored version is behind, the file hash is scheduled again for that parser.
 
 ## Reference Files
 
 | Task | File |
 | --- | --- |
 | Runtime file spec | `src/e2ude_core/runtime_files.py` |
-| Handler lookup | `src/e2ude_core/runtime_files.py` |
+| Parser lookup | `src/e2ude_core/runtime_files.py` |
 | Parser CLI | `src/e2ude_core/cli.py` |
 | File typing and hashing | `src/e2ude_core/services/file_catalog.py` |
 | Example parser | `src/e2ude_core/pipelines/parsers/segments.py` |

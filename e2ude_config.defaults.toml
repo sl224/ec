@@ -7,7 +7,6 @@ discovery_workers = 1024
 pipeline_buffer_size = 60
 unzip_workers = 60
 process_workers = 8
-db_write_workers = 4
 
 [diagnostics]
 enable_viztracer = false

@@ -8,7 +8,7 @@ import sys
 from dataclasses import dataclass
 from datetime import datetime
 from pathlib import Path, PurePosixPath
-from typing import Iterable, Sequence
+from typing import TYPE_CHECKING, Sequence
 
 import pandas as pd
 
@@ -23,7 +23,10 @@ ENV_SCHEMAS = {
     "dev": "e2ude_core_dev",
     "prod": "e2ude_core",
 }
-AUDIT_TABLES = {"processing_sessions", "processing_jobs"}
+
+
+if TYPE_CHECKING:
+    from e2ude_core.orchestration.state import ParserWorkItem
 
 
 @dataclass(frozen=True)
@@ -35,17 +38,6 @@ class TargetInfo:
     schema: str | None = None
     schema_class: str | None = None
     sqlite_path: str | None = None
-
-
-@dataclass(frozen=True)
-class ParserWorkItem:
-    archive_id: int
-    source_path: Path
-    file_id: int
-    hash_id: int
-    relative_path: str
-    target_models: tuple
-    handler_version: int
 
 
 def _parser_id(spec) -> str:
@@ -260,52 +252,9 @@ def _print_table(headers: list[str], rows: list[list[object]]) -> None:
 
 
 def _parser_counts(eng, specs) -> dict[str, dict[str, int]]:
-    import sqlalchemy as sa
+    from e2ude_core.orchestration.state import count_parser_artifacts
 
-    from e2ude_core.db.models import ArtifactManifest, FileMetadata
-
-    counts: dict[str, dict[str, int]] = {}
-    with eng.connect() as conn:
-        for spec in specs:
-            hash_rows = conn.execute(
-                sa.select(FileMetadata.hash_id).where(
-                    FileMetadata.file_type == spec.file_type.value
-                )
-            ).fetchall()
-            hash_ids = {row.hash_id for row in hash_rows}
-            target_tables = [model.__tablename__ for model in spec.expected_models]
-            complete = 0
-            rows_uploaded = 0
-            if hash_ids and target_tables:
-                artifact_rows = conn.execute(
-                    sa.select(
-                        ArtifactManifest.hash_id,
-                        ArtifactManifest.target_table,
-                        ArtifactManifest.row_count,
-                    ).where(
-                        ArtifactManifest.hash_id.in_(hash_ids),
-                        ArtifactManifest.target_table.in_(target_tables),
-                        ArtifactManifest.handler_version >= spec.version,
-                    )
-                ).fetchall()
-                by_hash: dict[int, set[str]] = {}
-                for row in artifact_rows:
-                    by_hash.setdefault(row.hash_id, set()).add(row.target_table)
-                    rows_uploaded += row.row_count or 0
-                complete = sum(
-                    1
-                    for table_set in by_hash.values()
-                    if len(table_set) == len(target_tables)
-                )
-
-            counts[_parser_id(spec)] = {
-                "files": len(hash_rows),
-                "hashes": len(hash_ids),
-                "complete": complete,
-                "missing": max(len(hash_ids) - complete, 0),
-                "rows": rows_uploaded,
-            }
-    return counts
+    return count_parser_artifacts(eng, specs)
 
 
 def cmd_parsers(args) -> int:
@@ -435,9 +384,9 @@ def cmd_preview(args) -> int:
                 "file_path": str(file_path),
                 "selected_parser": _parser_id(spec),
                 "selected_file_type": spec.file_type.value,
-                "pipeline_id": _parser_id(spec),
+                "parser_id": _parser_id(spec),
                 "selection_source": selection_source,
-                "handler_version": spec.version,
+                "parser_version": spec.version,
                 "tables": output_tables,
             },
             indent=2,
@@ -445,31 +394,6 @@ def cmd_preview(args) -> int:
         )
     )
     return 0
-
-
-def _fetch_artifact_versions(
-    conn, hash_ids: Iterable[int]
-) -> dict[int, dict[str, int]]:
-    import sqlalchemy as sa
-
-    from e2ude_core.db.models import ArtifactManifest
-
-    hash_id_list = sorted(set(hash_ids))
-    if not hash_id_list:
-        return {}
-
-    versions: dict[int, dict[str, int]] = {}
-    rows = conn.execute(
-        sa.select(
-            ArtifactManifest.hash_id,
-            ArtifactManifest.target_table,
-            ArtifactManifest.handler_version,
-        ).where(ArtifactManifest.hash_id.in_(hash_id_list))
-    )
-    for row in rows:
-        current = versions.setdefault(row.hash_id, {}).get(row.target_table, 0)
-        versions[row.hash_id][row.target_table] = max(current, row.handler_version)
-    return versions
 
 
 def _plan_parser_work(
@@ -480,82 +404,22 @@ def _plan_parser_work(
     failed_only: bool = False,
     force: bool = False,
 ):
-    import sqlalchemy as sa
-
-    from e2ude_core.db.models import (
-        ArchiveMetadata,
-        FileMetadata,
-        ProcessingJob,
-        StatusEnum,
+    from e2ude_core.orchestration.state import (
+        count_parser_artifacts,
+        group_pending_artifacts,
+        load_pending_artifacts,
     )
 
-    with eng.connect() as conn:
-        stmt = (
-            sa.select(
-                ArchiveMetadata.id.label("archive_id"),
-                ArchiveMetadata.source_path,
-                FileMetadata.id.label("file_id"),
-                FileMetadata.hash_id,
-                FileMetadata.relative_path,
-            )
-            .select_from(FileMetadata)
-            .join(ArchiveMetadata, ArchiveMetadata.id == FileMetadata.archive_id)
-            .where(
-                ArchiveMetadata.is_present == sa.true(),
-                ArchiveMetadata.completed_scan_version
-                >= ArchiveMetadata.required_scan_version,
-                FileMetadata.file_type == spec.file_type.value,
-            )
-        )
-        if failed_only:
-            stmt = stmt.join(ProcessingJob, ProcessingJob.file_id == FileMetadata.id)
-            stmt = stmt.where(
-                ProcessingJob.pipeline_id == _parser_id(spec),
-                ProcessingJob.status == StatusEnum.ERROR,
-            )
-
-        rows = conn.execute(stmt).fetchall()
-        artifact_versions = _fetch_artifact_versions(
-            conn, (row.hash_id for row in rows)
-        )
-
-    representatives = {}
-    for row in sorted(
-        rows, key=lambda item: (item.hash_id, item.archive_id, item.file_id)
-    ):
-        representatives.setdefault(row.hash_id, row)
-
-    items: list[ParserWorkItem] = []
-    for row in representatives.values():
-        current_versions = artifact_versions.get(row.hash_id, {})
-        if force:
-            missing_models = spec.expected_models
-        else:
-            missing_models = tuple(
-                model
-                for model in spec.expected_models
-                if current_versions.get(model.__tablename__, 0) < spec.version
-            )
-        if not missing_models:
-            continue
-        items.append(
-            ParserWorkItem(
-                archive_id=row.archive_id,
-                source_path=Path(row.source_path),
-                file_id=row.file_id,
-                hash_id=row.hash_id,
-                relative_path=row.relative_path,
-                target_models=missing_models,
-                handler_version=spec.version,
-            )
-        )
-
-    items.sort(
-        key=lambda item: (str(item.source_path), item.relative_path, item.hash_id)
+    artifacts = load_pending_artifacts(
+        eng,
+        parser_id=_parser_id(spec),
+        failed_only=failed_only,
+        limit=limit,
+        force=force,
     )
-    if limit is not None:
-        items = items[:limit]
-    return items, len(rows), len(representatives)
+    items = list(group_pending_artifacts(artifacts))
+    counts = count_parser_artifacts(eng, (spec,))[_parser_id(spec)]
+    return items, counts["files"], counts["hashes"]
 
 
 def _print_parser_plan(
@@ -613,31 +477,17 @@ def _stage_archive(
     temp_zip.unlink()
 
 
-def _lookup_processing_job_id(eng, session_id: int, spec) -> int | None:
-    import sqlalchemy as sa
-
-    from e2ude_core.db.models import ProcessingJob
-
-    with eng.connect() as conn:
-        return conn.execute(
-            sa.select(ProcessingJob.id).where(
-                ProcessingJob.session_id == session_id,
-                ProcessingJob.pipeline_id == spec.pipeline_id.value,
-                ProcessingJob.file_id == spec.file_id,
-                ProcessingJob.dataset_key == spec.target_key,
-            )
-        ).scalar_one_or_none()
-
-
 def _run_parser_items(args, eng, spec, items: list[ParserWorkItem]) -> int:
     from e2ude_core.config import settings
     from e2ude_core.context import EtlContext
     from e2ude_core.orchestration.runs import (
+        create_processing_job,
         create_processing_session,
         finalize_processing_session,
-        run_processing_job,
+        mark_processing_job_completed,
+        mark_processing_job_failed,
+        mark_processing_job_running,
     )
-    from e2ude_core.orchestration.spec import JobSpec, build_job_target
     from e2ude_core.pipelines.base import process_file
 
     staging_root = Path(args.staging_root or settings.paths.staging_root)
@@ -649,56 +499,62 @@ def _run_parser_items(args, eng, spec, items: list[ParserWorkItem]) -> int:
     failed = 0
     for item in items:
         session_id = None
-        job_spec = None
+        job_ids: dict[str, int] = {}
         session_failed = False
         stage_dir = staging_root / (
             f"cli_{_parser_id(spec)}_{item.archive_id}_{item.file_id}"
         )
         full_path = stage_dir / item.relative_path
         try:
-            session_id = create_processing_session(eng, item.archive_id, context)
-            target = build_job_target(item.target_models)
-            job_spec = JobSpec.for_file(
-                pipeline_id=spec.pipeline_id,
-                job_name=f"{_parser_id(spec)}: {item.relative_path} [{target.label}]",
-                target_label=target.label,
-                target_key=target.key,
-                handler_version=item.handler_version,
-                file_type=spec.file_type,
-                file_id=item.file_id,
-                hash_id=item.hash_id,
-            )
+            session_id = create_processing_session(eng, context)
+            for model in item.target_models:
+                job_ids[model.__tablename__] = create_processing_job(
+                    eng,
+                    session_id,
+                    archive_id=item.archive_id,
+                    file_id=item.file_id,
+                    hash_id=item.hash_id,
+                    file_type=spec.file_type,
+                    parser_id=_parser_id(spec),
+                    target_table=model.__tablename__,
+                    parser_version=item.parser_version,
+                )
 
             _stage_archive(item.source_path, stage_dir, [item.relative_path])
 
-            def _runner(report_progress):
-                if not full_path.exists():
-                    raise FileNotFoundError(f"Staged file missing: {full_path}")
-                return process_file(
-                    eng=eng,
-                    spec=spec,
-                    hash_id=item.hash_id,
-                    file_path=full_path,
-                    report_progress=report_progress,
-                    target_models=list(item.target_models),
-                    db_workers=args.db_workers,
-                    force=args.force,
-                )
+            def _progress(message: str) -> None:
+                for job_id in job_ids.values():
+                    mark_processing_job_running(eng, job_id, message)
 
-            result = run_processing_job(eng, session_id, job_spec, _runner)
+            _progress(f"Starting {_parser_id(spec)}")
+            if not full_path.exists():
+                raise FileNotFoundError(f"Staged file missing: {full_path}")
+            result = process_file(
+                eng=eng,
+                spec=spec,
+                hash_id=item.hash_id,
+                file_path=full_path,
+                report_progress=_progress,
+                target_models=item.target_models,
+                force=args.force,
+            )
             total_rows += result.rows_uploaded
+            for table_name, job_id in job_ids.items():
+                mark_processing_job_completed(
+                    eng,
+                    job_id,
+                    message=result.completion_message or "Completed",
+                    rows_uploaded=result.table_rows.get(table_name, 0),
+                )
         except Exception as exc:
             session_failed = True
             failed += 1
             copied = _copy_failure_artifact(full_path, failure_dir, item)
-            job_id = (
-                _lookup_processing_job_id(eng, session_id, job_spec)
-                if session_id is not None and job_spec is not None
-                else None
-            )
+            for job_id in job_ids.values():
+                mark_processing_job_failed(eng, job_id, f"Failed: {exc}")
             print(
                 f"FAILED archive={item.archive_id} file={item.file_id} "
-                f"hash={item.hash_id} job={job_id or 'n/a'} "
+                f"hash={item.hash_id} jobs={list(job_ids.values()) or 'n/a'} "
                 f"parser={_parser_id(spec)} relative_path={item.relative_path} "
                 f"error={exc}"
             )
@@ -837,20 +693,40 @@ def cmd_artifacts_invalidate(args) -> int:
             predicate = ArtifactManifest.target_table.in_(target_tables)
             if args.hash_id:
                 predicate = predicate & ArtifactManifest.hash_id.in_(args.hash_id)
-            count = conn.execute(
+            manifest_count = conn.execute(
                 sa.select(sa.func.count())
                 .select_from(ArtifactManifest)
                 .where(predicate)
             ).scalar_one()
+            table_counts = []
+            for model in spec.expected_models:
+                stmt = sa.select(sa.func.count()).select_from(model)
+                if args.hash_id:
+                    stmt = stmt.where(model.hash_id.in_(args.hash_id))
+                table_counts.append(
+                    [model.__tablename__, conn.execute(stmt).scalar_one()]
+                )
+
             print(f"Parser      {_parser_id(spec)}")
             print(f"Tables      {', '.join(target_tables)}")
-            print(f"Artifacts   {count}")
+            print(f"Artifacts   {manifest_count}")
+            _print_table(["table", "rows"], table_counts)
             if args.dry_run or args.plan:
                 return 0
             if not args.yes:
                 raise SystemExit("Refusing invalidate without --yes.")
+            deleted_rows = 0
+            for model in spec.expected_models:
+                delete_stmt = model.__table__.delete()
+                if args.hash_id:
+                    delete_stmt = delete_stmt.where(model.hash_id.in_(args.hash_id))
+                result = conn.execute(delete_stmt)
+                deleted_rows += result.rowcount or 0
             conn.execute(ArtifactManifest.__table__.delete().where(predicate))
-            print(f"Deleted {count} artifact manifest rows.")
+            print(
+                f"Deleted {deleted_rows} parser rows and "
+                f"{manifest_count} artifact manifest rows."
+            )
     finally:
         eng.dispose()
     return 0
@@ -910,131 +786,6 @@ def _drop_schema_tables(conn, schema_name: str, table_names: list[str]) -> None:
         )
     for table_name in table_names:
         conn.execute(sa.text(f"DROP TABLE [{schema_name}].[{table_name}]"))
-
-
-def _source_columns(conn, schema_name: str, table_name: str) -> set[str]:
-    import sqlalchemy as sa
-
-    rows = conn.execute(
-        sa.text(
-            """
-            SELECT c.name
-            FROM sys.columns AS c
-            INNER JOIN sys.tables AS t ON t.object_id = c.object_id
-            INNER JOIN sys.schemas AS s ON s.schema_id = t.schema_id
-            WHERE s.name = :schema_name AND t.name = :table_name
-            """
-        ),
-        {"schema_name": schema_name, "table_name": table_name},
-    ).fetchall()
-    return {row.name for row in rows}
-
-
-def _copyable_columns(table, source_columns: set[str]) -> tuple[list[str], list[str]]:
-    common = [column.name for column in table.columns if column.name in source_columns]
-    missing_required = []
-    for column in table.columns:
-        if column.name in source_columns:
-            continue
-        if not column.nullable and not _column_can_fill_itself(column):
-            missing_required.append(column.name)
-    return common, missing_required
-
-
-def _column_can_fill_itself(column) -> bool:
-    has_default = column.default is not None or column.server_default is not None
-    is_identity = bool(column.primary_key and column.autoincrement is not False)
-    return has_default or is_identity
-
-
-def _uses_identity_insert(table, column_names: list[str]) -> bool:
-    if "id" not in column_names:
-        return False
-    id_column = table.columns.get("id")
-    return bool(id_column is not None and id_column.primary_key)
-
-
-def _required_copied_columns(table, column_names: list[str]) -> list[str]:
-    required = []
-    for column in table.columns:
-        if column.name not in column_names:
-            continue
-        if not column.nullable and not _column_can_fill_itself(column):
-            required.append(column.name)
-    return required
-
-
-def _null_required_column_counts(
-    conn, source_schema: str, table_name: str, column_names: list[str]
-) -> dict[str, int]:
-    import sqlalchemy as sa
-
-    counts = {}
-    for column_name in column_names:
-        count = conn.execute(
-            sa.text(
-                f"SELECT COUNT(*) FROM [{source_schema}].[{table_name}] "
-                f"WHERE [{column_name}] IS NULL"
-            )
-        ).scalar_one()
-        if count:
-            counts[column_name] = count
-    return counts
-
-
-def _copy_table_rows(conn, source_schema: str, dest_schema: str, table) -> int | None:
-    import sqlalchemy as sa
-
-    table_name = table.name
-    source_table_names = _fetch_schema_tables(conn, source_schema)
-    if table_name not in source_table_names:
-        return None
-
-    common, missing_required = _copyable_columns(
-        table, _source_columns(conn, source_schema, table_name)
-    )
-    if missing_required:
-        print(
-            f"Skipped [{table_name}]; source missing required columns: "
-            f"{', '.join(missing_required)}"
-        )
-        return None
-    if not common:
-        print(f"Skipped [{table_name}]; no compatible columns found.")
-        return None
-
-    null_counts = _null_required_column_counts(
-        conn,
-        source_schema,
-        table_name,
-        _required_copied_columns(table, common),
-    )
-    if null_counts:
-        details = ", ".join(
-            f"{column_name}={count}" for column_name, count in null_counts.items()
-        )
-        raise SystemExit(
-            f"Cannot clone [{source_schema}].[{table_name}]; required target "
-            f"column(s) contain NULL source values: {details}."
-        )
-
-    columns = ", ".join(f"[{name}]" for name in common)
-    identity_insert = _uses_identity_insert(table, common)
-    if identity_insert:
-        conn.execute(sa.text(f"SET IDENTITY_INSERT [{dest_schema}].[{table_name}] ON"))
-    try:
-        result = conn.execute(
-            sa.text(
-                f"INSERT INTO [{dest_schema}].[{table_name}] ({columns}) "
-                f"SELECT {columns} FROM [{source_schema}].[{table_name}]"
-            )
-        )
-    finally:
-        if identity_insert:
-            conn.execute(
-                sa.text(f"SET IDENTITY_INSERT [{dest_schema}].[{table_name}] OFF")
-            )
-    return result.rowcount
 
 
 def cmd_schema_cleanup(args) -> int:
@@ -1144,73 +895,6 @@ def cmd_schema_check(args) -> int:
                     ["parser", "hashes", "complete", "missing/stale", "rows"],
                     rows,
                 )
-    finally:
-        eng.dispose()
-    return 0
-
-
-def cmd_schema_clone(args) -> int:
-    source_schema = _resolve_schema_ref(args.source)
-    dest_schema = _resolve_schema_ref(args.dest)
-    _apply_schema_command_env(args, dest_schema)
-
-    from e2ude_core.config import settings
-    from e2ude_core.db.access import get_engine
-    from e2ude_core.db.schema_safety import is_protected_schema
-    from e2ude_core.db.setup import initialize_database, _runtime_tables
-
-    if settings.database.type != "mssql":
-        raise SystemExit("schema clone only supports MSSQL targets.")
-    if source_schema == dest_schema:
-        raise SystemExit("source and destination schemas must be different.")
-    if is_protected_schema(dest_schema):
-        raise SystemExit(f"Protected schema [{dest_schema}] cannot be cloned into.")
-
-    _print_target(_target_info(f"schema clone {source_schema} -> {dest_schema}"))
-    eng = get_engine(settings.database)
-    try:
-        with eng.begin() as conn:
-            if not _schema_exists(conn, source_schema):
-                raise SystemExit(f"Source schema [{source_schema}] does not exist.")
-            if _schema_exists(conn, dest_schema):
-                table_names = _fetch_schema_tables(conn, dest_schema)
-                if table_names and not args.replace:
-                    raise SystemExit(
-                        f"Destination schema [{dest_schema}] is not empty. "
-                        "Use --replace to rebuild it."
-                    )
-                if args.replace and table_names:
-                    if args.dry_run or args.preview:
-                        print(f"Would drop {len(table_names)} destination tables.")
-                        return 0
-                    if not args.yes:
-                        raise SystemExit("Refusing clone --replace without --yes.")
-                    _drop_schema_tables(conn, dest_schema, table_names)
-            if args.dry_run or args.preview:
-                print(f"Would clone compatible runtime tables into [{dest_schema}].")
-                return 0
-
-        initialize_database(eng, reset_tables=False)
-
-        copied: list[list[object]] = []
-        skipped: list[str] = []
-        with eng.begin() as conn:
-            for table in _runtime_tables():
-                if table.name in AUDIT_TABLES:
-                    skipped.append(table.name)
-                    continue
-                rowcount = _copy_table_rows(conn, source_schema, dest_schema, table)
-                if rowcount is None:
-                    skipped.append(table.name)
-                else:
-                    copied.append([table.name, rowcount])
-
-        if copied:
-            _print_table(["table", "rows"], copied)
-        if skipped:
-            print("Skipped")
-            for table_name in skipped:
-                print(f"  - {table_name}")
     finally:
         eng.dispose()
     return 0
@@ -1332,7 +1016,6 @@ def add_work_args(parser) -> None:
     parser.add_argument(
         "--force", action="store_true", help="Rebuild current artifacts"
     )
-    parser.add_argument("--db-workers", type=int, default=4)
     parser.add_argument("--staging-root", type=Path)
     parser.add_argument("--failure-dir", type=Path)
     parser.add_argument("--keep-staging", action="store_true")
@@ -1434,16 +1117,6 @@ def build_parser() -> argparse.ArgumentParser:
     cleanup.add_argument("--confirm-schema")
     cleanup.add_argument("--keep-schema", action="store_true")
     cleanup.set_defaults(func=cmd_schema_cleanup)
-
-    clone = schema_sub.add_parser("clone")
-    add_mssql_connection_args(clone)
-    clone.add_argument("source")
-    clone.add_argument("dest")
-    clone.add_argument("--replace", action="store_true")
-    clone.add_argument("--preview", action="store_true")
-    clone.add_argument("--dry-run", action="store_true")
-    clone.add_argument("--yes", action="store_true")
-    clone.set_defaults(func=cmd_schema_clone)
 
     check = schema_sub.add_parser("check")
     add_mssql_connection_args(check)

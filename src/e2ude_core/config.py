@@ -66,7 +66,6 @@ class RuntimeConfig(BaseModel):
     pipeline_buffer_size: int = Field(default=60, gt=0)
     unzip_workers: int = Field(default=60, gt=0)
     process_workers: int = Field(default=8, gt=0)
-    db_write_workers: int = Field(default=4, gt=0)
 
 
 class DiagnosticsConfig(BaseModel):

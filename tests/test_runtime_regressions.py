@@ -8,9 +8,9 @@ from pathlib import PureWindowsPath
 import pytest
 import sqlalchemy as sa
 
-import e2ude_core.main as app_main
 import e2ude_core.db.setup as db_setup
-from e2ude_core.db.models import ArchiveMetadata, ArchiveStateEnum, PfcDb, SegmentsData
+import e2ude_core.main as app_main
+from e2ude_core.db.models import ArchiveMetadata, SegmentsData
 from e2ude_core.db.models import DiscoveryDirectoryMetadata
 from e2ude_core.db.schema_safety import (
     SchemaClassification,
@@ -19,7 +19,6 @@ from e2ude_core.db.schema_safety import (
     is_protected_schema,
     schema_classification,
 )
-from e2ude_core.orchestration.spec import JobSpec, JobSubjectKind, build_job_target
 from e2ude_core.runtime_files import (
     CURRENT_METADATA_CATALOG_GENERATION,
     HANDLED_FILE_SPECS_BY_TYPE,
@@ -35,52 +34,6 @@ from e2ude_core.services.discovery import (
     DiscoveryMode,
     discover_archives,
 )
-
-
-def test_build_job_target_hashes_multi_table_batches_stably():
-    first = build_job_target([PfcDb, SegmentsData])
-    second = build_job_target([SegmentsData, PfcDb])
-    single = build_job_target([SegmentsData])
-
-    assert first == second
-    assert first.label == "BATCH"
-    assert first.key.startswith("batch:2:")
-    assert single.label == "rsmdata_segments"
-    assert single.key == "rsmdata_segments"
-
-
-def test_job_spec_factories_keep_scan_jobs_and_file_jobs_distinct():
-    scan_job = JobSpec.for_metadata_scan(
-        pipeline_id=PipelineId("metadata_scan"),
-        job_name="scan folder",
-        target_label="metadata_file",
-        target_key="metadata_file",
-        handler_version=1,
-    )
-    file_job = JobSpec.for_file(
-        pipeline_id=PipelineId("segments"),
-        job_name="segments: sample",
-        target_label="rsmdata_segments",
-        target_key="rsmdata_segments",
-        handler_version=1,
-        file_type=FileType.SEGMENTS,
-    )
-
-    assert scan_job.subject_kind == JobSubjectKind.METADATA_SCAN
-    assert scan_job.file_type is None
-    assert file_job.subject_kind == JobSubjectKind.FILE_ARTIFACT
-    assert file_job.file_type == FileType.SEGMENTS
-
-    with pytest.raises(ValueError):
-        JobSpec(
-            pipeline_id=PipelineId("metadata_scan"),
-            job_name="broken scan",
-            target_label="metadata_file",
-            target_key="metadata_file",
-            handler_version=1,
-            subject_kind=JobSubjectKind.METADATA_SCAN,
-            file_type=FileType.SEGMENTS,
-        )
 
 
 def test_active_stage_patterns_include_nested_archive_dependency_for_runtime_handlers():
@@ -340,7 +293,7 @@ with eng.connect() as conn:
     rows = conn.execute(
         text(
             "SELECT id, source_path, source_size_bytes, source_mtime_ns, "
-            "required_scan_version, completed_scan_version, state "
+            "required_scan_version, completed_scan_version "
             "FROM metadata_archive ORDER BY id"
         )
     ).fetchall()
@@ -355,7 +308,6 @@ print(
             "source_mtimes": [row.source_mtime_ns for row in rows],
             "required_scan_versions": [row.required_scan_version for row in rows],
             "completed_scan_versions": [row.completed_scan_version for row in rows],
-            "states": [row.state for row in rows],
         }
     )
 )
@@ -379,7 +331,6 @@ print(
     assert str(zip_b) in payload["paths"]
     assert payload["required_scan_versions"] == [SCANNER_VERSION, SCANNER_VERSION]
     assert payload["completed_scan_versions"] == [0, 0]
-    assert payload["states"] == ["NEEDS_SCAN", "NEEDS_SCAN"]
 
 
 def test_register_archives_bulk_chunks_large_existing_path_lookups(
@@ -629,7 +580,6 @@ def test_incremental_discovery_catches_in_place_archive_edit_when_parent_dir_mti
             sa.select(
                 ArchiveMetadata.source_size_bytes,
                 ArchiveMetadata.source_mtime_ns,
-                ArchiveMetadata.state,
             ).where(ArchiveMetadata.id == archive_id)
         ).one()
 
@@ -663,8 +613,7 @@ def test_incremental_discovery_catches_in_place_archive_edit_when_parent_dir_mti
             sa.select(
                 ArchiveMetadata.source_size_bytes,
                 ArchiveMetadata.source_mtime_ns,
-                ArchiveMetadata.state,
-                ArchiveMetadata.work_reason,
+                ArchiveMetadata.completed_scan_version,
             ).where(ArchiveMetadata.id == archive_id)
         ).one()
 
@@ -673,8 +622,7 @@ def test_incremental_discovery_catches_in_place_archive_edit_when_parent_dir_mti
     assert second.frontier_directory_scan_count >= 1
     assert updated_row.source_size_bytes == len(updated_payload)
     assert updated_row.source_mtime_ns > original_row.source_mtime_ns
-    assert updated_row.state == ArchiveStateEnum.NEEDS_SCAN
-    assert updated_row.work_reason == "Source archive changed"
+    assert updated_row.completed_scan_version == 0
 
 
 def test_register_archives_bulk_marks_absence_only_in_scanned_directories(tmp_path):
@@ -715,7 +663,7 @@ def test_register_archives_bulk_marks_absence_only_in_scanned_directories(tmp_pa
     assert presence[str(zip_b1)] is True
 
 
-def test_handler_version_downgrade_marks_archive_needs_processing(
+def test_old_parser_version_marks_artifact_pending(
     run_repo_python, tmp_path
 ):
     sqlite_path = tmp_path / "state.sqlite3"
@@ -734,11 +682,7 @@ from e2ude_core.db.models import (
     FileMetadata,
 )
 from e2ude_core.db.setup import initialize_database, register_archives_bulk
-from e2ude_core.orchestration.state import (
-    plan_archive_run,
-    summarize_archive,
-    summarize_archives_bulk,
-)
+from e2ude_core.orchestration.state import plan_archive_run
 
 zip_path = Path(os.environ["ZIP_PATH"])
 
@@ -766,7 +710,7 @@ with eng.begin() as conn:
         ArtifactManifest.__table__.insert().values(
             hash_id=hash_id,
             target_table="rsmdata_segments",
-            handler_version=0,
+            parser_version=0,
         )
     )
 
@@ -776,14 +720,9 @@ with eng.begin() as conn:
         .values(
             completed_scan_version=1,
             required_scan_version=1,
-            state="NEEDS_PROCESSING",
-            required_handler_generation="current-generation",
-            completed_handler_generation="old-generation",
         )
     )
 
-summary = summarize_archive(eng, archive_id)
-bulk_summary = summarize_archives_bulk(eng, [archive_id])[archive_id]
 plan = plan_archive_run(eng, archive_id)
 missing_items = [
     [item.hash_id, model.__tablename__]
@@ -794,8 +733,7 @@ missing_items = [
 print(
     json.dumps(
         {
-            "bulk_status": bulk_summary.status.name,
-            "summary_status": summary.status.name,
+            "needs_scan": plan.needs_scan,
             "missing_items": missing_items,
             "work_items": [
                 {
@@ -821,8 +759,7 @@ print(
     )
     payload = json.loads(result.stdout.strip())
 
-    assert payload["bulk_status"] == "NEEDS_PROCESSING"
-    assert payload["summary_status"] == "NEEDS_PROCESSING"
+    assert payload["needs_scan"] is False
     assert payload["missing_items"]
     assert payload["work_items"] == [
         {
@@ -868,12 +805,12 @@ zip_path = Path(os.environ["ZIP_PATH"])
 eng = get_engine(settings.database)
 initialize_database(eng, reset_tables=True)
 archive_id = register_archives_bulk(eng, [zip_path])[zip_path]
-result = process_staged_archive(eng, archive_id, staged_dir, EtlContext.capture(), db_workers=1)
+result = process_staged_archive(eng, archive_id, staged_dir, EtlContext.capture())
 
 with eng.connect() as conn:
     rows = conn.execute(
-        select(ProcessingJob.job_name, ProcessingJob.target_name).where(
-            ProcessingJob.pipeline_id == "MetadataScanHandler"
+        select(ProcessingJob.parser_id, ProcessingJob.target_table).where(
+            ProcessingJob.parser_id == "MetadataScanHandler"
         )
     ).fetchall()
 
@@ -881,8 +818,7 @@ print(
     json.dumps(
         {
             "count": len(rows),
-            "job_names": [row.job_name for row in rows],
-            "targets": [row.target_name for row in rows],
+            "targets": [row.target_table for row in rows],
             "rows_uploaded": result.rows_uploaded,
         }
     )
@@ -904,7 +840,6 @@ print(
     assert payload["count"] == 1
     assert payload["targets"] == ["metadata_file"]
     assert payload["rows_uploaded"] > 0
-    assert all("Registry" not in name for name in payload["job_names"])
 
 
 def test_initialize_database_only_creates_runtime_tables(run_repo_python, tmp_path):
@@ -972,7 +907,6 @@ def test_initialize_database_rejects_existing_runtime_tables_missing_columns(tmp
         db_setup.initialize_database(eng, reset_tables=False)
 
     message = str(exc.value)
-    assert "processing_sessions.archive_id" in message
     assert "processing_sessions.host_name" in message
 
 
@@ -992,32 +926,27 @@ from e2ude_core.db.access import get_engine
 from e2ude_core.db.models import ProcessingJob
 from e2ude_core.db.setup import initialize_database, register_archives_bulk
 from e2ude_core.orchestration.runs import (
+    create_processing_job,
     create_processing_session,
     finalize_processing_session,
-    get_or_create_processing_job,
     mark_processing_job_completed,
     mark_processing_job_running,
 )
-from e2ude_core.orchestration.spec import JobSpec
-from e2ude_core.runtime_files import FileType, PipelineId
 
 zip_path = Path(os.environ["ZIP_PATH"])
 eng = get_engine(settings.database)
 initialize_database(eng, reset_tables=True)
 archive_id = register_archives_bulk(eng, [zip_path])[zip_path]
 
-session_id = create_processing_session(eng, archive_id, EtlContext.capture())
-job_id = get_or_create_processing_job(
+session_id = create_processing_session(eng, EtlContext.capture())
+job_id = create_processing_job(
     eng,
     session_id,
-    JobSpec.for_file(
-        pipeline_id=PipelineId("segments"),
-        job_name="segments: sample",
-        target_label="rsmdata_segments",
-        target_key="rsmdata_segments",
-        handler_version=1,
-        file_type=FileType.SEGMENTS,
-    )
+    archive_id=archive_id,
+    file_type="SEGMENTS",
+    parser_id="segments",
+    target_table="rsmdata_segments",
+    parser_version=1,
 )
 
 mark_processing_job_running(eng, job_id, "first progress")
@@ -1083,40 +1012,37 @@ from e2ude_core.db.setup import initialize_database, register_archives_bulk
 from e2ude_core.orchestration.runs import (
     create_processing_session,
     finalize_processing_session,
+    JobRunResult,
     run_processing_job,
 )
-from e2ude_core.orchestration.spec import JobRunResult, JobSpec
-from e2ude_core.runtime_files import FileType, PipelineId
 
 zip_path = Path(os.environ["ZIP_PATH"])
 eng = get_engine(settings.database)
 initialize_database(eng, reset_tables=True)
 archive_id = register_archives_bulk(eng, [zip_path])[zip_path]
 
-session_id = create_processing_session(eng, archive_id, EtlContext.capture())
+session_id = create_processing_session(eng, EtlContext.capture())
 run_processing_job(
     eng,
     session_id,
-    JobSpec.for_file(
-        pipeline_id=PipelineId("mcdata"),
-        job_name="mcdata: sample [BATCH]",
-        target_label="BATCH",
-        target_key="batch:2:deadbeefcafebabe",
-        handler_version=3,
-        file_type=FileType.MCDATA,
-    ),
     lambda _report_progress: JobRunResult(
         rows_uploaded=7,
         completion_message="custom completion",
     ),
+    archive_id=archive_id,
+    file_type="MCDATA",
+    parser_id="mcdata",
+    target_table="rsmdata_mc_pfc_db",
+    parser_version=3,
 )
 finalize_processing_session(eng, session_id)
 
 with eng.connect() as conn:
     row = conn.execute(
         select(
-            ProcessingJob.target_name,
-            ProcessingJob.dataset_key,
+            ProcessingJob.parser_id,
+            ProcessingJob.target_table,
+            ProcessingJob.parser_version,
             ProcessingJob.rows_uploaded,
             ProcessingJob.message,
             ProcessingJob.status,
@@ -1126,8 +1052,9 @@ with eng.connect() as conn:
 print(
     json.dumps(
         {
-            "target_name": row.target_name,
-            "dataset_key": row.dataset_key,
+            "parser_id": row.parser_id,
+            "target_table": row.target_table,
+            "parser_version": row.parser_version,
             "rows_uploaded": row.rows_uploaded,
             "message": row.message,
             "status": row.status.value,
@@ -1148,8 +1075,9 @@ print(
     payload = json.loads(result.stdout.strip())
 
     assert payload == {
-        "target_name": "BATCH",
-        "dataset_key": "batch:2:deadbeefcafebabe",
+        "parser_id": "mcdata",
+        "target_table": "rsmdata_mc_pfc_db",
+        "parser_version": 3,
         "rows_uploaded": 7,
         "message": "custom completion",
         "status": "COMPLETED",
@@ -1200,14 +1128,12 @@ fresh_start = datetime.utcnow() - timedelta(hours=1)
 with eng.begin() as conn:
     stale_session = conn.execute(
         ProcessingSession.__table__.insert().values(
-            archive_id=archive_map[stale_zip],
             status=StatusEnum.RUNNING,
             start_time=stale_start,
         )
     ).inserted_primary_key[0]
     fresh_session = conn.execute(
         ProcessingSession.__table__.insert().values(
-            archive_id=archive_map[fresh_zip],
             status=StatusEnum.RUNNING,
             start_time=fresh_start,
         )
@@ -1216,10 +1142,9 @@ with eng.begin() as conn:
     stale_running_job = conn.execute(
         ProcessingJob.__table__.insert().values(
             session_id=stale_session,
-            job_name="stale running",
-            pipeline_id="segments",
-            target_name="rsmdata_segments",
-            dataset_key="rsmdata_segments",
+            archive_id=archive_map[stale_zip],
+            parser_id="segments",
+            target_table="rsmdata_segments",
             status=StatusEnum.RUNNING,
             start_time=stale_start,
         )
@@ -1227,20 +1152,18 @@ with eng.begin() as conn:
     stale_pending_job = conn.execute(
         ProcessingJob.__table__.insert().values(
             session_id=stale_session,
-            job_name="stale pending",
-            pipeline_id="mcdata",
-            target_name="rsmdata_mc_pfc_db",
-            dataset_key="rsmdata_mc_pfc_db",
+            archive_id=archive_map[stale_zip],
+            parser_id="mcdata",
+            target_table="rsmdata_mc_pfc_db",
             status=StatusEnum.PENDING,
         )
     ).inserted_primary_key[0]
     fresh_running_job = conn.execute(
         ProcessingJob.__table__.insert().values(
             session_id=fresh_session,
-            job_name="fresh running",
-            pipeline_id="segments",
-            target_name="rsmdata_segments",
-            dataset_key="rsmdata_segments",
+            archive_id=archive_map[fresh_zip],
+            parser_id="segments",
+            target_table="rsmdata_segments",
             status=StatusEnum.RUNNING,
             start_time=fresh_start,
         )
@@ -1254,7 +1177,7 @@ with eng.connect() as conn:
     job_rows = conn.execute(
         select(
             ProcessingJob.id,
-            ProcessingJob.job_name,
+            ProcessingJob.parser_id,
             ProcessingJob.status,
             ProcessingJob.message,
             ProcessingJob.end_time,
@@ -1275,7 +1198,7 @@ print(
             "jobs": [
                 {
                     "id": row.id,
-                    "job_name": row.job_name,
+                    "parser_id": row.parser_id,
                     "status": row.status.value,
                     "message": row.message,
                     "end_time": None if row.end_time is None else str(row.end_time),
@@ -1311,7 +1234,6 @@ print(
             "E2UDE_RUNTIME__DISCOVERY_WORKERS": 2,
             "E2UDE_RUNTIME__UNZIP_WORKERS": 1,
             "E2UDE_RUNTIME__PROCESS_WORKERS": 1,
-            "E2UDE_RUNTIME__DB_WRITE_WORKERS": 1,
             "E2UDE_RUNTIME__PIPELINE_BUFFER_SIZE": 1,
         },
     )
@@ -1336,7 +1258,7 @@ with eng.connect() as conn:
     job_rows = conn.execute(
         select(
             ProcessingJob.id,
-            ProcessingJob.job_name,
+            ProcessingJob.parser_id,
             ProcessingJob.status,
             ProcessingJob.message,
             ProcessingJob.end_time,
@@ -1357,7 +1279,7 @@ print(
             "jobs": [
                 {
                     "id": row.id,
-                    "job_name": row.job_name,
+                    "parser_id": row.parser_id,
                     "status": row.status.value,
                     "message": row.message,
                     "end_time": None if row.end_time is None else str(row.end_time),

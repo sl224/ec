@@ -2,7 +2,6 @@ from e2ude_core.db.base_session import Base
 
 from .file import (
     ArchiveMetadata,
-    ArchiveStateEnum,
     DiscoveryDirectoryMetadata,
     FileHashRegistry,
     FileMetadata,
@@ -28,7 +27,6 @@ __all__ = [
     "Base",
     "StatusEnum",
     "ArchiveMetadata",
-    "ArchiveStateEnum",
     "DiscoveryDirectoryMetadata",
     "FileHashRegistry",
     "FileMetadata",

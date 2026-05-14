@@ -1,8 +1,9 @@
 from enum import Enum as PyEnum
-from sqlalchemy import Column, Integer, String, ForeignKey, DateTime, Enum, func, Index
+
+from sqlalchemy import Column, DateTime, Enum, ForeignKey, Index, Integer, String, func
 from sqlalchemy.orm import relationship
 
-from e2ude_core.db.base_session import Base, schema_fkey, DEFAULT_SCHEMA, E2UDE_DATETIME
+from e2ude_core.db.base_session import Base, DEFAULT_SCHEMA, E2UDE_DATETIME, schema_fkey
 
 
 class StatusEnum(PyEnum):
@@ -13,9 +14,7 @@ class StatusEnum(PyEnum):
 
 
 class ArtifactManifest(Base):
-    """
-    A lightweight registry of valid data currently stored in the database.
-    """
+    """Registry of valid parser output currently materialized by content hash."""
 
     __tablename__ = "metadata_artifact_manifest"
 
@@ -26,69 +25,69 @@ class ArtifactManifest(Base):
         nullable=False,
     )
     target_table = Column(String(100), primary_key=True, nullable=False)
-    handler_version = Column(Integer, nullable=False, default=1)
+    parser_version = Column(Integer, nullable=False, default=1)
     row_count = Column(Integer, nullable=False, default=0, server_default="0")
     created_at = Column(E2UDE_DATETIME(), nullable=False, server_default=func.now())
 
     __table_args__ = (
-        # Clustered index (implied by PK) is usually sufficient,
-        # but explicit index ensures covering behavior if needed.
         Index("ix_artifact_lookup", "hash_id", "target_table"),
         {"schema": DEFAULT_SCHEMA},
     )
 
 
 class ProcessingSession(Base):
-    __tablename__ = "processing_sessions"
-    id = Column(Integer, primary_key=True)
+    """One run of the CLI or pipeline."""
 
-    archive_id = Column(Integer, nullable=False, index=True)
+    __tablename__ = "processing_sessions"
+
+    id = Column(Integer, primary_key=True)
     git_hash = Column(String(40), nullable=True, index=True)
     user_name = Column(String(40), nullable=True)
     host_name = Column(String(40), nullable=True)
-    status = Column(Enum(StatusEnum), default=StatusEnum.PENDING)
+    status = Column(Enum(StatusEnum), default=StatusEnum.PENDING, index=True)
     start_time = Column(E2UDE_DATETIME(), server_default=func.now())
     end_time = Column(E2UDE_DATETIME(), nullable=True)
+
     jobs = relationship("ProcessingJob", back_populates="session", lazy="dynamic")
 
 
 class ProcessingJob(Base):
-    """
-    Audit Log for ETL execution.
-    No longer used for logic/skipping checks.
-    """
+    """Attempt history for scan jobs and parser table artifacts."""
 
     __tablename__ = "processing_jobs"
+
     session_id = Column(
         Integer, ForeignKey(schema_fkey("processing_sessions.id")), nullable=False
     )
     id = Column(Integer, primary_key=True)
 
-    job_name = Column(String(500))
-    file_type = Column(String(50), index=True)
-    pipeline_id = Column(String(255), nullable=True)
-    target_name = Column(String(50), nullable=True)
-    handler_version = Column(Integer, default=1, nullable=False)
-    rows_uploaded = Column(Integer, nullable=True)
-    status = Column(Enum(StatusEnum), default=StatusEnum.PENDING, index=True)
-    message = Column(String, nullable=True)
-    start_time = Column(DateTime, nullable=True)
-    end_time = Column(DateTime, nullable=True)
-    dataset_key = Column(String(50), nullable=True)
-
+    archive_id = Column(
+        Integer,
+        ForeignKey(schema_fkey("metadata_archive.id")),
+        nullable=True,
+        index=True,
+    )
     file_id = Column(
         Integer,
         ForeignKey(schema_fkey("metadata_file.id")),
         nullable=True,
         index=True,
     )
-
     hash_id = Column(
         Integer,
         ForeignKey(schema_fkey("metadata_hash_registry.id")),
         nullable=True,
         index=True,
     )
+    file_type = Column(String(50), nullable=True, index=True)
+    parser_id = Column(String(255), nullable=True, index=True)
+    target_table = Column(String(100), nullable=True, index=True)
+    parser_version = Column(Integer, default=1, nullable=False)
+    rows_uploaded = Column(Integer, nullable=True)
+    status = Column(Enum(StatusEnum), default=StatusEnum.PENDING, index=True)
+    message = Column(String, nullable=True)
+    start_time = Column(DateTime, nullable=True)
+    end_time = Column(DateTime, nullable=True)
 
     session = relationship("ProcessingSession", back_populates="jobs")
 
@@ -96,10 +95,9 @@ class ProcessingJob(Base):
         Index(
             "ix_job_lookup",
             "session_id",
-            "pipeline_id",
-            "file_id",
-            "dataset_key",
-            unique=True,
+            "parser_id",
+            "hash_id",
+            "target_table",
         ),
         {"schema": DEFAULT_SCHEMA},
     )

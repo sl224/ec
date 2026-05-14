@@ -102,7 +102,6 @@ def main():
             buffer_size=settings.runtime.pipeline_buffer_size,
             unzip_workers=settings.runtime.unzip_workers,
             process_workers=settings.runtime.process_workers,
-            db_write_workers=settings.runtime.db_write_workers,
         )
         pipeline.run()
 

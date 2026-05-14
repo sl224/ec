@@ -4,7 +4,7 @@
 
 The runtime path is:
 
-1. `src/e2ude_core/main.py` relists known archive directories, checks the non-archive directory frontier for membership changes, records directory snapshots in `metadata_discovery_directory`, and upserts archive inventory/work state.
+1. `src/e2ude_core/main.py` relists known archive directories, checks the non-archive directory frontier for membership changes, records directory snapshots in `metadata_discovery_directory`, and upserts archive source facts.
 2. `src/e2ude_core/orchestration/state.py` decides which archives need work and builds per-archive plans.
 3. `src/e2ude_core/orchestration/pipeline.py` stages the files needed for active handlers and owns worker cleanup.
 4. `src/e2ude_core/orchestration/workflow.py` runs one archive end to end and returns an archive-level result.
@@ -47,7 +47,7 @@ metadata_archive
 
 Rules:
 
-- `metadata_archive` is the source archive inventory and archive work state.
+- `metadata_archive` is the source archive inventory and metadata scan freshness.
 - `metadata_file` is the per-archive file catalog.
 - `metadata_hash_registry` is the stable content-addressed identity.
 - `metadata_artifact_manifest` decides whether parser output for a hash/table is current.
@@ -56,7 +56,7 @@ Rules:
 Do not reconstruct planner truth from audit rows. A job can explain a failure,
 but the manifest decides whether valid output exists.
 
-## Handler Registration
+## Parser Registration
 
 Handled file types are defined in `src/e2ude_core/runtime_files.py`.
 
@@ -65,10 +65,10 @@ That file controls:
 - file type names
 - path patterns
 - parser functions
-- handler versions
+- parser versions
 - expected output models
 
-Do not add a second handler registry. The runtime file specs are the handler table.
+Do not add a second parser registry. The runtime file specs are the parser table.
 
 ## Read Order
 

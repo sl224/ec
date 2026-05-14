@@ -39,6 +39,7 @@ _tmp_fixture_collision/
 
 #Scratch
 *nocheckin*
+.codex/
 
 # log
 *.log*

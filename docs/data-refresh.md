@@ -78,14 +78,14 @@ Per-archive execution and archive-level result reporting are in `src/e2ude_core/
 
 The planner uses current desired state, not audit history:
 
-- `metadata_archive` stores source archive facts and archive work state.
+- `metadata_archive` stores source archive facts and metadata scan freshness.
 - `metadata_file` stores files discovered inside each archive.
 - `metadata_hash_registry` stores unique file content hashes.
-- `metadata_artifact_manifest` stores valid parser outputs by `hash_id`, target table, and handler version.
+- `metadata_artifact_manifest` stores valid parser outputs by `hash_id`, target table, and parser version.
 - `processing_sessions` and `processing_jobs` record what happened for debugging.
 
 Parser output is current when the manifest has a row for the file `hash_id` and
-target table at the current handler version. Successful empty outputs still get
+target table at the current parser version. Successful empty outputs still get
 manifest rows with `row_count = 0`.
 
 ## Overrides
@@ -99,7 +99,6 @@ Config-first runtime overrides are preferred. If you need an env override, use t
 - `E2UDE_RUNTIME__PIPELINE_BUFFER_SIZE`
 - `E2UDE_RUNTIME__UNZIP_WORKERS`
 - `E2UDE_RUNTIME__PROCESS_WORKERS`
-- `E2UDE_RUNTIME__DB_WRITE_WORKERS`
 - `E2UDE_DIAGNOSTICS__ENABLE_VIZTRACER`
 
 For routine refreshes, keep the standard scan root and use the CLI target instead of setting `E2UDE_DATABASE__SCHEMA_NAME` by hand unless you are troubleshooting.
@@ -154,7 +153,7 @@ If outputs are missing:
 - preview one extracted file with `uv run e2ude parser preview C:\path\to\file --as parser`
 - plan the missing parser with `uv run e2ude parser backfill parser --env dev --dry-run`
 - run one archive with `scripts/run_fixture_zip_e2e.py`
-- verify the file type and handler version in `src/e2ude_core/runtime_files.py`
+- verify the file type and parser version in `src/e2ude_core/runtime_files.py`
 
 ## Non-Prod Validation
 

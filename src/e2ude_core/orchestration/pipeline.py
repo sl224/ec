@@ -15,8 +15,6 @@ from tqdm import tqdm
 
 from e2ude_core.context import EtlContext
 from e2ude_core.db.access import get_engine
-from e2ude_core.db.models import ArchiveStateEnum
-from e2ude_core.orchestration.state import summarize_archive
 from e2ude_core.orchestration.workflow import (
     ArchiveExecutionResult,
     process_staged_archive,
@@ -41,9 +39,9 @@ def _resolve_active_patterns() -> List[str]:
 
 
 def _worker_process_task(
-    archive_id: int, stage_path: Path, db_settings, ctx: EtlContext, db_workers: int
+    archive_id: int, stage_path: Path, db_settings, ctx: EtlContext
 ) -> ArchiveExecutionResult:
-    local_eng = get_engine(db_settings, default_pool_size=db_workers + 2)
+    local_eng = get_engine(db_settings, default_pool_size=4)
 
     try:
         return process_staged_archive(
@@ -51,7 +49,6 @@ def _worker_process_task(
             archive_id,
             stage_path,
             ctx,
-            db_workers=db_workers,
         )
     except Exception as exc:
         logger.error("Worker failed for archive %s: %s", archive_id, exc, exc_info=True)
@@ -79,14 +76,12 @@ class StagingPipeline:
         buffer_size: int = 30,
         unzip_workers: int = 16,
         process_workers: int = 8,
-        db_write_workers: int = 4,
     ):
         self.db_settings = db_settings
         self.archive_id_map = archive_id_map
         self.staging_root = staging_root
         self.unzip_workers = unzip_workers
         self.process_workers = process_workers
-        self.db_write_workers = db_write_workers
 
         self.buffer_sem = BoundedSemaphore(value=buffer_size)
         self.stop_event = Event()
@@ -174,7 +169,6 @@ class StagingPipeline:
                                 outcome.stage_path,
                                 self.db_settings,
                                 self.ctx,
-                                self.db_write_workers,
                             )
                             pending_cpu[cpu_future] = outcome.stage_path
                         else:
@@ -197,15 +191,6 @@ class StagingPipeline:
         if not archive_id:
             return StageOutcome(
                 archive_id=-1, error=f"Archive id missing for {zip_path}"
-            )
-
-        try:
-            summary = summarize_archive(self.main_eng, archive_id)
-            if summary.status == ArchiveStateEnum.UP_TO_DATE:
-                return StageOutcome(archive_id=archive_id, skipped=True)
-        except Exception as exc:
-            logger.warning(
-                "State check failed for %s, forcing retry: %s", archive_id, exc
             )
 
         safe_name = f"{archive_id}_{zip_path.stem}"

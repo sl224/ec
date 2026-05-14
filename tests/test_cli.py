@@ -154,20 +154,6 @@ def test_cli_refresh_env_aliases_and_prod_confirmation(
     assert "Refusing destructive action without --confirm 'e2ude_core'" in output
 
 
-def test_schema_clone_treats_required_file_columns_as_non_nullable():
-    from e2ude_core.cli import _required_copied_columns
-    from e2ude_core.db.models import FileMetadata
-
-    required = _required_copied_columns(
-        FileMetadata.__table__,
-        ["id", "archive_id", "hash_id", "relative_path", "file_type"],
-    )
-
-    assert "archive_id" in required
-    assert "hash_id" in required
-    assert "relative_path" in required
-
-
 def test_cli_lists_registered_parsers(run_repo_command):
     from e2ude_core.runtime_files import HANDLED_FILE_SPECS
 
@@ -266,13 +252,11 @@ from e2ude_core.config import settings
 from e2ude_core.db.access import get_engine
 from e2ude_core.db.models import (
     ArchiveMetadata,
-    ArchiveStateEnum,
     FileHashRegistry,
     FileMetadata,
 )
 from e2ude_core.db.setup import initialize_database
 from e2ude_core.pipelines.scanner import SCANNER_VERSION
-from e2ude_core.runtime_files import CURRENT_HANDLER_GENERATION
 
 zip_path = Path(os.environ["TEST_ZIP"])
 relative_path = os.environ["TEST_RELATIVE_PATH"]
@@ -292,10 +276,6 @@ with eng.begin() as conn:
             source_mtime_ns=stat.st_mtime_ns,
             required_scan_version=SCANNER_VERSION,
             completed_scan_version=SCANNER_VERSION,
-            required_handler_generation=CURRENT_HANDLER_GENERATION,
-            completed_handler_generation=None,
-            state=ArchiveStateEnum.NEEDS_PROCESSING,
-            work_reason="test parser backfill",
         )
         .returning(ArchiveMetadata.id)
     ).scalar_one()
@@ -374,21 +354,20 @@ eng = get_engine(settings.database)
 with eng.begin() as conn:
     session_id = conn.execute(
         sa.insert(ProcessingSession)
-        .values(archive_id=int(os.environ["ARCHIVE_ID"]), status=StatusEnum.ERROR)
+        .values(status=StatusEnum.ERROR)
         .returning(ProcessingSession.id)
     ).scalar_one()
     conn.execute(
         sa.insert(ProcessingJob).values(
             session_id=session_id,
-            job_name="failed test segment",
+            archive_id=int(os.environ["ARCHIVE_ID"]),
             file_type="SEGMENTS",
-            pipeline_id="segments",
-            target_name="rsmdata_segments",
-            handler_version=1,
+            parser_id="segments",
+            target_table="rsmdata_segments",
+            parser_version=1,
             rows_uploaded=0,
             status=StatusEnum.ERROR,
             message="test failure",
-            dataset_key="rsmdata_segments",
             file_id=int(os.environ["FILE_ID"]),
             hash_id=int(os.environ["HASH_ID"]),
         )
@@ -448,8 +427,6 @@ with eng.begin() as conn:
             str(config_path),
             "--staging-root",
             str(staging_root),
-            "--db-workers",
-            "1",
             "--limit",
             "1",
         ]
@@ -476,8 +453,6 @@ with eng.connect() as conn:
         sa.text(
             '''
             SELECT
-                a.state,
-                a.completed_handler_generation,
                 COUNT(DISTINCT s.id) AS sessions,
                 COUNT(DISTINCT j.id) AS jobs,
                 MAX(j.status) AS job_status,
@@ -485,10 +460,10 @@ with eng.connect() as conn:
                 COUNT(DISTINCT m.target_table) AS artifacts,
                 (SELECT COUNT(*) FROM rsmdata_segments) AS segment_rows
             FROM metadata_archive AS a
-            LEFT JOIN processing_sessions AS s ON s.archive_id = a.id
-            LEFT JOIN processing_jobs AS j ON j.session_id = s.id
+            LEFT JOIN processing_jobs AS j ON j.archive_id = a.id
+            LEFT JOIN processing_sessions AS s ON s.id = j.session_id
             LEFT JOIN metadata_artifact_manifest AS m ON m.hash_id = j.hash_id
-            GROUP BY a.id, a.state, a.completed_handler_generation
+            GROUP BY a.id
             '''
         )
     ).one()
@@ -496,8 +471,6 @@ with eng.connect() as conn:
 print(
     json.dumps(
         {
-            "state": row.state,
-            "completed_handler_generation": row.completed_handler_generation,
             "sessions": row.sessions,
             "jobs": row.jobs,
             "job_status": row.job_status,
@@ -512,8 +485,6 @@ print(
     )
     payload = json.loads(audit.stdout)
 
-    assert payload["state"] == "NEEDS_PROCESSING"
-    assert payload["completed_handler_generation"] is None
     assert payload["sessions"] == 1
     assert payload["jobs"] == 1
     assert payload["job_status"] == "COMPLETED"
@@ -664,13 +635,11 @@ from e2ude_core.config import settings
 from e2ude_core.db.access import get_engine
 from e2ude_core.db.models import (
     ArchiveMetadata,
-    ArchiveStateEnum,
     FileHashRegistry,
     FileMetadata,
 )
 from e2ude_core.db.setup import initialize_database
 from e2ude_core.pipelines.scanner import SCANNER_VERSION
-from e2ude_core.runtime_files import CURRENT_HANDLER_GENERATION
 
 zip_path = Path(os.environ["TEST_ZIP"])
 relative_path = os.environ["TEST_RELATIVE_PATH"]
@@ -690,10 +659,6 @@ with eng.begin() as conn:
             source_mtime_ns=stat.st_mtime_ns,
             required_scan_version=SCANNER_VERSION,
             completed_scan_version=SCANNER_VERSION,
-            required_handler_generation=CURRENT_HANDLER_GENERATION,
-            completed_handler_generation=None,
-            state=ArchiveStateEnum.NEEDS_PROCESSING,
-            work_reason="zero row artifact test",
         )
         .returning(ArchiveMetadata.id)
     ).scalar_one()
@@ -733,8 +698,6 @@ with eng.begin() as conn:
             str(config_path),
             "--staging-root",
             str(staging_root),
-            "--db-workers",
-            "1",
         ]
     )
     payload = json.loads(result.stdout[result.stdout.rfind("{") :])
@@ -758,7 +721,7 @@ with eng.connect() as conn:
     row = conn.execute(
         sa.text(
             '''
-            SELECT target_table, handler_version, row_count
+            SELECT target_table, parser_version, row_count
             FROM metadata_artifact_manifest
             WHERE target_table = 'rsmdata_engine_on_off5'
             '''
@@ -770,7 +733,7 @@ print(
     json.dumps(
         {
             "target_table": row.target_table,
-            "handler_version": row.handler_version,
+            "parser_version": row.parser_version,
             "row_count": row.row_count,
             "engine_rows": engine_rows,
         }
@@ -783,7 +746,7 @@ print(
 
     assert payload == {
         "target_table": "rsmdata_engine_on_off5",
-        "handler_version": 1,
+        "parser_version": 1,
         "row_count": 0,
         "engine_rows": 0,
     }

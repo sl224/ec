@@ -80,11 +80,11 @@ Runtime tuning now lives under `[runtime]` and `[diagnostics]` in config. Discov
 | `src/e2ude_core/main.py` | Process entry point |
 | `src/e2ude_core/orchestration/state.py` | Archive inventory/work state and planning |
 | `src/e2ude_core/orchestration/workflow.py` | Per-archive execution and returned archive result |
-| `src/e2ude_core/runtime_files.py` | File type and handler specs |
+| `src/e2ude_core/runtime_files.py` | File type and parser specs |
 | `src/e2ude_core/services/file_catalog.py` | File typing and hashing |
 | `scripts/refresh-data.ps1` | Compatibility wrapper for refresh target/schema selection |
 | `scripts/preview_parser.py` | Compatibility wrapper for single-file parser preview |
 | `scripts/run_fixture_zip_e2e.py` | Single-zip end-to-end validation |
 | `scripts/measure_discovery.py` | Discovery baseline and incremental-vs-reconcile measurement |
 
-When adding or changing a handled file type, update `src/e2ude_core/runtime_files.py`.
+When adding or changing a parsed file type, update `src/e2ude_core/runtime_files.py`.

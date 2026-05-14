@@ -343,22 +343,6 @@ HANDLED_FILE_SPECS_BY_TYPE: dict[FileType, RuntimeFileSpec] = {
 }
 
 
-def compute_handler_generation() -> str:
-    signature = "\n".join(
-        sorted(
-            (
-                f"{file_type.value}|{spec.pipeline_id.value}|{spec.version}|"
-                f"{','.join(model.__tablename__ for model in spec.expected_models)}"
-            )
-            for file_type, spec in HANDLED_FILE_SPECS_BY_TYPE.items()
-        )
-    )
-    return sha1(signature.encode("utf-8")).hexdigest()[:16]
-
-
-CURRENT_HANDLER_GENERATION = compute_handler_generation()
-
-
 def build_active_stage_patterns(active_types: Sequence[FileType]) -> list[str]:
     active_set = set(active_types)
     patterns: list[str] = []

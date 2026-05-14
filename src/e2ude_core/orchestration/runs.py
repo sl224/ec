@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+from dataclasses import dataclass, field
 from datetime import datetime, timedelta
 import logging
 from typing import Callable
@@ -9,9 +10,16 @@ from sqlalchemy import func, select
 
 from e2ude_core.context import EtlContext
 from e2ude_core.db.models import ProcessingJob, ProcessingSession, StatusEnum
-from e2ude_core.orchestration.spec import JobRunResult, JobSpec
+from e2ude_core.runtime_files import FileType
 
 logger = logging.getLogger(__name__)
+
+
+@dataclass(frozen=True)
+class JobRunResult:
+    rows_uploaded: int = 0
+    completion_message: str | None = None
+    table_rows: dict[str, int] = field(default_factory=dict)
 
 
 def cull_stale_runs(eng, max_age: timedelta = timedelta(hours=24)) -> dict[str, int]:
@@ -84,13 +92,8 @@ def cull_stale_runs(eng, max_age: timedelta = timedelta(hours=24)) -> dict[str, 
         raise
 
 
-def create_processing_session(
-    eng,
-    archive_id: int,
-    ctx: EtlContext | None = None,
-) -> int:
+def create_processing_session(eng, ctx: EtlContext | None = None) -> int:
     values = {
-        "archive_id": archive_id,
         "git_hash": None if ctx is None else ctx.git_hash,
         "user_name": None if ctx is None else ctx.user_name,
         "host_name": None if ctx is None else ctx.host_name,
@@ -103,36 +106,42 @@ def create_processing_session(
             .returning(ProcessingSession.id)
         ).scalar_one()
 
-    logger.info("Created session %s for archive %s", session_id, archive_id)
+    logger.info("Created processing session %s", session_id)
     return session_id
 
 
-def get_or_create_processing_job(eng, session_id: int, spec: JobSpec) -> int:
-    with eng.begin() as conn:
-        existing_id = conn.execute(
-            select(ProcessingJob.id).where(
-                ProcessingJob.session_id == session_id,
-                ProcessingJob.pipeline_id == spec.pipeline_id.value,
-                ProcessingJob.file_id == spec.file_id,
-                ProcessingJob.dataset_key == spec.target_key,
-            )
-        ).scalar_one_or_none()
-        if existing_id is not None:
-            return existing_id
+def create_processing_job(
+    eng,
+    session_id: int,
+    *,
+    archive_id: int | None = None,
+    file_id: int | None = None,
+    hash_id: int | None = None,
+    file_type: FileType | str | None = None,
+    parser_id: str | None = None,
+    target_table: str | None = None,
+    parser_version: int = 1,
+    message: str = "Pending",
+) -> int:
+    if isinstance(file_type, FileType):
+        file_type_value = file_type.value
+    else:
+        file_type_value = file_type
 
+    with eng.begin() as conn:
         return conn.execute(
             sa.insert(ProcessingJob)
             .values(
                 session_id=session_id,
-                job_name=spec.job_name,
-                pipeline_id=spec.pipeline_id.value,
+                archive_id=archive_id,
+                file_id=file_id,
+                hash_id=hash_id,
+                file_type=file_type_value,
+                parser_id=parser_id,
+                target_table=target_table,
+                parser_version=parser_version,
                 status=StatusEnum.PENDING,
-                file_id=spec.file_id,
-                hash_id=spec.hash_id,
-                target_name=spec.target_label,
-                dataset_key=spec.target_key,
-                handler_version=spec.handler_version,
-                file_type=None if spec.file_type is None else spec.file_type.value,
+                message=message,
             )
             .returning(ProcessingJob.id)
         ).scalar_one()
@@ -190,27 +199,43 @@ def mark_processing_job_failed(eng, job_id: int, error_message: str) -> None:
 def run_processing_job(
     eng,
     session_id: int,
-    spec: JobSpec,
     runner: Callable[[Callable[[str], None]], JobRunResult | None],
+    *,
+    archive_id: int | None = None,
+    file_id: int | None = None,
+    hash_id: int | None = None,
+    file_type: FileType | str | None = None,
+    parser_id: str | None = None,
+    target_table: str | None = None,
+    parser_version: int = 1,
 ) -> JobRunResult:
-    job_id = get_or_create_processing_job(eng, session_id, spec)
+    job_id = create_processing_job(
+        eng,
+        session_id,
+        archive_id=archive_id,
+        file_id=file_id,
+        hash_id=hash_id,
+        file_type=file_type,
+        parser_id=parser_id,
+        target_table=target_table,
+        parser_version=parser_version,
+    )
 
     def report_progress(message: str) -> None:
         mark_processing_job_running(eng, job_id, message)
 
     try:
-        report_progress(f"Starting {spec.pipeline_id} processing")
+        report_progress(f"Starting {parser_id or target_table or 'job'}")
         result = runner(report_progress) or JobRunResult()
         mark_processing_job_completed(
             eng,
             job_id,
-            message=result.completion_message
-            or f"{spec.pipeline_id} processed successfully",
+            message=result.completion_message or "Completed",
             rows_uploaded=result.rows_uploaded,
         )
         return result
     except Exception as exc:
-        logger.error("Failed to process %s: %s", spec.job_name, exc, exc_info=True)
+        logger.error("Failed to process job %s: %s", job_id, exc, exc_info=True)
         mark_processing_job_failed(eng, job_id, f"Failed: {exc}")
         raise
 
