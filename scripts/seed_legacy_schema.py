@@ -320,7 +320,8 @@ def _legacy_folder_mapping_from_rows(
         "missing_archive": 0,
         "ambiguous_archive": 0,
     }
-    parsed_rows = []
+    parsed_by_path: dict[str, dict[str, object]] = {}
+    folder_path_keys: dict[int, str] = {}
     examples = []
     sorted_file_counts = sorted(
         file_counts.items(), key=lambda item: (item[1][1], item[0] or 0)
@@ -351,13 +352,11 @@ def _legacy_folder_mapping_from_rows(
             continue
 
         buno, archive_datetime = parsed
-        parsed_rows.append(
-            {
-                "folder_id": folder_id,
-                "file_count": file_count,
-                "first_file_id": first_file_id,
-                "source_path": _clean_path_text(folder_path),
-                "archive_key": (buno, archive_datetime),
+        path_key = _path_key(folder_path)
+        folder_path_keys[folder_id] = path_key
+        if path_key not in parsed_by_path:
+            parsed_by_path[path_key] = {
+                "archive_id": folder_id,
                 "row": {
                     "id": folder_id,
                     "buno": buno,
@@ -376,32 +375,12 @@ def _legacy_folder_mapping_from_rows(
                     "work_reason": "Seeded from legacy metadata_folder",
                 },
             }
-        )
-
-    archive_key_counts = defaultdict(int)
-    for item in parsed_rows:
-        archive_key_counts[item["archive_key"]] += 1
 
     folder_archive_ids = {}
-    archive_rows = []
-    for item in parsed_rows:
-        duplicate_count = archive_key_counts[item["archive_key"]]
-        if duplicate_count > 1:
-            counts["ambiguous_archive"] += item["file_count"]
-            if len(examples) < example_limit:
-                examples.append(
-                    [
-                        item["first_file_id"],
-                        item["folder_id"],
-                        item["source_path"],
-                        item["archive_key"][0],
-                        duplicate_count,
-                    ]
-                )
-            continue
+    for folder_id, path_key in folder_path_keys.items():
+        folder_archive_ids[folder_id] = parsed_by_path[path_key]["archive_id"]
 
-        folder_archive_ids[item["folder_id"]] = item["folder_id"]
-        archive_rows.append(item["row"])
+    archive_rows = [item["row"] for item in parsed_by_path.values()]
 
     return counts, folder_archive_ids, examples, archive_rows
 

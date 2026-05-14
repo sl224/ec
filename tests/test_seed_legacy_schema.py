@@ -106,6 +106,69 @@ def test_legacy_folder_mapping_derives_current_archive_rows():
     assert archive_rows[0]["state"] == "NEEDS_PROCESSING"
 
 
+def test_legacy_folder_mapping_collapses_duplicate_paths():
+    seed = _load_seed_script()
+    archive_path = (
+        r"\\rsiny1-ilsfs\RSM\169863\2025\03"
+        r"\169863_20250323_042959_463_TransportRSM.fpkg.e2d.zip"
+    )
+
+    counts, folder_archive_ids, examples, archive_rows = (
+        seed._legacy_folder_mapping_from_rows(
+            file_counts={21661: (57, 93047), 10137: (57, 93104)},
+            folder_paths={
+                21661: archive_path,
+                10137: archive_path,
+            },
+            scanner_version=3,
+            handler_generation="abc123",
+        )
+    )
+
+    assert counts == {
+        "total_files": 114,
+        "missing_folder": 0,
+        "missing_archive": 0,
+        "ambiguous_archive": 0,
+    }
+    assert folder_archive_ids == {21661: 21661, 10137: 21661}
+    assert examples == []
+    assert len(archive_rows) == 1
+    assert archive_rows[0]["id"] == 21661
+
+
+def test_legacy_folder_mapping_keeps_same_second_distinct_paths():
+    seed = _load_seed_script()
+
+    counts, folder_archive_ids, examples, archive_rows = (
+        seed._legacy_folder_mapping_from_rows(
+            file_counts={20914: (42, 12558), 20915: (42, 12600)},
+            folder_paths={
+                20914: (
+                    r"\\rsiny1-ilsfs\RSM\169083\2025\06"
+                    r"\169083_20250603_040059_075_TransportRSM.fpkg.e2d.zip"
+                ),
+                20915: (
+                    r"\\rsiny1-ilsfs\RSM\169083\2025\06"
+                    r"\169083_20250603_040059_076_TransportRSM.fpkg.e2d.zip"
+                ),
+            },
+            scanner_version=3,
+            handler_generation="abc123",
+        )
+    )
+
+    assert counts == {
+        "total_files": 84,
+        "missing_folder": 0,
+        "missing_archive": 0,
+        "ambiguous_archive": 0,
+    }
+    assert folder_archive_ids == {20914: 20914, 20915: 20915}
+    assert examples == []
+    assert len(archive_rows) == 2
+
+
 def test_auto_folder_mapping_prefers_complete_exact_path():
     seed = _load_seed_script()
     counts = {
