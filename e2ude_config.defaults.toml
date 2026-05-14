@@ -1,5 +1,3 @@
-worker_threads = 64
-
 [paths]
 scan_root = "\\\\Rsiny1-ilsfs\\RSM"
 

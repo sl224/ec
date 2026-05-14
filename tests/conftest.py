@@ -134,10 +134,9 @@ def write_app_config(tmp_path):
         database: dict[str, Any],
         paths: dict[str, Any] | None = None,
         logging: dict[str, Any] | None = None,
-        worker_threads: int = 64,
     ) -> Path:
         config_path = tmp_path / "e2ude_config.toml"
-        lines = [f"worker_threads = {worker_threads}", "", "[database]"]
+        lines = ["[database]"]
 
         for key, value in database.items():
             lines.append(f"{key} = {_toml_literal(value)}")

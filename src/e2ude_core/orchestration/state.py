@@ -15,8 +15,13 @@ from e2ude_core.db.models import (
     ArtifactManifest,
     FileMetadata,
 )
-from e2ude_core.registry import CURRENT_HANDLER_GENERATION, HANDLER_REGISTRY
-from e2ude_core.runtime_files import FileType, PipelineId, coerce_file_type
+from e2ude_core.runtime_files import (
+    CURRENT_HANDLER_GENERATION,
+    HANDLED_FILE_SPECS_BY_TYPE,
+    FileType,
+    PipelineId,
+    coerce_file_type,
+)
 
 logger = logging.getLogger(__name__)
 
@@ -229,7 +234,7 @@ def plan_archive_run(eng: sa.Engine, archive_id: int) -> ArchiveRunPlan:
 
     work_items: list[FileWorkPlan] = []
     for row, file_type in representatives.values():
-        handler_spec = HANDLER_REGISTRY.get(file_type)
+        handler_spec = HANDLED_FILE_SPECS_BY_TYPE.get(file_type)
         if not handler_spec:
             continue
 

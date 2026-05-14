@@ -7,35 +7,43 @@ Routine refreshes can run from any machine that has:
 - scan root: `\\Rsiny1-ilsfs\RSM`
 - destination database: the shared MSSQL database
 - target schema: chosen explicitly on every run
-- entry point: `scripts/refresh-data.ps1`
+- entry point: `uv run e2ude refresh`
 - enough free space in the local OS temp area, unless you override staging
 
 ```powershell
+uv run e2ude refresh --env dev --preview
+uv run e2ude refresh --env dev
+uv run e2ude refresh --env prod --confirm e2ude_core
+uv run e2ude refresh --schema e2ude_candidate_mytest --preview
+
 .\scripts\refresh-data.ps1 -Target dev -Preview
 .\scripts\refresh-data.ps1 -Target dev
-.\scripts\refresh-data.ps1 -Target prod
 ```
 
-The wrapper sets `E2UDE_DATABASE__SCHEMA_NAME` to:
+The CLI sets `E2UDE_DATABASE__SCHEMA_NAME` to:
 
-- `e2ude_core_dev` for `-Target dev`
-- `e2ude_core` for `-Target prod`
+- `e2ude_core_dev` for `--env dev`
+- `e2ude_core` for `--env prod`
 
-Do not use plain `uv run -m e2ude_core.main` for routine refreshes. The wrapper exists so operators always choose the target schema deliberately.
+`--schema` overrides that target default when you intentionally want a custom candidate schema. The PowerShell wrapper remains for operators who prefer `-Target dev`/`-Target prod`; it calls the CLI path.
+
+Do not use plain `uv run -m e2ude_core.main` for routine refreshes. The CLI exists so operators always choose the target schema deliberately and see the resolved target before writes begin.
+
+For command-by-command examples, see [CLI Workflows](cli-workflows.md).
 
 After pulling the latest changes, the normal incremental ingest into `e2ude_core_dev` is:
 
 ```powershell
-.\scripts\refresh-data.ps1 -Target dev
+uv run e2ude refresh --env dev
 ```
 
-Use `-Preview` first if you want to confirm the resolved config path and target schema without starting the ingest.
+Use `--preview` first if you want to confirm the resolved backend, server, database, and schema without starting the ingest.
 
 ## Refresh Config
 
 Place a machine-local `e2ude_config.toml` in the repo root of whatever machine you are using for the refresh.
 
-Use [e2ude_config.refresh.example.toml](../e2ude_config.refresh.example.toml) as the template. It should contain the real MSSQL server and database settings. `staging_root` is optional; if omitted, runs stage under the local OS temp area in an `e2ude_core_staging` folder. Set it only when you want staging on a specific disk. The wrapper overrides only the schema, so the base config can stay fixed while operators choose `dev` or `prod` per run.
+Use [e2ude_config.refresh.example.toml](../e2ude_config.refresh.example.toml) as the template. It should contain the real MSSQL server and database settings. `staging_root` is optional; if omitted, runs stage under the local OS temp area in an `e2ude_core_staging` folder. Set it only when you want staging on a specific disk. The CLI overrides only the database backend/schema choice, so the base config can stay fixed while operators choose `--env dev`, `--env prod`, a deliberate `--schema`, or a local `--sqlite` file per run.
 
 ## Concurrent Runs
 
@@ -66,6 +74,20 @@ The discovery path is also incremental again, but only with safe signals:
 Planning is in `src/e2ude_core/orchestration/state.py`.
 Per-archive execution and archive-level result reporting are in `src/e2ude_core/orchestration/workflow.py`.
 
+## Incremental State
+
+The planner uses current desired state, not audit history:
+
+- `metadata_archive` stores source archive facts and archive work state.
+- `metadata_file` stores files discovered inside each archive.
+- `metadata_hash_registry` stores unique file content hashes.
+- `metadata_artifact_manifest` stores valid parser outputs by `hash_id`, target table, and handler version.
+- `processing_sessions` and `processing_jobs` record what happened for debugging.
+
+Parser output is current when the manifest has a row for the file `hash_id` and
+target table at the current handler version. Successful empty outputs still get
+manifest rows with `row_count = 0`.
+
 ## Overrides
 
 Config-first runtime overrides are preferred. If you need an env override, use the nested Pydantic names:
@@ -80,19 +102,32 @@ Config-first runtime overrides are preferred. If you need an env override, use t
 - `E2UDE_RUNTIME__DB_WRITE_WORKERS`
 - `E2UDE_DIAGNOSTICS__ENABLE_VIZTRACER`
 
-For routine refreshes, keep the standard scan root and use the wrapper target instead of setting `E2UDE_DATABASE__SCHEMA_NAME` by hand unless you are troubleshooting.
+For routine refreshes, keep the standard scan root and use the CLI target instead of setting `E2UDE_DATABASE__SCHEMA_NAME` by hand unless you are troubleshooting.
+For parser experiments, prefer CLI flags over env overrides:
+
+```powershell
+uv run e2ude parser list
+uv run e2ude parser status --env dev
+uv run e2ude parser preview C:\temp\sample_MCData
+uv run e2ude parser preview C:\temp\mystery_input.txt --as segments
+uv run e2ude parser backfill segments --schema e2ude_candidate_segments --dry-run
+uv run e2ude parser backfill segments --schema e2ude_candidate_segments --limit 50
+uv run e2ude parser retry-failed segments --schema e2ude_candidate_segments --dry-run
+```
+
+Parser backfill is catalog-driven. If there are no `metadata_file` rows for that parser, run a refresh/scan first; backfill will not invent catalog facts from a local sample file.
 
 If you want to force staging onto a specific drive for one run:
 
 ```powershell
-.\scripts\refresh-data.ps1 -Target dev -StagingRoot D:\E2UDE_STAGING
+uv run e2ude refresh --env dev --staging-root D:\E2UDE_STAGING
 ```
 
 If you need to force a full source walk:
 
 ```powershell
 $env:E2UDE_RUNTIME__DISCOVERY_MODE = "reconcile"
-.\scripts\refresh-data.ps1 -Target dev
+uv run e2ude refresh --env dev
 ```
 
 `incremental` no longer relies on directory-`mtime` subtree skipping for known archive directories, so in-place archive edits are still discovered.
@@ -102,8 +137,8 @@ $env:E2UDE_RUNTIME__DISCOVERY_MODE = "reconcile"
 If the run finds no work:
 
 - confirm the run is still pointed at `\\Rsiny1-ilsfs\RSM`
-- confirm you chose the intended wrapper target (`dev` or `prod`)
-- use `.\scripts\refresh-data.ps1 -Target dev -Preview` to confirm the resolved target before a real run
+- confirm you chose the intended target (`--env dev`, `--env prod`, `--schema`, or `--sqlite`)
+- use `uv run e2ude refresh --env dev --preview` to confirm the resolved target before a real run
 - confirm archive names still match `*TransportRSM.fpkg.e2d.zip`
 - inspect `src/e2ude_core/orchestration/state.py`
 
@@ -115,7 +150,9 @@ If an archive is scanned but not parsed:
 
 If outputs are missing:
 
-- preview one extracted file with `scripts/preview_parser.py`
+- list parser/catalog state with `uv run e2ude parser status --env dev`
+- preview one extracted file with `uv run e2ude parser preview C:\path\to\file --as parser`
+- plan the missing parser with `uv run e2ude parser backfill parser --env dev --dry-run`
 - run one archive with `scripts/run_fixture_zip_e2e.py`
 - verify the file type and handler version in `src/e2ude_core/runtime_files.py`
 

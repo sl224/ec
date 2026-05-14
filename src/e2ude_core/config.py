@@ -76,9 +76,6 @@ class DiagnosticsConfig(BaseModel):
 class AppSettings(BaseSettings):
     """Runtime settings."""
 
-    # Default thread count and fallback DB pool size.
-    worker_threads: int = Field(default=64, gt=0)
-
     logging: LoggingConfig = LoggingConfig()
     database: DatabaseConfig = Field(default=SQLiteConfig(), discriminator="type")
     paths: PathsConfig = PathsConfig()

@@ -1,4 +1,4 @@
-from e2ude_core.db.base_session import Base, SessionLocal
+from e2ude_core.db.base_session import Base
 
 from .file import (
     ArchiveMetadata,
@@ -18,7 +18,6 @@ from .rsm_mcdata import (
     NavData,
     RadarState,
     RotoScan,
-    GfcDb,
     PfcDb,
     RfcDb,
     LcsTemp,
@@ -27,7 +26,6 @@ from .rsm_mcdata import (
 
 __all__ = [
     "Base",
-    "SessionLocal",
     "StatusEnum",
     "ArchiveMetadata",
     "ArchiveStateEnum",
@@ -43,7 +41,6 @@ __all__ = [
     "NavData",
     "RadarState",
     "RotoScan",
-    "GfcDb",
     "PfcDb",
     "RfcDb",
     "LcsTemp",

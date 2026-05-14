@@ -260,9 +260,6 @@ STAGE_DEPENDENCIES: tuple[StageDependencySpec, ...] = (
 )
 
 
-RUNTIME_FILE_SPECS_BY_TYPE = {spec.file_type: spec for spec in RUNTIME_FILE_SPECS}
-
-
 def _pattern_sort_key(pattern: str) -> tuple[int, int, int, int, int, str]:
     posix_path = PurePosixPath(pattern)
     parts = posix_path.parts
@@ -338,8 +335,28 @@ def compute_metadata_catalog_generation(
 CURRENT_METADATA_CATALOG_GENERATION = compute_metadata_catalog_generation()
 
 
-def iter_handled_file_specs() -> Iterable[RuntimeFileSpec]:
-    return (spec for spec in RUNTIME_FILE_SPECS if spec.is_handled)
+HANDLED_FILE_SPECS: tuple[RuntimeFileSpec, ...] = tuple(
+    spec for spec in RUNTIME_FILE_SPECS if spec.is_handled
+)
+HANDLED_FILE_SPECS_BY_TYPE: dict[FileType, RuntimeFileSpec] = {
+    spec.file_type: spec for spec in HANDLED_FILE_SPECS
+}
+
+
+def compute_handler_generation() -> str:
+    signature = "\n".join(
+        sorted(
+            (
+                f"{file_type.value}|{spec.pipeline_id.value}|{spec.version}|"
+                f"{','.join(model.__tablename__ for model in spec.expected_models)}"
+            )
+            for file_type, spec in HANDLED_FILE_SPECS_BY_TYPE.items()
+        )
+    )
+    return sha1(signature.encode("utf-8")).hexdigest()[:16]
+
+
+CURRENT_HANDLER_GENERATION = compute_handler_generation()
 
 
 def build_active_stage_patterns(active_types: Sequence[FileType]) -> list[str]:

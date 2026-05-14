@@ -20,9 +20,9 @@ from e2ude_core.db.schema_safety import (
     schema_classification,
 )
 from e2ude_core.orchestration.spec import JobSpec, JobSubjectKind, build_job_target
-from e2ude_core.registry import HANDLER_REGISTRY
 from e2ude_core.runtime_files import (
     CURRENT_METADATA_CATALOG_GENERATION,
+    HANDLED_FILE_SPECS_BY_TYPE,
     FileType,
     PipelineId,
     RuntimeFileSpec,
@@ -85,7 +85,7 @@ def test_job_spec_factories_keep_scan_jobs_and_file_jobs_distinct():
 
 def test_active_stage_patterns_include_nested_archive_dependency_for_runtime_handlers():
     patterns = build_active_stage_patterns(
-        sorted(HANDLER_REGISTRY.keys(), key=lambda file_type: file_type.value)
+        sorted(HANDLED_FILE_SPECS_BY_TYPE, key=lambda file_type: file_type.value)
     )
 
     assert "*_MCData" in patterns
@@ -435,6 +435,30 @@ def test_register_archives_bulk_batches_new_archive_inserts(monkeypatch, tmp_pat
 
     assert len(archive_map) == len(zip_paths)
     assert insert_batch_sizes == [2, 2, 1]
+
+
+def test_register_archives_bulk_skips_unchanged_archive_updates(tmp_path):
+    db_path = tmp_path / "register_skip_updates.sqlite3"
+    eng = sa.create_engine(f"sqlite:///{db_path}")
+    db_setup.initialize_database(eng, reset_tables=True)
+
+    zip_path = tmp_path / "169871_20231107_024218_025_TransportRSM.fpkg.e2d.zip"
+    zip_path.write_text("archive", encoding="utf-8")
+
+    db_setup.register_archives_bulk(eng, [zip_path])
+
+    update_count = 0
+
+    @sa.event.listens_for(eng, "before_cursor_execute")
+    def record_archive_update(conn, cursor, statement, parameters, context, executemany):
+        nonlocal update_count
+        if statement.lstrip().lower().startswith("update metadata_archive"):
+            update_count += 1
+
+    archive_map = db_setup.register_archives_bulk(eng, [zip_path])
+
+    assert archive_map[zip_path] > 0
+    assert update_count == 0
 
 
 def test_record_directory_snapshots_batches_inserts_and_preserves_scan_time(
@@ -924,6 +948,34 @@ print(json.dumps({"tables": tables}))
     assert "rsmdata_mc_gfc_db" not in payload["tables"]
 
 
+def test_initialize_database_rejects_existing_runtime_tables_missing_columns(tmp_path):
+    db_path = tmp_path / "old_schema.sqlite3"
+    eng = sa.create_engine(f"sqlite:///{db_path}")
+    with eng.begin() as conn:
+        conn.execute(
+            sa.text(
+                """
+                CREATE TABLE processing_sessions (
+                    id INTEGER PRIMARY KEY,
+                    folder_id INTEGER NOT NULL,
+                    git_hash VARCHAR(40),
+                    user_name VARCHAR(40),
+                    status VARCHAR(20),
+                    start_time DATETIME,
+                    end_time DATETIME
+                )
+                """
+            )
+        )
+
+    with pytest.raises(RuntimeError, match="Database schema is out of date") as exc:
+        db_setup.initialize_database(eng, reset_tables=False)
+
+    message = str(exc.value)
+    assert "processing_sessions.archive_id" in message
+    assert "processing_sessions.host_name" in message
+
+
 def test_job_mark_running_preserves_original_start_time(run_repo_python, tmp_path):
     sqlite_path = tmp_path / "job_manager.sqlite3"
     zip_path = tmp_path / "123456_20240101_000000_000_TransportRSM.fpkg.e2d.zip"
@@ -939,7 +991,13 @@ from e2ude_core.context import EtlContext
 from e2ude_core.db.access import get_engine
 from e2ude_core.db.models import ProcessingJob
 from e2ude_core.db.setup import initialize_database, register_archives_bulk
-from e2ude_core.orchestration.managers import SessionManager
+from e2ude_core.orchestration.runs import (
+    create_processing_session,
+    finalize_processing_session,
+    get_or_create_processing_job,
+    mark_processing_job_completed,
+    mark_processing_job_running,
+)
 from e2ude_core.orchestration.spec import JobSpec
 from e2ude_core.runtime_files import FileType, PipelineId
 
@@ -948,8 +1006,10 @@ eng = get_engine(settings.database)
 initialize_database(eng, reset_tables=True)
 archive_id = register_archives_bulk(eng, [zip_path])[zip_path]
 
-session_manager = SessionManager(eng, archive_id, EtlContext.capture())
-job_id = session_manager._get_or_create_job_id(
+session_id = create_processing_session(eng, archive_id, EtlContext.capture())
+job_id = get_or_create_processing_job(
+    eng,
+    session_id,
     JobSpec.for_file(
         pipeline_id=PipelineId("segments"),
         job_name="segments: sample",
@@ -960,14 +1020,14 @@ job_id = session_manager._get_or_create_job_id(
     )
 )
 
-session_manager._mark_job_running(job_id, "first progress")
+mark_processing_job_running(eng, job_id, "first progress")
 with eng.connect() as conn:
     first_start = conn.execute(
         select(ProcessingJob.start_time).where(ProcessingJob.id == job_id)
     ).scalar_one()
 
 time.sleep(1.2)
-session_manager._mark_job_running(job_id, "second progress")
+mark_processing_job_running(eng, job_id, "second progress")
 with eng.connect() as conn:
     row = conn.execute(
         select(ProcessingJob.start_time, ProcessingJob.message).where(
@@ -975,8 +1035,8 @@ with eng.connect() as conn:
         )
     ).one()
 
-session_manager._mark_job_completed(job_id, "done", rows=0)
-session_manager.finalize_session()
+mark_processing_job_completed(eng, job_id, "done", rows_uploaded=0)
+finalize_processing_session(eng, session_id)
 
 print(
     json.dumps(
@@ -1004,7 +1064,7 @@ print(
     assert payload["message"] == "second progress"
 
 
-def test_session_manager_run_job_persists_explicit_result_and_target_key(
+def test_run_processing_job_persists_explicit_result_and_target_key(
     run_repo_python, tmp_path
 ):
     sqlite_path = tmp_path / "run_job.sqlite3"
@@ -1020,7 +1080,11 @@ from e2ude_core.context import EtlContext
 from e2ude_core.db.access import get_engine
 from e2ude_core.db.models import ProcessingJob
 from e2ude_core.db.setup import initialize_database, register_archives_bulk
-from e2ude_core.orchestration.managers import SessionManager
+from e2ude_core.orchestration.runs import (
+    create_processing_session,
+    finalize_processing_session,
+    run_processing_job,
+)
 from e2ude_core.orchestration.spec import JobRunResult, JobSpec
 from e2ude_core.runtime_files import FileType, PipelineId
 
@@ -1029,8 +1093,10 @@ eng = get_engine(settings.database)
 initialize_database(eng, reset_tables=True)
 archive_id = register_archives_bulk(eng, [zip_path])[zip_path]
 
-session_manager = SessionManager(eng, archive_id, EtlContext.capture())
-session_manager.run_job(
+session_id = create_processing_session(eng, archive_id, EtlContext.capture())
+run_processing_job(
+    eng,
+    session_id,
     JobSpec.for_file(
         pipeline_id=PipelineId("mcdata"),
         job_name="mcdata: sample [BATCH]",
@@ -1044,7 +1110,7 @@ session_manager.run_job(
         completion_message="custom completion",
     ),
 )
-session_manager.finalize_session()
+finalize_processing_session(eng, session_id)
 
 with eng.connect() as conn:
     row = conn.execute(

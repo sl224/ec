@@ -12,8 +12,8 @@ from e2ude_core.db.setup import (
     register_archives_bulk,
 )
 from e2ude_core.logging_conf import setup_logging
-from e2ude_core.orchestration.managers import cull_stale_runs
 from e2ude_core.orchestration.pipeline import StagingPipeline
+from e2ude_core.orchestration.runs import cull_stale_runs
 from e2ude_core.orchestration.state import load_archives_requiring_work
 from e2ude_core.services.discovery import DiscoveryMode, discover_archives
 

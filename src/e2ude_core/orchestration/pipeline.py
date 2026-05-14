@@ -21,8 +21,11 @@ from e2ude_core.orchestration.workflow import (
     ArchiveExecutionResult,
     process_staged_archive,
 )
-from e2ude_core.registry import HANDLER_REGISTRY
-from e2ude_core.runtime_files import FileType, build_active_stage_patterns
+from e2ude_core.runtime_files import (
+    HANDLED_FILE_SPECS_BY_TYPE,
+    FileType,
+    build_active_stage_patterns,
+)
 from e2ude_core.services.zip_io import extract_transport_zip
 
 shutil.COPY_BUFSIZE = 4 * 1024 * 1024
@@ -31,7 +34,7 @@ logger = logging.getLogger(__name__)
 
 
 def _resolve_active_patterns() -> List[str]:
-    active_types: Set[FileType] = set(HANDLER_REGISTRY.keys())
+    active_types: Set[FileType] = set(HANDLED_FILE_SPECS_BY_TYPE)
     return build_active_stage_patterns(
         sorted(active_types, key=lambda file_type: file_type.value)
     )

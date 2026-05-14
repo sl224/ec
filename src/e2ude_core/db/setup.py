@@ -23,7 +23,7 @@ from e2ude_core.db.models import (
     ProcessingSession,
 )
 from e2ude_core.pipelines.scanner import SCANNER_VERSION
-from e2ude_core.registry import CURRENT_HANDLER_GENERATION, HANDLER_REGISTRY
+from e2ude_core.runtime_files import CURRENT_HANDLER_GENERATION, HANDLED_FILE_SPECS
 from e2ude_core.orchestration.state import summarize_archive_facts
 from e2ude_core.services.discovery import (
     DiscoveredArchive,
@@ -50,8 +50,8 @@ def _runtime_tables() -> list[sa.Table]:
         ArtifactManifest,
     }
 
-    for handler in HANDLER_REGISTRY.values():
-        runtime_models.update(handler.expected_models)
+    for spec in HANDLED_FILE_SPECS:
+        runtime_models.update(spec.expected_models)
 
     runtime_table_keys = {model.__table__.key for model in runtime_models}
     return [
@@ -59,6 +59,48 @@ def _runtime_tables() -> list[sa.Table]:
         for table in Base.metadata.sorted_tables
         if table.key in runtime_table_keys
     ]
+
+
+def _qualified_table_name(table: sa.Table) -> str:
+    if table.schema:
+        return f"{table.schema}.{table.name}"
+    return table.name
+
+
+def _missing_runtime_columns(eng: sa.Engine, tables: list[sa.Table]) -> list[str]:
+    inspector = sa.inspect(eng)
+    missing: list[str] = []
+
+    for table in tables:
+        try:
+            actual_columns = {
+                column["name"]
+                for column in inspector.get_columns(table.name, table.schema)
+            }
+        except sa.exc.NoSuchTableError:
+            missing.append(f"{_qualified_table_name(table)}.*")
+            continue
+
+        for column in table.columns:
+            if column.name not in actual_columns:
+                missing.append(f"{_qualified_table_name(table)}.{column.name}")
+
+    return missing
+
+
+def _validate_runtime_schema(eng: sa.Engine, tables: list[sa.Table]) -> None:
+    missing_columns = _missing_runtime_columns(eng, tables)
+    if not missing_columns:
+        return
+
+    missing_summary = ", ".join(sorted(missing_columns))
+    raise RuntimeError(
+        "Database schema is out of date for this code version. "
+        "SQLAlchemy create_all() only creates missing tables; it does not add "
+        "columns to existing tables. Missing runtime columns: "
+        f"{missing_summary}. Rebuild the target schema or run an explicit migration "
+        "before starting the pipeline."
+    )
 
 
 def initialize_database(eng: sa.Engine, reset_tables: bool = False):
@@ -89,6 +131,8 @@ def initialize_database(eng: sa.Engine, reset_tables: bool = False):
     else:
         logger.info("Ensuring all tables exist (create if not present)...")
         Base.metadata.create_all(eng, tables=tables_to_create)
+
+    _validate_runtime_schema(eng, tables_to_create)
 
 
 def _iter_path_batches(
@@ -122,6 +166,7 @@ def _load_existing_archive_rows(
             ArchiveMetadata.completed_handler_generation,
             ArchiveMetadata.state,
             ArchiveMetadata.work_reason,
+            ArchiveMetadata.is_present,
         ).where(ArchiveMetadata.source_path.in_(batch))
         for row in conn.execute(stmt):
             existing_map[row.source_path] = row
@@ -377,9 +422,9 @@ def _build_archive_update(item: dict, existing: sa.Row, seen_at: datetime) -> di
     )
     if changed_source:
         reason = "Source archive changed"
-    elif completed_scan_version < SCANNER_VERSION:
+    elif existing.required_scan_version != SCANNER_VERSION:
         reason = "Scanner version changed"
-    elif completed_handler_generation != CURRENT_HANDLER_GENERATION:
+    elif existing.required_handler_generation != CURRENT_HANDLER_GENERATION:
         reason = "Handler generation changed"
     else:
         reason = existing.work_reason
@@ -535,8 +580,8 @@ def register_archives_bulk(
         to_insert: list[dict] = []
         to_update: list[dict] = []
         seen_in_batch: set[str] = set()
-        changed_existing_count = 0
-        unchanged_existing_count = 0
+        updated_existing_count = 0
+        skipped_existing_count = 0
 
         for item in parsed_items:
             path_key = item["source_path"]
@@ -549,14 +594,28 @@ def register_archives_bulk(
                 to_insert.append(_build_archive_insert(item, seen_at))
                 continue
 
-            if (
-                existing.source_size_bytes != item["source_size_bytes"]
-                or existing.source_mtime_ns != item["source_mtime_ns"]
-            ):
-                changed_existing_count += 1
-            else:
-                unchanged_existing_count += 1
-            to_update.append(_build_archive_update(item, existing, seen_at))
+            update_row = _build_archive_update(item, existing, seen_at)
+            update_needed = (
+                existing.source_size_bytes != update_row["b_source_size_bytes"]
+                or existing.source_mtime_ns != update_row["b_source_mtime_ns"]
+                or not existing.is_present
+                or existing.required_scan_version
+                != update_row["b_required_scan_version"]
+                or existing.completed_scan_version
+                != update_row["b_completed_scan_version"]
+                or existing.required_handler_generation
+                != update_row["b_required_handler_generation"]
+                or existing.completed_handler_generation
+                != update_row["b_completed_handler_generation"]
+                or existing.state != update_row["b_state"]
+                or existing.work_reason != update_row["b_work_reason"]
+            )
+            if not update_needed:
+                skipped_existing_count += 1
+                continue
+
+            updated_existing_count += 1
+            to_update.append(update_row)
 
         if to_insert:
             logger.info("Upserting %s new archives...", len(to_insert))
@@ -606,12 +665,12 @@ def register_archives_bulk(
 
     logger.info(
         "Archive registration complete. discovered=%s inserted=%s "
-        "existing_changed=%s existing_unchanged=%s absent_from_scanned_dirs=%s "
+        "existing_updated=%s existing_skipped=%s absent_from_scanned_dirs=%s "
         "absent_from_missing_dirs=%s",
         len(unique_paths),
         len(to_insert),
-        changed_existing_count,
-        unchanged_existing_count,
+        updated_existing_count,
+        skipped_existing_count,
         absent_from_scanned_dirs,
         absent_from_missing_dirs,
     )

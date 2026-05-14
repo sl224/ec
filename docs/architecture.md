@@ -16,11 +16,10 @@ The runtime path is:
 | --- | --- |
 | Entry point | `src/e2ude_core/main.py` |
 | Runtime file specs | `src/e2ude_core/runtime_files.py` |
-| Handler lookup | `src/e2ude_core/registry.py` |
 | File typing and hashing | `src/e2ude_core/services/file_catalog.py` |
 | Archive planning | `src/e2ude_core/orchestration/state.py` |
 | Archive execution | `src/e2ude_core/orchestration/workflow.py` |
-| Session/job persistence | `src/e2ude_core/orchestration/managers.py` |
+| Session/job persistence | `src/e2ude_core/orchestration/runs.py` |
 | Parser execution and upload | `src/e2ude_core/pipelines/base.py` |
 
 ## Core Tables
@@ -34,6 +33,29 @@ The runtime path is:
 - `processing_jobs`
 - `rsmdata_*`
 
+## Control Plane
+
+Incremental ingest is driven by desired state:
+
+```text
+metadata_archive
+  -> metadata_file
+  -> metadata_hash_registry
+  -> metadata_artifact_manifest
+  -> rsmdata_* leaf tables
+```
+
+Rules:
+
+- `metadata_archive` is the source archive inventory and archive work state.
+- `metadata_file` is the per-archive file catalog.
+- `metadata_hash_registry` is the stable content-addressed identity.
+- `metadata_artifact_manifest` decides whether parser output for a hash/table is current.
+- `processing_sessions` and `processing_jobs` are audit/debug rows only.
+
+Do not reconstruct planner truth from audit rows. A job can explain a failure,
+but the manifest decides whether valid output exists.
+
 ## Handler Registration
 
 Handled file types are defined in `src/e2ude_core/runtime_files.py`.
@@ -46,7 +68,7 @@ That file controls:
 - handler versions
 - expected output models
 
-`src/e2ude_core/registry.py` is derived from those specs. Do not add handlers there directly.
+Do not add a second handler registry. The runtime file specs are the handler table.
 
 ## Read Order
 

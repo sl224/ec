@@ -22,6 +22,9 @@ dependencies = [
     "tqdm>=4.67.1",
 ]
 
+[project.scripts]
+e2ude = "e2ude_core.cli:main"
+
 [dependency-groups]
 dev = [
     "pytest>=9.0.1",

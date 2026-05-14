@@ -27,6 +27,8 @@ class ArtifactManifest(Base):
     )
     target_table = Column(String(100), primary_key=True, nullable=False)
     handler_version = Column(Integer, nullable=False, default=1)
+    row_count = Column(Integer, nullable=False, default=0, server_default="0")
+    created_at = Column(E2UDE_DATETIME(), nullable=False, server_default=func.now())
 
     __table_args__ = (
         # Clustered index (implied by PK) is usually sufficient,

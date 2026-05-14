@@ -59,6 +59,193 @@ def _build_repo_env(repo_root, extra_env=None):
     return env
 
 
+@pytest.mark.local_mssql
+def test_cli_schema_clone_check_promote_workflow(
+    local_mssql_server,
+    local_mssql_database,
+    local_mssql_driver,
+    run_repo_command,
+    run_repo_python,
+    write_app_config,
+):
+    source_schema = f"e2ude_src_{uuid.uuid4().hex[:8]}"
+    candidate_schema = f"e2ude_candidate_{uuid.uuid4().hex[:8]}"
+    stable_schema = f"e2ude_stable_{uuid.uuid4().hex[:8]}"
+    archive_schema = f"e2ude_archive_{uuid.uuid4().hex[:8]}"
+    config_path = write_app_config(
+        database={
+            "type": "mssql",
+            "server_name": local_mssql_server,
+            "db_name": local_mssql_database,
+            "driver": local_mssql_driver,
+            "trusted_connection": "yes",
+            "schema_name": source_schema,
+        }
+    )
+
+    try:
+        run_repo_python(
+            """
+import os
+import sqlalchemy as sa
+
+from e2ude_core.config import settings
+from e2ude_core.db.access import get_engine
+from e2ude_core.db.models import ArtifactManifest, FileHashRegistry
+from e2ude_core.db.setup import initialize_database
+
+stable_schema = os.environ["STABLE_SCHEMA"]
+eng = get_engine(settings.database)
+initialize_database(eng, reset_tables=False)
+with eng.begin() as conn:
+    hash_id = conn.execute(
+        sa.insert(FileHashRegistry)
+        .values(md5=b"\\x01" * 16)
+        .returning(FileHashRegistry.id)
+    ).scalar_one()
+    conn.execute(
+        sa.insert(ArtifactManifest).values(
+            hash_id=hash_id,
+            target_table="rsmdata_segments",
+            handler_version=1,
+            row_count=0,
+        )
+    )
+    conn.execute(
+        sa.text(
+            f"IF NOT EXISTS (SELECT 1 FROM sys.schemas WHERE name = '{stable_schema}') "
+            f"EXEC('CREATE SCHEMA [{stable_schema}]')"
+        )
+    )
+    conn.execute(sa.text(f"CREATE TABLE [{stable_schema}].[promotion_marker] (marker INT NOT NULL)"))
+    conn.execute(sa.text(f"INSERT INTO [{stable_schema}].[promotion_marker] (marker) VALUES (1)"))
+""",
+            {
+                "E2UDE_CONFIG_PATH": config_path,
+                "E2UDE_DATABASE__SCHEMA_NAME": source_schema,
+                "STABLE_SCHEMA": stable_schema,
+            },
+        )
+
+        run_repo_command(
+            [
+                sys.executable,
+                "-m",
+                "e2ude_core.cli",
+                "schema",
+                "clone",
+                source_schema,
+                candidate_schema,
+                "--config",
+                str(config_path),
+            ]
+        )
+        run_repo_command(
+            [
+                sys.executable,
+                "-m",
+                "e2ude_core.cli",
+                "schema",
+                "check",
+                candidate_schema,
+                "--config",
+                str(config_path),
+            ]
+        )
+        run_repo_command(
+            [
+                sys.executable,
+                "-m",
+                "e2ude_core.cli",
+                "schema",
+                "promote",
+                candidate_schema,
+                stable_schema,
+                "--archive",
+                archive_schema,
+                "--yes",
+                "--confirm",
+                stable_schema,
+                "--config",
+                str(config_path),
+            ]
+        )
+
+        payload = json.loads(
+            run_repo_python(
+                """
+import json
+import os
+import sqlalchemy as sa
+
+from e2ude_core.config import settings
+from e2ude_core.db.access import get_engine
+
+stable_schema = os.environ["STABLE_SCHEMA"]
+archive_schema = os.environ["ARCHIVE_SCHEMA"]
+candidate_schema = os.environ["CANDIDATE_SCHEMA"]
+
+eng = get_engine(settings.database)
+with eng.connect() as conn:
+    result = {
+        "hashes": conn.execute(sa.text(f"SELECT COUNT(*) FROM [{stable_schema}].[metadata_hash_registry]")).scalar_one(),
+        "manifest": conn.execute(sa.text(f"SELECT COUNT(*) FROM [{stable_schema}].[metadata_artifact_manifest]")).scalar_one(),
+        "archive_marker": conn.execute(sa.text(f"SELECT COUNT(*) FROM [{archive_schema}].[promotion_marker]")).scalar_one(),
+        "candidate_tables": conn.execute(
+            sa.text(
+                '''
+                SELECT COUNT(*)
+                FROM sys.tables AS t
+                INNER JOIN sys.schemas AS s ON s.schema_id = t.schema_id
+                WHERE s.name = :schema_name
+                '''
+            ),
+            {"schema_name": candidate_schema},
+        ).scalar_one(),
+    }
+
+print(json.dumps(result))
+""",
+                {
+                    "E2UDE_CONFIG_PATH": config_path,
+                    "E2UDE_DATABASE__SCHEMA_NAME": stable_schema,
+                    "STABLE_SCHEMA": stable_schema,
+                    "ARCHIVE_SCHEMA": archive_schema,
+                    "CANDIDATE_SCHEMA": candidate_schema,
+                },
+            ).stdout
+        )
+
+        assert payload == {
+            "hashes": 1,
+            "manifest": 1,
+            "archive_marker": 1,
+            "candidate_tables": 0,
+        }
+    finally:
+        for schema_name in (
+            source_schema,
+            candidate_schema,
+            stable_schema,
+            archive_schema,
+        ):
+            run_repo_command(
+                [
+                    sys.executable,
+                    "-m",
+                    "e2ude_core.cli",
+                    "schema",
+                    "cleanup",
+                    schema_name,
+                    "--yes",
+                    "--confirm-schema",
+                    schema_name,
+                    "--config",
+                    str(config_path),
+                ]
+            )
+
+
 def _load_mssql_schema_metrics(run_repo_python, extra_env):
     payload = run_repo_python(
         """

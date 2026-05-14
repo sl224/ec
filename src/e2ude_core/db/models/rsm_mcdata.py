@@ -137,26 +137,6 @@ class RotoScan(Base):
     scan_time = Column("ScanTime", Float)
 
 
-class GfcDb(Base):
-    __tablename__ = "rsmdata_mc_gfc_db"
-
-    # Use `schema_fkey` to create a schema-qualified foreign key reference.
-    hash_id = Column(
-        Integer, ForeignKey(schema_fkey("metadata_hash_registry.id")), primary_key=True
-    )
-    line_number = Column("LineNumber", Integer, primary_key=True)
-    system_time_stamp = Column("System TimeStamp", E2UDE_DATETIME(0))
-    time_stamp = Column("Time Stamp", String)
-    group_fault_code = Column("Group Fault Code", Integer)
-    confirmation_status = Column("Confirmation Status", String)
-    group_evaluation_result = Column("Group Evaluation Result", String)
-    intermittent_result = Column("Intermittent Result", String)
-    transition_count = Column("Transition Count", Integer)
-    display_fault_code = Column("Display Fault Code", Integer)
-    primary_reference_designator = Column("Primary Reference Designator", String)
-    secondary_reference_designator = Column("Secondary Reference Designator", String)
-
-
 class PfcDb(Base):
     __tablename__ = "rsmdata_mc_pfc_db"
 

@@ -79,7 +79,9 @@ def _get_manifest_version(
     ).scalar_one_or_none()
 
 
-def _upload_single_table(eng: sa.Engine, model, df, hash_id: int, version: int):
+def _upload_single_table(
+    eng: sa.Engine, model, df, hash_id: int, version: int, *, force: bool = False
+):
     """Upload one model in its own transaction."""
     table_name = model.__tablename__
     for attempt in range(1, MAX_UPLOAD_DEADLOCK_RETRIES + 1):
@@ -88,7 +90,11 @@ def _upload_single_table(eng: sa.Engine, model, df, hash_id: int, version: int):
                 _lock_hash_row(conn, hash_id)
 
                 current_version = _get_manifest_version(conn, hash_id, table_name)
-                if current_version is not None and current_version >= version:
+                if (
+                    not force
+                    and current_version is not None
+                    and current_version >= version
+                ):
                     logger.info(
                         "Skipping %s for hash %s; artifact already materialized at version %s.",
                         table_name,
@@ -118,6 +124,7 @@ def _upload_single_table(eng: sa.Engine, model, df, hash_id: int, version: int):
                         hash_id=hash_id,
                         target_table=table_name,
                         handler_version=version,
+                        row_count=len(df),
                     )
                 )
             return len(df)
@@ -145,6 +152,7 @@ def process_file(
     report_progress: Callable[[str], None],
     target_models: Optional[List[Type[Base]]] = None,
     db_workers: int = 4,
+    force: bool = False,
 ) -> JobRunResult:
     pipeline_id = spec.pipeline_id.value
     try:
@@ -158,15 +166,18 @@ def process_file(
         set(target_models) if target_models else set(spec.expected_models)
     )
 
-    for model, df in model_to_df_map.items():
-        if model in models_to_process and not df.empty:
-            payload.append((model, df))
-
-    if not payload:
-        return JobRunResult(
-            rows_uploaded=0,
-            completion_message=f"{pipeline_id} had no rows to upload.",
+    missing_models = [
+        model.__name__ for model in models_to_process if model not in model_to_df_map
+    ]
+    if missing_models:
+        raise RuntimeError(
+            f"{pipeline_id} parser did not return expected outputs: "
+            f"{', '.join(sorted(missing_models))}"
         )
+
+    for model in spec.expected_models:
+        if model in models_to_process:
+            payload.append((model, model_to_df_map[model]))
 
     total_rows = 0
     errors = []
@@ -175,7 +186,7 @@ def process_file(
     with ThreadPoolExecutor(max_workers=db_workers) as executor:
         future_map = {
             executor.submit(
-                _upload_single_table, eng, m, d, hash_id, spec.version
+                _upload_single_table, eng, m, d, hash_id, spec.version, force=force
             ): m.__tablename__
             for m, d in payload
         }

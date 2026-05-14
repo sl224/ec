@@ -6,7 +6,11 @@ import sqlalchemy as sa
 
 from e2ude_core.context import EtlContext
 from e2ude_core.db.models import ArchiveStateEnum, FileMetadata
-from e2ude_core.orchestration.managers import SessionManager
+from e2ude_core.orchestration.runs import (
+    create_processing_session,
+    finalize_processing_session,
+    run_processing_job,
+)
 from e2ude_core.orchestration.spec import JobSpec, build_job_target
 from e2ude_core.orchestration.state import (
     mark_archive_error,
@@ -20,7 +24,7 @@ from e2ude_core.pipelines.scanner import (
     SCANNER_VERSION,
     run_metadata_scan,
 )
-from e2ude_core.registry import HANDLER_REGISTRY
+from e2ude_core.runtime_files import HANDLED_FILE_SPECS_BY_TYPE
 
 logger = logging.getLogger(__name__)
 
@@ -40,12 +44,13 @@ def process_staged_archive(
     db_workers: int = 4,
 ) -> ArchiveExecutionResult:
     """Process one staged archive directory end to end."""
-    session_manager = None
+    session_id = None
+    session_failed = False
     rows_uploaded = 0
     current_state = ArchiveStateEnum.NEEDS_SCAN
 
     try:
-        session_manager = SessionManager(eng=eng, archive_id=archive_id, ctx=context)
+        session_id = create_processing_session(eng, archive_id, context)
         plan = plan_archive_run(eng, archive_id)
         current_state = plan.summary.status
 
@@ -60,7 +65,9 @@ def process_staged_archive(
                 target_key=scan_target.key,
                 handler_version=SCANNER_VERSION,
             )
-            scan_result = session_manager.run_job(
+            scan_result = run_processing_job(
+                eng,
+                session_id,
                 scan_spec,
                 lambda report_progress: run_metadata_scan(
                     eng, archive_id, staged_path, report_progress
@@ -87,7 +94,7 @@ def process_staged_archive(
                 logger.warning("File missing in staging: %s", full_path)
                 continue
 
-            handler_spec = HANDLER_REGISTRY.get(work_item.file_type)
+            handler_spec = HANDLED_FILE_SPECS_BY_TYPE.get(work_item.file_type)
             if not handler_spec:
                 continue
 
@@ -124,7 +131,9 @@ def process_staged_archive(
                     db_workers=db_workers,
                 )
 
-            file_result = session_manager.run_job(
+            file_result = run_processing_job(
+                eng,
+                session_id,
                 file_spec,
                 _run_file_job,
             )
@@ -136,6 +145,7 @@ def process_staged_archive(
             rows_uploaded=rows_uploaded,
         )
     except Exception as exc:
+        session_failed = True
         mark_archive_error(
             eng,
             archive_id,
@@ -144,5 +154,5 @@ def process_staged_archive(
         )
         raise
     finally:
-        if session_manager is not None:
-            session_manager.finalize_session()
+        if session_id is not None:
+            finalize_processing_session(eng, session_id, failed=session_failed)

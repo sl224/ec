@@ -1,8 +1,7 @@
 # Copy this file to `e2ude_config.toml` on any machine you use for routine refreshes.
 # `scripts/refresh-data.ps1` will override only `database.schema_name`
-# so operators explicitly choose `dev` or `prod` on each run.
-
-worker_threads = 64
+# so operators explicitly choose `dev`, `prod`, or a deliberate
+# `-SchemaName` candidate on each run.
 
 [database]
 type = "mssql"
