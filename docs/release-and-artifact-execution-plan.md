@@ -379,9 +379,12 @@ Behavior:
 - Converts `metadata_hash_registry.md5` from hex text to `varbinary(16)` when
   needed.
 - Maps old `metadata_file.folder_id` through `metadata_folder.FolderPath` to the
-  current `metadata_archive.source_path`, then writes `metadata_file.archive_id`.
+  current archive row, then writes `metadata_file.archive_id`. The default is
+  `--folder-map auto`, which tries exact path first and then a unique archive
+  filename match.
 - Copies compatible parsed leaf tables by `hash_id`.
-- Rebuilds `metadata_artifact_manifest.row_count` from copied leaf rows.
+- Rebuilds `metadata_artifact_manifest.row_count` from copied leaf rows at the
+  current handler versions.
 - Omits old processing audit tables.
 
 Safety:

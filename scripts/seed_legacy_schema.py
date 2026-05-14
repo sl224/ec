@@ -35,8 +35,7 @@ REQUIRED_LEGACY_TABLES = {
 def _archive_name_expr(alias: str, column_name: str) -> str:
     path = f"REPLACE(COALESCE({alias}.[{column_name}], ''), '/', NCHAR(92))"
     return (
-        f"LOWER(RIGHT({path}, "
-        f"CHARINDEX(NCHAR(92), REVERSE({path}) + NCHAR(92)) - 1))"
+        f"LOWER(RIGHT({path}, CHARINDEX(NCHAR(92), REVERSE({path}) + NCHAR(92)) - 1))"
     )
 
 
@@ -98,7 +97,9 @@ def _table_count(conn: sa.Connection, schema_name: str, table_name: str) -> int:
     ).scalar_one()
 
 
-def _column_types(conn: sa.Connection, schema_name: str, table_name: str) -> dict[str, str]:
+def _column_types(
+    conn: sa.Connection, schema_name: str, table_name: str
+) -> dict[str, str]:
     rows = conn.execute(
         sa.text(
             """
@@ -124,13 +125,17 @@ def _print_table(headers: list[str], rows: list[list[object]]) -> None:
         max(len(headers[index]), *(len(row[index]) for row in text_rows))
         for index in range(len(headers))
     ]
-    print("  ".join(header.ljust(widths[index]) for index, header in enumerate(headers)))
+    print(
+        "  ".join(header.ljust(widths[index]) for index, header in enumerate(headers))
+    )
     print("  ".join("-" * width for width in widths))
     for row in text_rows:
         print("  ".join(value.ljust(widths[index]) for index, value in enumerate(row)))
 
 
-def _drop_schema_tables(conn: sa.Connection, schema_name: str, table_names: set[str]) -> None:
+def _drop_schema_tables(
+    conn: sa.Connection, schema_name: str, table_names: set[str]
+) -> None:
     fk_rows = conn.execute(
         sa.text(
             """
@@ -164,7 +169,9 @@ def _source_table_counts(
 
 
 def _invalid_md5_count(conn: sa.Connection, source_schema: str) -> int:
-    md5_type = _column_types(conn, source_schema, "metadata_hash_registry").get("md5", "")
+    md5_type = _column_types(conn, source_schema, "metadata_hash_registry").get(
+        "md5", ""
+    )
     if md5_type.casefold() in {"binary", "varbinary"}:
         return 0
 
@@ -197,8 +204,8 @@ def _file_mapping_counts(
             SELECT
                 COUNT(*) AS total_files,
                 SUM(CASE WHEN f.FolderID IS NULL THEN 1 ELSE 0 END) AS missing_folder,
-                SUM(CASE WHEN ak.archive_key IS NULL THEN 1 ELSE 0 END) AS missing_archive,
-                SUM(CASE WHEN ak.archive_matches > 1 THEN 1 ELSE 0 END) AS ambiguous_archive
+                SUM(CASE WHEN f.FolderID IS NOT NULL AND ak.archive_key IS NULL THEN 1 ELSE 0 END) AS missing_archive,
+                SUM(CASE WHEN f.FolderID IS NOT NULL AND ak.archive_matches > 1 THEN 1 ELSE 0 END) AS ambiguous_archive
             FROM {_qname(source_schema, "metadata_file")} AS mf
             LEFT JOIN {_qname(source_schema, "metadata_folder")} AS f
                 ON f.FolderID = mf.folder_id
@@ -325,7 +332,9 @@ def _set_identity_insert(
     conn: sa.Connection, schema_name: str, table_name: str, enabled: bool
 ) -> None:
     state = "ON" if enabled else "OFF"
-    conn.execute(sa.text(f"SET IDENTITY_INSERT {_qname(schema_name, table_name)} {state}"))
+    conn.execute(
+        sa.text(f"SET IDENTITY_INSERT {_qname(schema_name, table_name)} {state}")
+    )
 
 
 def _copy_common_table(
@@ -360,7 +369,9 @@ def _copy_common_table(
 def _copy_hash_registry(
     conn: sa.Connection, source_schema: str, dest_schema: str
 ) -> int:
-    md5_type = _column_types(conn, source_schema, "metadata_hash_registry").get("md5", "")
+    md5_type = _column_types(conn, source_schema, "metadata_hash_registry").get(
+        "md5", ""
+    )
     md5_expr = (
         "[md5]"
         if md5_type.casefold() in {"binary", "varbinary"}
@@ -510,7 +521,14 @@ def _print_plan(
     print("")
     print("File mapping")
     _print_table(
-        ["method", "files", "missing_folder", "missing_archive", "ambiguous", "selected"],
+        [
+            "method",
+            "files",
+            "missing_folder",
+            "missing_archive",
+            "ambiguous",
+            "selected",
+        ],
         [
             [
                 method,

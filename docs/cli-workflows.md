@@ -143,3 +143,7 @@ The seed script reads the source schema only. It writes a new current-shape
 schema, maps `folder_id` to `archive_id`, converts legacy MD5 text when needed,
 copies compatible hash-addressed leaf tables, and rebuilds artifact manifest
 row counts.
+
+The default folder mapping is `auto`: first exact path, then unique archive file
+name. Use `--folder-map exact-path` or `--folder-map archive-name` only when you
+need to force one strategy.
