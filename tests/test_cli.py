@@ -154,6 +154,20 @@ def test_cli_refresh_env_aliases_and_prod_confirmation(
     assert "Refusing destructive action without --confirm 'e2ude_core'" in output
 
 
+def test_schema_clone_treats_required_file_columns_as_non_nullable():
+    from e2ude_core.cli import _required_copied_columns
+    from e2ude_core.db.models import FileMetadata
+
+    required = _required_copied_columns(
+        FileMetadata.__table__,
+        ["id", "archive_id", "hash_id", "relative_path", "file_type"],
+    )
+
+    assert "archive_id" in required
+    assert "hash_id" in required
+    assert "relative_path" in required
+
+
 def test_cli_lists_registered_parsers(run_repo_command):
     from e2ude_core.runtime_files import HANDLED_FILE_SPECS
 

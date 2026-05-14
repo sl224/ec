@@ -936,10 +936,15 @@ def _copyable_columns(table, source_columns: set[str]) -> tuple[list[str], list[
     for column in table.columns:
         if column.name in source_columns:
             continue
-        has_default = column.default is not None or column.server_default is not None
-        if not column.nullable and not has_default and not column.autoincrement:
+        if not column.nullable and not _column_can_fill_itself(column):
             missing_required.append(column.name)
     return common, missing_required
+
+
+def _column_can_fill_itself(column) -> bool:
+    has_default = column.default is not None or column.server_default is not None
+    is_identity = bool(column.primary_key and column.autoincrement is not False)
+    return has_default or is_identity
 
 
 def _uses_identity_insert(table, column_names: list[str]) -> bool:
@@ -947,6 +952,34 @@ def _uses_identity_insert(table, column_names: list[str]) -> bool:
         return False
     id_column = table.columns.get("id")
     return bool(id_column is not None and id_column.primary_key)
+
+
+def _required_copied_columns(table, column_names: list[str]) -> list[str]:
+    required = []
+    for column in table.columns:
+        if column.name not in column_names:
+            continue
+        if not column.nullable and not _column_can_fill_itself(column):
+            required.append(column.name)
+    return required
+
+
+def _null_required_column_counts(
+    conn, source_schema: str, table_name: str, column_names: list[str]
+) -> dict[str, int]:
+    import sqlalchemy as sa
+
+    counts = {}
+    for column_name in column_names:
+        count = conn.execute(
+            sa.text(
+                f"SELECT COUNT(*) FROM [{source_schema}].[{table_name}] "
+                f"WHERE [{column_name}] IS NULL"
+            )
+        ).scalar_one()
+        if count:
+            counts[column_name] = count
+    return counts
 
 
 def _copy_table_rows(conn, source_schema: str, dest_schema: str, table) -> int | None:
@@ -969,6 +1002,21 @@ def _copy_table_rows(conn, source_schema: str, dest_schema: str, table) -> int |
     if not common:
         print(f"Skipped [{table_name}]; no compatible columns found.")
         return None
+
+    null_counts = _null_required_column_counts(
+        conn,
+        source_schema,
+        table_name,
+        _required_copied_columns(table, common),
+    )
+    if null_counts:
+        details = ", ".join(
+            f"{column_name}={count}" for column_name, count in null_counts.items()
+        )
+        raise SystemExit(
+            f"Cannot clone [{source_schema}].[{table_name}]; required target "
+            f"column(s) contain NULL source values: {details}."
+        )
 
     columns = ", ".join(f"[{name}]" for name in common)
     identity_insert = _uses_identity_insert(table, common)
