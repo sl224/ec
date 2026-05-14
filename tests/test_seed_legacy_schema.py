@@ -72,6 +72,40 @@ def test_folder_mapping_reports_missing_and_ambiguous_archive_names():
     ]
 
 
+def test_legacy_folder_mapping_derives_current_archive_rows():
+    seed = _load_seed_script()
+
+    counts, folder_archive_ids, examples, archive_rows = (
+        seed._legacy_folder_mapping_from_rows(
+            file_counts={24145: (66, 1)},
+            folder_paths={
+                24145: (
+                    r"\\rsiny1-ilsfs\RSM\169879\2025\11"
+                    r"\169879_20251105_024048_075_TransportRSM.fpkg.e2d.zip"
+                )
+            },
+            scanner_version=3,
+            handler_generation="abc123",
+        )
+    )
+
+    assert counts == {
+        "total_files": 66,
+        "missing_folder": 0,
+        "missing_archive": 0,
+        "ambiguous_archive": 0,
+    }
+    assert folder_archive_ids == {24145: 24145}
+    assert examples == []
+    assert archive_rows[0]["id"] == 24145
+    assert archive_rows[0]["buno"] == "169879"
+    assert archive_rows[0]["source_size_bytes"] == 0
+    assert archive_rows[0]["completed_scan_version"] == 3
+    assert archive_rows[0]["required_handler_generation"] == "abc123"
+    assert archive_rows[0]["completed_handler_generation"] is None
+    assert archive_rows[0]["state"] == "NEEDS_PROCESSING"
+
+
 def test_auto_folder_mapping_prefers_complete_exact_path():
     seed = _load_seed_script()
     counts = {
@@ -81,6 +115,11 @@ def test_auto_folder_mapping_prefers_complete_exact_path():
             "ambiguous_archive": 0,
         },
         "archive-name": {
+            "missing_folder": 0,
+            "missing_archive": 0,
+            "ambiguous_archive": 0,
+        },
+        "legacy-folder": {
             "missing_folder": 0,
             "missing_archive": 0,
             "ambiguous_archive": 0,
@@ -103,6 +142,11 @@ def test_auto_folder_mapping_uses_unique_archive_name_when_exact_path_fails():
             "missing_archive": 0,
             "ambiguous_archive": 0,
         },
+        "legacy-folder": {
+            "missing_folder": 0,
+            "missing_archive": 0,
+            "ambiguous_archive": 0,
+        },
     }
 
     assert seed._select_folder_mapping("auto", counts) == "archive-name"
@@ -121,6 +165,34 @@ def test_forced_folder_mapping_is_not_overridden():
             "missing_archive": 25,
             "ambiguous_archive": 5,
         },
+        "legacy-folder": {
+            "missing_folder": 0,
+            "missing_archive": 0,
+            "ambiguous_archive": 0,
+        },
     }
 
     assert seed._select_folder_mapping("archive-name", counts) == "archive-name"
+
+
+def test_auto_folder_mapping_falls_back_to_legacy_folder():
+    seed = _load_seed_script()
+    counts = {
+        "exact-path": {
+            "missing_folder": 0,
+            "missing_archive": 10,
+            "ambiguous_archive": 0,
+        },
+        "archive-name": {
+            "missing_folder": 0,
+            "missing_archive": 10,
+            "ambiguous_archive": 0,
+        },
+        "legacy-folder": {
+            "missing_folder": 0,
+            "missing_archive": 0,
+            "ambiguous_archive": 0,
+        },
+    }
+
+    assert seed._select_folder_mapping("auto", counts) == "legacy-folder"

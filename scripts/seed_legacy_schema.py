@@ -2,7 +2,9 @@ from __future__ import annotations
 
 import argparse
 import os
+import re
 from collections import defaultdict
+from datetime import UTC, datetime
 from pathlib import Path, PureWindowsPath
 
 import sqlalchemy as sa
@@ -31,6 +33,7 @@ REQUIRED_LEGACY_TABLES = {
     "metadata_hash_registry",
     "metadata_file",
 }
+ARCHIVE_NAME_PATTERN = re.compile(r"([0-9]+)_([0-9]{8}_[0-9]{6})")
 
 
 def _clean_path_text(value: object) -> str:
@@ -51,6 +54,19 @@ def _mapping_key(value: object, method: str) -> str:
     if method == "exact-path":
         return _path_key(value)
     return _archive_name_key(value)
+
+
+def _parse_archive_path(value: object) -> tuple[str, datetime] | None:
+    name = PureWindowsPath(_clean_path_text(value)).name
+    match = ARCHIVE_NAME_PATTERN.search(name)
+    if not match:
+        return None
+
+    buno, dt_str = match.groups()
+    try:
+        return buno, datetime.strptime(dt_str, "%Y%m%d_%H%M%S")
+    except ValueError:
+        return None
 
 
 def _qname(schema_name: str, table_name: str) -> str:
@@ -289,8 +305,113 @@ def _folder_mapping_from_rows(
     return counts, folder_archive_ids, examples
 
 
+def _legacy_folder_mapping_from_rows(
+    *,
+    file_counts: dict[int | None, tuple[int, int]],
+    folder_paths: dict[int, str],
+    scanner_version: int,
+    handler_generation: str,
+    example_limit: int = 20,
+) -> tuple[dict[str, int], dict[int, int], list[list[object]], list[dict[str, object]]]:
+    seen_at = datetime.now(UTC).replace(tzinfo=None)
+    counts = {
+        "total_files": 0,
+        "missing_folder": 0,
+        "missing_archive": 0,
+        "ambiguous_archive": 0,
+    }
+    parsed_rows = []
+    examples = []
+    sorted_file_counts = sorted(
+        file_counts.items(), key=lambda item: (item[1][1], item[0] or 0)
+    )
+
+    for folder_id, (file_count, first_file_id) in sorted_file_counts:
+        counts["total_files"] += file_count
+        folder_path = folder_paths.get(folder_id) if folder_id is not None else None
+        if folder_path is None:
+            counts["missing_folder"] += file_count
+            if len(examples) < example_limit:
+                examples.append([first_file_id, folder_id, None, None, None])
+            continue
+
+        parsed = _parse_archive_path(folder_path)
+        if parsed is None:
+            counts["missing_archive"] += file_count
+            if len(examples) < example_limit:
+                examples.append(
+                    [
+                        first_file_id,
+                        folder_id,
+                        folder_path,
+                        _archive_name_key(folder_path),
+                        0,
+                    ]
+                )
+            continue
+
+        buno, archive_datetime = parsed
+        parsed_rows.append(
+            {
+                "folder_id": folder_id,
+                "file_count": file_count,
+                "first_file_id": first_file_id,
+                "source_path": _clean_path_text(folder_path),
+                "archive_key": (buno, archive_datetime),
+                "row": {
+                    "id": folder_id,
+                    "buno": buno,
+                    "archive_datetime": archive_datetime,
+                    "source_path": _clean_path_text(folder_path),
+                    "source_size_bytes": 0,
+                    "source_mtime_ns": 0,
+                    "first_seen_at": seen_at,
+                    "last_seen_at": seen_at,
+                    "is_present": True,
+                    "required_scan_version": scanner_version,
+                    "completed_scan_version": scanner_version,
+                    "required_handler_generation": handler_generation,
+                    "completed_handler_generation": None,
+                    "state": "NEEDS_PROCESSING",
+                    "work_reason": "Seeded from legacy metadata_folder",
+                },
+            }
+        )
+
+    archive_key_counts = defaultdict(int)
+    for item in parsed_rows:
+        archive_key_counts[item["archive_key"]] += 1
+
+    folder_archive_ids = {}
+    archive_rows = []
+    for item in parsed_rows:
+        duplicate_count = archive_key_counts[item["archive_key"]]
+        if duplicate_count > 1:
+            counts["ambiguous_archive"] += item["file_count"]
+            if len(examples) < example_limit:
+                examples.append(
+                    [
+                        item["first_file_id"],
+                        item["folder_id"],
+                        item["source_path"],
+                        item["archive_key"][0],
+                        duplicate_count,
+                    ]
+                )
+            continue
+
+        folder_archive_ids[item["folder_id"]] = item["folder_id"]
+        archive_rows.append(item["row"])
+
+    return counts, folder_archive_ids, examples, archive_rows
+
+
 def _folder_mapping_results(
-    conn: sa.Connection, source_schema: str
+    conn: sa.Connection,
+    source_schema: str,
+    *,
+    scanner_version: int,
+    handler_generation: str,
 ) -> dict[str, dict[str, object]]:
     file_counts = _file_counts_by_folder(conn, source_schema)
     folders = _folder_paths(conn, source_schema)
@@ -312,6 +433,23 @@ def _folder_mapping_results(
                 for archive_id, source_path in list(archives.items())[:10]
             ],
         }
+    counts, folder_archive_ids, examples, archive_rows = (
+        _legacy_folder_mapping_from_rows(
+            file_counts=file_counts,
+            folder_paths=folders,
+            scanner_version=scanner_version,
+            handler_generation=handler_generation,
+        )
+    )
+    results["legacy-folder"] = {
+        "counts": counts,
+        "folder_archive_ids": folder_archive_ids,
+        "examples": examples,
+        "archive_examples": [
+            [row["id"], row["source_path"], row["buno"]] for row in archive_rows[:10]
+        ],
+        "archive_rows": archive_rows,
+    }
     return results
 
 
@@ -321,7 +459,7 @@ def _select_folder_mapping(
     if requested_method != "auto":
         return requested_method
 
-    for method in ("exact-path", "archive-name"):
+    for method in ("exact-path", "archive-name", "legacy-folder"):
         counts = mapping_counts[method]
         if (
             counts["missing_folder"] == 0
@@ -331,7 +469,7 @@ def _select_folder_mapping(
             return method
 
     return min(
-        ("exact-path", "archive-name"),
+        ("exact-path", "archive-name", "legacy-folder"),
         key=lambda method: (
             mapping_counts[method]["missing_archive"],
             mapping_counts[method]["ambiguous_archive"],
@@ -450,6 +588,49 @@ def _copy_hash_registry(
     return result.rowcount or 0
 
 
+def _copy_metadata_archive_from_folders(
+    conn: sa.Connection, dest_schema: str, archive_rows: list[dict[str, object]]
+) -> int:
+    if not archive_rows:
+        return 0
+
+    columns = [
+        "id",
+        "buno",
+        "archive_datetime",
+        "source_path",
+        "source_size_bytes",
+        "source_mtime_ns",
+        "first_seen_at",
+        "last_seen_at",
+        "is_present",
+        "required_scan_version",
+        "completed_scan_version",
+        "required_handler_generation",
+        "completed_handler_generation",
+        "state",
+        "work_reason",
+    ]
+    quoted_columns = ", ".join(_qcol(name) for name in columns)
+    value_columns = ", ".join(f":{name}" for name in columns)
+
+    _set_identity_insert(conn, dest_schema, "metadata_archive", True)
+    try:
+        result = conn.execute(
+            sa.text(
+                f"""
+                INSERT INTO {_qname(dest_schema, "metadata_archive")}
+                    ({quoted_columns})
+                VALUES ({value_columns})
+                """
+            ),
+            archive_rows,
+        )
+    finally:
+        _set_identity_insert(conn, dest_schema, "metadata_archive", False)
+    return result.rowcount or 0
+
+
 def _copy_metadata_file(
     conn: sa.Connection,
     source_schema: str,
@@ -563,14 +744,24 @@ def _load_runtime():
     from e2ude_core.config import settings
     from e2ude_core.db.access import get_engine
     from e2ude_core.db.setup import _runtime_tables, initialize_database
-    from e2ude_core.runtime_files import HANDLED_FILE_SPECS
+    from e2ude_core.pipelines.scanner import SCANNER_VERSION
+    from e2ude_core.runtime_files import CURRENT_HANDLER_GENERATION, HANDLED_FILE_SPECS
 
     table_versions = {
         model.__tablename__: spec.version
         for spec in HANDLED_FILE_SPECS
         for model in spec.expected_models
     }
-    return settings, get_engine, _runtime_tables, initialize_database, table_versions
+
+    return (
+        settings,
+        get_engine,
+        _runtime_tables,
+        initialize_database,
+        table_versions,
+        SCANNER_VERSION,
+        CURRENT_HANDLER_GENERATION,
+    )
 
 
 def _validate_source(
@@ -662,6 +853,8 @@ def seed_legacy_schema(args: argparse.Namespace) -> int:
         runtime_tables_func,
         initialize_database,
         table_versions,
+        scanner_version,
+        handler_generation,
     ) = _load_runtime()
     if settings.database.type != "mssql":
         raise SystemExit("seed_legacy_schema.py only supports MSSQL.")
@@ -683,7 +876,12 @@ def seed_legacy_schema(args: argparse.Namespace) -> int:
             compatible_leaf_tables, leaf_plan = _table_compatibility(
                 runtime_tables, conn, source_schema, source_tables
             )
-            mapping_results = _folder_mapping_results(conn, source_schema)
+            mapping_results = _folder_mapping_results(
+                conn,
+                source_schema,
+                scanner_version=scanner_version,
+                handler_generation=handler_generation,
+            )
             mapping_counts = {
                 method: result["counts"] for method, result in mapping_results.items()
             }
@@ -771,15 +969,26 @@ def seed_legacy_schema(args: argparse.Namespace) -> int:
         table_by_name = {table.name: table for table in runtime_tables_func()}
         with eng.begin() as conn:
             copied_rows.append(
-                [
-                    "metadata_archive",
-                    _copy_common_table(
-                        conn,
-                        source_schema=source_schema,
-                        dest_schema=dest_schema,
-                        table=table_by_name["metadata_archive"],
-                    ),
-                ]
+                (
+                    [
+                        "metadata_archive",
+                        _copy_metadata_archive_from_folders(
+                            conn,
+                            dest_schema,
+                            selected_mapping_result["archive_rows"],
+                        ),
+                    ]
+                    if selected_mapping == "legacy-folder"
+                    else [
+                        "metadata_archive",
+                        _copy_common_table(
+                            conn,
+                            source_schema=source_schema,
+                            dest_schema=dest_schema,
+                            table=table_by_name["metadata_archive"],
+                        ),
+                    ]
+                )
             )
             if "metadata_discovery_directory" in source_tables:
                 copied_rows.append(
@@ -869,11 +1078,12 @@ def build_parser() -> argparse.ArgumentParser:
     )
     parser.add_argument(
         "--folder-map",
-        choices=["auto", "exact-path", "archive-name"],
+        choices=["auto", "exact-path", "archive-name", "legacy-folder"],
         default="auto",
         help=(
             "How legacy metadata_folder rows map to metadata_archive. "
-            "auto prefers a complete exact path match, then a unique archive filename match."
+            "auto prefers a complete exact path match, then a unique archive filename "
+            "match, then rows derived from metadata_folder."
         ),
     )
     return parser
