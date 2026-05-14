@@ -32,6 +32,33 @@ REQUIRED_LEGACY_TABLES = {
 }
 
 
+def _archive_name_expr(alias: str, column_name: str) -> str:
+    path = f"REPLACE(COALESCE({alias}.[{column_name}], ''), '/', NCHAR(92))"
+    return (
+        f"LOWER(RIGHT({path}, "
+        f"CHARINDEX(NCHAR(92), REVERSE({path}) + NCHAR(92)) - 1))"
+    )
+
+
+def _folder_archive_key_expr(alias: str, method: str) -> str:
+    if method == "exact-path":
+        return f"{alias}.[FolderPath]"
+    return _archive_name_expr(alias, "FolderPath")
+
+
+def _archive_key_expr(alias: str, method: str) -> str:
+    if method == "exact-path":
+        return f"{alias}.[source_path]"
+    return _archive_name_expr(alias, "source_path")
+
+
+def _archive_join_condition(folder_alias: str, archive_alias: str, method: str) -> str:
+    return (
+        f"{_archive_key_expr(archive_alias, method)} = "
+        f"{_folder_archive_key_expr(folder_alias, method)}"
+    )
+
+
 def _qname(schema_name: str, table_name: str) -> str:
     return f"[{schema_name}].[{table_name}]"
 
@@ -154,19 +181,29 @@ def _invalid_md5_count(conn: sa.Connection, source_schema: str) -> int:
     ).scalar_one()
 
 
-def _file_mapping_counts(conn: sa.Connection, source_schema: str) -> dict[str, int]:
+def _file_mapping_counts(
+    conn: sa.Connection, source_schema: str, method: str
+) -> dict[str, int]:
+    archive_key = _archive_key_expr("a", method)
+    folder_key = _folder_archive_key_expr("f", method)
     row = conn.execute(
         sa.text(
             f"""
+            WITH archive_keys AS (
+                SELECT {archive_key} AS archive_key, COUNT(*) AS archive_matches
+                FROM {_qname(source_schema, "metadata_archive")} AS a
+                GROUP BY {archive_key}
+            )
             SELECT
                 COUNT(*) AS total_files,
                 SUM(CASE WHEN f.FolderID IS NULL THEN 1 ELSE 0 END) AS missing_folder,
-                SUM(CASE WHEN a.id IS NULL THEN 1 ELSE 0 END) AS missing_archive
+                SUM(CASE WHEN ak.archive_key IS NULL THEN 1 ELSE 0 END) AS missing_archive,
+                SUM(CASE WHEN ak.archive_matches > 1 THEN 1 ELSE 0 END) AS ambiguous_archive
             FROM {_qname(source_schema, "metadata_file")} AS mf
             LEFT JOIN {_qname(source_schema, "metadata_folder")} AS f
                 ON f.FolderID = mf.folder_id
-            LEFT JOIN {_qname(source_schema, "metadata_archive")} AS a
-                ON a.source_path = f.FolderPath
+            LEFT JOIN archive_keys AS ak
+                ON ak.archive_key = {folder_key}
             """
         )
     ).one()
@@ -174,30 +211,68 @@ def _file_mapping_counts(conn: sa.Connection, source_schema: str) -> dict[str, i
         "total_files": row.total_files or 0,
         "missing_folder": row.missing_folder or 0,
         "missing_archive": row.missing_archive or 0,
+        "ambiguous_archive": row.ambiguous_archive or 0,
     }
 
 
 def _unmapped_file_examples(
-    conn: sa.Connection, source_schema: str, limit: int = 20
+    conn: sa.Connection, source_schema: str, method: str, limit: int = 20
 ) -> list[list[object]]:
+    archive_key = _archive_key_expr("a", method)
+    folder_key = _folder_archive_key_expr("f", method)
     rows = conn.execute(
         sa.text(
             f"""
+            WITH archive_keys AS (
+                SELECT {archive_key} AS archive_key, COUNT(*) AS archive_matches
+                FROM {_qname(source_schema, "metadata_archive")} AS a
+                GROUP BY {archive_key}
+            )
             SELECT TOP ({limit})
                 mf.id AS file_id,
                 mf.folder_id,
-                f.FolderPath
+                f.FolderPath,
+                ak.archive_matches
             FROM {_qname(source_schema, "metadata_file")} AS mf
             LEFT JOIN {_qname(source_schema, "metadata_folder")} AS f
                 ON f.FolderID = mf.folder_id
-            LEFT JOIN {_qname(source_schema, "metadata_archive")} AS a
-                ON a.source_path = f.FolderPath
-            WHERE f.FolderID IS NULL OR a.id IS NULL
+            LEFT JOIN archive_keys AS ak
+                ON ak.archive_key = {folder_key}
+            WHERE f.FolderID IS NULL
+               OR ak.archive_key IS NULL
+               OR ak.archive_matches > 1
             ORDER BY mf.id
             """
         )
     ).fetchall()
-    return [[row.file_id, row.folder_id, row.FolderPath] for row in rows]
+    return [
+        [row.file_id, row.folder_id, row.FolderPath, row.archive_matches]
+        for row in rows
+    ]
+
+
+def _select_folder_mapping(
+    requested_method: str, mapping_counts: dict[str, dict[str, int]]
+) -> str:
+    if requested_method != "auto":
+        return requested_method
+
+    for method in ("exact-path", "archive-name"):
+        counts = mapping_counts[method]
+        if (
+            counts["missing_folder"] == 0
+            and counts["missing_archive"] == 0
+            and counts["ambiguous_archive"] == 0
+        ):
+            return method
+
+    return min(
+        ("exact-path", "archive-name"),
+        key=lambda method: (
+            mapping_counts[method]["missing_archive"],
+            mapping_counts[method]["ambiguous_archive"],
+        ),
+    )
 
 
 def _required_columns_missing(table, source_columns: set[str]) -> list[str]:
@@ -308,8 +383,9 @@ def _copy_hash_registry(
 
 
 def _copy_metadata_file(
-    conn: sa.Connection, source_schema: str, dest_schema: str
+    conn: sa.Connection, source_schema: str, dest_schema: str, method: str
 ) -> int:
+    archive_join = _archive_join_condition("f", "a", method)
     _set_identity_insert(conn, dest_schema, "metadata_file", True)
     try:
         result = conn.execute(
@@ -327,8 +403,10 @@ def _copy_metadata_file(
                 FROM {_qname(source_schema, "metadata_file")} AS mf
                 INNER JOIN {_qname(source_schema, "metadata_folder")} AS f
                     ON f.FolderID = mf.folder_id
+                INNER JOIN {_qname(source_schema, "metadata_archive")} AS a
+                    ON {archive_join}
                 INNER JOIN {_qname(dest_schema, "metadata_archive")} AS da
-                    ON da.source_path = f.FolderPath
+                    ON da.id = a.id
                 """
             )
         )
@@ -337,31 +415,18 @@ def _copy_metadata_file(
     return result.rowcount or 0
 
 
-def _copy_artifact_manifest(
+def _build_artifact_manifest(
     conn: sa.Connection,
     *,
-    source_schema: str,
     dest_schema: str,
     copied_leaf_tables: set[str],
+    table_versions: dict[str, int],
 ) -> list[list[object]]:
-    if "metadata_artifact_manifest" not in _schema_tables(conn, source_schema):
-        return []
-
     rows = []
-    source_targets = conn.execute(
-        sa.text(
-            f"""
-            SELECT DISTINCT target_table
-            FROM {_qname(source_schema, "metadata_artifact_manifest")}
-            ORDER BY target_table
-            """
-        )
-    ).fetchall()
-
-    for row in source_targets:
-        table_name = row.target_table
-        if table_name not in copied_leaf_tables:
-            rows.append([table_name, "skip", "target table not copied"])
+    for table_name in sorted(copied_leaf_tables):
+        handler_version = table_versions.get(table_name)
+        if handler_version is None:
+            rows.append([table_name, "skip", "no runtime handler version"])
             continue
 
         result = conn.execute(
@@ -370,24 +435,15 @@ def _copy_artifact_manifest(
                 INSERT INTO {_qname(dest_schema, "metadata_artifact_manifest")}
                     ([hash_id], [target_table], [handler_version], [row_count])
                 SELECT
-                    m.[hash_id],
-                    m.[target_table],
-                    MAX(m.[handler_version]) AS handler_version,
-                    COALESCE(MAX(c.row_count), 0) AS row_count
-                FROM {_qname(source_schema, "metadata_artifact_manifest")} AS m
-                INNER JOIN {_qname(dest_schema, "metadata_hash_registry")} AS h
-                    ON h.id = m.hash_id
-                LEFT JOIN (
-                    SELECT hash_id, COUNT(*) AS row_count
-                    FROM {_qname(dest_schema, table_name)}
-                    GROUP BY hash_id
-                ) AS c
-                    ON c.hash_id = m.hash_id
-                WHERE m.target_table = :target_table
-                GROUP BY m.hash_id, m.target_table
+                    d.[hash_id],
+                    :target_table,
+                    :handler_version,
+                    COUNT(*) AS row_count
+                FROM {_qname(dest_schema, table_name)} AS d
+                GROUP BY d.hash_id
                 """
             ),
-            {"target_table": table_name},
+            {"target_table": table_name, "handler_version": handler_version},
         )
         rows.append([table_name, "copy", result.rowcount or 0])
 
@@ -405,8 +461,14 @@ def _load_runtime():
     from e2ude_core.config import settings
     from e2ude_core.db.access import get_engine
     from e2ude_core.db.setup import _runtime_tables, initialize_database
+    from e2ude_core.runtime_files import HANDLED_FILE_SPECS
 
-    return settings, get_engine, _runtime_tables, initialize_database
+    table_versions = {
+        model.__tablename__: spec.version
+        for spec in HANDLED_FILE_SPECS
+        for model in spec.expected_models
+    }
+    return settings, get_engine, _runtime_tables, initialize_database, table_versions
 
 
 def _validate_source(
@@ -435,6 +497,8 @@ def _print_plan(
     dest_schema: str,
     source_counts: list[list[object]],
     file_counts: dict[str, int],
+    mapping_counts: dict[str, dict[str, int]],
+    selected_mapping: str,
     leaf_plan: list[list[object]],
     dest_exists: bool,
     dest_tables: set[str],
@@ -446,12 +510,23 @@ def _print_plan(
     print("")
     print("File mapping")
     _print_table(
-        ["metric", "count"],
+        ["method", "files", "missing_folder", "missing_archive", "ambiguous", "selected"],
         [
-            ["metadata_file rows", file_counts["total_files"]],
-            ["missing metadata_folder", file_counts["missing_folder"]],
-            ["missing metadata_archive by FolderPath", file_counts["missing_archive"]],
+            [
+                method,
+                counts["total_files"],
+                counts["missing_folder"],
+                counts["missing_archive"],
+                counts["ambiguous_archive"],
+                "yes" if method == selected_mapping else "",
+            ]
+            for method, counts in mapping_counts.items()
         ],
+    )
+    print(f"Selected mapping: {selected_mapping}")
+    print(
+        "Selected unmapped rows: "
+        f"{file_counts['missing_folder'] + file_counts['missing_archive']}"
     )
     print("")
     print("Runtime leaf table plan")
@@ -472,7 +547,13 @@ def seed_legacy_schema(args: argparse.Namespace) -> int:
         raise SystemExit(f"Refusing to write protected destination [{dest_schema}].")
 
     _prepare_environment(args, dest_schema)
-    settings, get_engine, runtime_tables_func, initialize_database = _load_runtime()
+    (
+        settings,
+        get_engine,
+        runtime_tables_func,
+        initialize_database,
+        table_versions,
+    ) = _load_runtime()
     if settings.database.type != "mssql":
         raise SystemExit("seed_legacy_schema.py only supports MSSQL.")
 
@@ -493,26 +574,48 @@ def seed_legacy_schema(args: argparse.Namespace) -> int:
             compatible_leaf_tables, leaf_plan = _table_compatibility(
                 runtime_tables, conn, source_schema, source_tables
             )
-            file_counts = _file_mapping_counts(conn, source_schema)
+            mapping_counts = {
+                "exact-path": _file_mapping_counts(conn, source_schema, "exact-path"),
+                "archive-name": _file_mapping_counts(
+                    conn, source_schema, "archive-name"
+                ),
+            }
+            selected_mapping = _select_folder_mapping(args.folder_map, mapping_counts)
+            file_counts = mapping_counts[selected_mapping]
             source_counts = _source_table_counts(
-                conn, source_schema, source_tables & (REQUIRED_LEGACY_TABLES | CONTROL_TABLES)
+                conn,
+                source_schema,
+                source_tables & (REQUIRED_LEGACY_TABLES | CONTROL_TABLES),
             )
             _print_plan(
                 source_schema=source_schema,
                 dest_schema=dest_schema,
                 source_counts=source_counts,
                 file_counts=file_counts,
+                mapping_counts=mapping_counts,
+                selected_mapping=selected_mapping,
                 leaf_plan=leaf_plan,
                 dest_exists=dest_exists,
                 dest_tables=dest_tables,
             )
 
+            if file_counts["ambiguous_archive"]:
+                print("")
+                print("Ambiguous file mapping examples")
+                _print_table(
+                    ["file_id", "folder_id", "FolderPath", "archive_matches"],
+                    _unmapped_file_examples(conn, source_schema, selected_mapping),
+                )
+                raise SystemExit(
+                    f"Refusing to seed with ambiguous {selected_mapping} mappings."
+                )
+
             if file_counts["missing_folder"] or file_counts["missing_archive"]:
                 print("")
                 print("Unmapped file examples")
                 _print_table(
-                    ["file_id", "folder_id", "FolderPath"],
-                    _unmapped_file_examples(conn, source_schema),
+                    ["file_id", "folder_id", "FolderPath", "archive_matches"],
+                    _unmapped_file_examples(conn, source_schema, selected_mapping),
                 )
                 if not args.allow_unmapped_files:
                     raise SystemExit(
@@ -571,7 +674,12 @@ def seed_legacy_schema(args: argparse.Namespace) -> int:
                 ]
             )
             copied_rows.append(
-                ["metadata_file", _copy_metadata_file(conn, source_schema, dest_schema)]
+                [
+                    "metadata_file",
+                    _copy_metadata_file(
+                        conn, source_schema, dest_schema, selected_mapping
+                    ),
+                ]
             )
 
             for table_name, table in sorted(compatible_leaf_tables.items()):
@@ -584,11 +692,11 @@ def seed_legacy_schema(args: argparse.Namespace) -> int:
                 copied_leaf_table_names.add(table_name)
                 copied_rows.append([table_name, rowcount])
 
-            manifest_rows = _copy_artifact_manifest(
+            manifest_rows = _build_artifact_manifest(
                 conn,
-                source_schema=source_schema,
                 dest_schema=dest_schema,
                 copied_leaf_tables=copied_leaf_table_names,
+                table_versions=table_versions,
             )
 
         print("")
@@ -629,6 +737,15 @@ def build_parser() -> argparse.ArgumentParser:
         "--allow-unmapped-files",
         action="store_true",
         help="Skip legacy metadata_file rows that cannot be mapped to metadata_archive",
+    )
+    parser.add_argument(
+        "--folder-map",
+        choices=["auto", "exact-path", "archive-name"],
+        default="auto",
+        help=(
+            "How legacy metadata_folder rows map to metadata_archive. "
+            "auto prefers a complete exact path match, then a unique archive filename match."
+        ),
     )
     return parser
 
