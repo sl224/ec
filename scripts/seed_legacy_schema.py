@@ -2,7 +2,8 @@ from __future__ import annotations
 
 import argparse
 import os
-from pathlib import Path
+from collections import defaultdict
+from pathlib import Path, PureWindowsPath
 
 import sqlalchemy as sa
 
@@ -32,30 +33,24 @@ REQUIRED_LEGACY_TABLES = {
 }
 
 
-def _archive_name_expr(alias: str, column_name: str) -> str:
-    path = f"REPLACE(COALESCE({alias}.[{column_name}], ''), '/', NCHAR(92))"
-    return (
-        f"LOWER(RIGHT({path}, CHARINDEX(NCHAR(92), REVERSE({path}) + NCHAR(92)) - 1))"
-    )
+def _clean_path_text(value: object) -> str:
+    return str(value or "").strip()
 
 
-def _folder_archive_key_expr(alias: str, method: str) -> str:
+def _path_key(value: object) -> str:
+    text = _clean_path_text(value)
+    return str(PureWindowsPath(text)).casefold() if text else ""
+
+
+def _archive_name_key(value: object) -> str:
+    text = _clean_path_text(value)
+    return PureWindowsPath(text).name.casefold() if text else ""
+
+
+def _mapping_key(value: object, method: str) -> str:
     if method == "exact-path":
-        return f"{alias}.[FolderPath]"
-    return _archive_name_expr(alias, "FolderPath")
-
-
-def _archive_key_expr(alias: str, method: str) -> str:
-    if method == "exact-path":
-        return f"{alias}.[source_path]"
-    return _archive_name_expr(alias, "source_path")
-
-
-def _archive_join_condition(folder_alias: str, archive_alias: str, method: str) -> str:
-    return (
-        f"{_archive_key_expr(archive_alias, method)} = "
-        f"{_folder_archive_key_expr(folder_alias, method)}"
-    )
+        return _path_key(value)
+    return _archive_name_key(value)
 
 
 def _qname(schema_name: str, table_name: str) -> str:
@@ -188,74 +183,136 @@ def _invalid_md5_count(conn: sa.Connection, source_schema: str) -> int:
     ).scalar_one()
 
 
-def _file_mapping_counts(
-    conn: sa.Connection, source_schema: str, method: str
-) -> dict[str, int]:
-    archive_key = _archive_key_expr("a", method)
-    folder_key = _folder_archive_key_expr("f", method)
-    row = conn.execute(
-        sa.text(
-            f"""
-            WITH archive_keys AS (
-                SELECT {archive_key} AS archive_key, COUNT(*) AS archive_matches
-                FROM {_qname(source_schema, "metadata_archive")} AS a
-                GROUP BY {archive_key}
-            )
-            SELECT
-                COUNT(*) AS total_files,
-                SUM(CASE WHEN f.FolderID IS NULL THEN 1 ELSE 0 END) AS missing_folder,
-                SUM(CASE WHEN f.FolderID IS NOT NULL AND ak.archive_key IS NULL THEN 1 ELSE 0 END) AS missing_archive,
-                SUM(CASE WHEN f.FolderID IS NOT NULL AND ak.archive_matches > 1 THEN 1 ELSE 0 END) AS ambiguous_archive
-            FROM {_qname(source_schema, "metadata_file")} AS mf
-            LEFT JOIN {_qname(source_schema, "metadata_folder")} AS f
-                ON f.FolderID = mf.folder_id
-            LEFT JOIN archive_keys AS ak
-                ON ak.archive_key = {folder_key}
-            """
-        )
-    ).one()
-    return {
-        "total_files": row.total_files or 0,
-        "missing_folder": row.missing_folder or 0,
-        "missing_archive": row.missing_archive or 0,
-        "ambiguous_archive": row.ambiguous_archive or 0,
-    }
-
-
-def _unmapped_file_examples(
-    conn: sa.Connection, source_schema: str, method: str, limit: int = 20
-) -> list[list[object]]:
-    archive_key = _archive_key_expr("a", method)
-    folder_key = _folder_archive_key_expr("f", method)
+def _file_counts_by_folder(
+    conn: sa.Connection, source_schema: str
+) -> dict[int | None, tuple[int, int]]:
     rows = conn.execute(
         sa.text(
             f"""
-            WITH archive_keys AS (
-                SELECT {archive_key} AS archive_key, COUNT(*) AS archive_matches
-                FROM {_qname(source_schema, "metadata_archive")} AS a
-                GROUP BY {archive_key}
-            )
-            SELECT TOP ({limit})
-                mf.id AS file_id,
-                mf.folder_id,
-                f.FolderPath,
-                ak.archive_matches
+            SELECT
+                folder_id,
+                COUNT(*) AS file_count,
+                MIN(id) AS first_file_id
             FROM {_qname(source_schema, "metadata_file")} AS mf
-            LEFT JOIN {_qname(source_schema, "metadata_folder")} AS f
-                ON f.FolderID = mf.folder_id
-            LEFT JOIN archive_keys AS ak
-                ON ak.archive_key = {folder_key}
-            WHERE f.FolderID IS NULL
-               OR ak.archive_key IS NULL
-               OR ak.archive_matches > 1
-            ORDER BY mf.id
+            GROUP BY folder_id
             """
         )
     ).fetchall()
-    return [
-        [row.file_id, row.folder_id, row.FolderPath, row.archive_matches]
-        for row in rows
-    ]
+    return {
+        row.folder_id: (row.file_count or 0, row.first_file_id or 0) for row in rows
+    }
+
+
+def _folder_paths(conn: sa.Connection, source_schema: str) -> dict[int, str]:
+    rows = conn.execute(
+        sa.text(
+            f"""
+            SELECT FolderID, FolderPath
+            FROM {_qname(source_schema, "metadata_folder")}
+            """
+        )
+    ).fetchall()
+    return {row.FolderID: row.FolderPath for row in rows}
+
+
+def _archive_paths(conn: sa.Connection, source_schema: str) -> dict[int, str]:
+    rows = conn.execute(
+        sa.text(
+            f"""
+            SELECT id, source_path
+            FROM {_qname(source_schema, "metadata_archive")}
+            ORDER BY id
+            """
+        )
+    ).fetchall()
+    return {row.id: row.source_path for row in rows}
+
+
+def _folder_mapping_from_rows(
+    *,
+    file_counts: dict[int | None, tuple[int, int]],
+    folder_paths: dict[int, str],
+    archive_paths: dict[int, str],
+    method: str,
+    example_limit: int = 20,
+) -> tuple[dict[str, int], dict[int, int], list[list[object]]]:
+    archive_lookup = defaultdict(list)
+    for archive_id, source_path in archive_paths.items():
+        key = _mapping_key(source_path, method)
+        if key:
+            archive_lookup[key].append(archive_id)
+
+    counts = {
+        "total_files": 0,
+        "missing_folder": 0,
+        "missing_archive": 0,
+        "ambiguous_archive": 0,
+    }
+    folder_archive_ids = {}
+    examples = []
+    sorted_file_counts = sorted(
+        file_counts.items(), key=lambda item: (item[1][1], item[0] or 0)
+    )
+
+    for folder_id, (file_count, first_file_id) in sorted_file_counts:
+        counts["total_files"] += file_count
+        folder_path = folder_paths.get(folder_id) if folder_id is not None else None
+        if folder_path is None:
+            counts["missing_folder"] += file_count
+            if len(examples) < example_limit:
+                examples.append([first_file_id, folder_id, None, None, None])
+            continue
+
+        folder_key = _mapping_key(folder_path, method)
+        archive_matches = archive_lookup.get(folder_key, [])
+        if not archive_matches:
+            counts["missing_archive"] += file_count
+            if len(examples) < example_limit:
+                examples.append([first_file_id, folder_id, folder_path, folder_key, 0])
+            continue
+        if len(archive_matches) > 1:
+            counts["ambiguous_archive"] += file_count
+            if len(examples) < example_limit:
+                examples.append(
+                    [
+                        first_file_id,
+                        folder_id,
+                        folder_path,
+                        folder_key,
+                        len(archive_matches),
+                    ]
+                )
+            continue
+
+        folder_archive_ids[folder_id] = archive_matches[0]
+
+    return counts, folder_archive_ids, examples
+
+
+def _folder_mapping_results(
+    conn: sa.Connection, source_schema: str
+) -> dict[str, dict[str, object]]:
+    file_counts = _file_counts_by_folder(conn, source_schema)
+    folders = _folder_paths(conn, source_schema)
+    archives = _archive_paths(conn, source_schema)
+    results = {}
+    for method in ("exact-path", "archive-name"):
+        counts, folder_archive_ids, examples = _folder_mapping_from_rows(
+            file_counts=file_counts,
+            folder_paths=folders,
+            archive_paths=archives,
+            method=method,
+        )
+        results[method] = {
+            "counts": counts,
+            "folder_archive_ids": folder_archive_ids,
+            "examples": examples,
+            "archive_examples": [
+                [archive_id, source_path, _mapping_key(source_path, method)]
+                for archive_id, source_path in list(archives.items())[:10]
+            ],
+        }
+    return results
 
 
 def _select_folder_mapping(
@@ -394,9 +451,45 @@ def _copy_hash_registry(
 
 
 def _copy_metadata_file(
-    conn: sa.Connection, source_schema: str, dest_schema: str, method: str
+    conn: sa.Connection,
+    source_schema: str,
+    dest_schema: str,
+    folder_archive_ids: dict[int, int],
 ) -> int:
-    archive_join = _archive_join_condition("f", "a", method)
+    if not folder_archive_ids:
+        return 0
+
+    conn.execute(
+        sa.text(
+            """
+            IF OBJECT_ID('tempdb..#e2ude_folder_archive_map') IS NOT NULL
+                DROP TABLE #e2ude_folder_archive_map
+            """
+        )
+    )
+    conn.execute(
+        sa.text(
+            """
+            CREATE TABLE #e2ude_folder_archive_map (
+                folder_id int NOT NULL PRIMARY KEY,
+                archive_id int NOT NULL
+            )
+            """
+        )
+    )
+    conn.execute(
+        sa.text(
+            """
+            INSERT INTO #e2ude_folder_archive_map (folder_id, archive_id)
+            VALUES (:folder_id, :archive_id)
+            """
+        ),
+        [
+            {"folder_id": folder_id, "archive_id": archive_id}
+            for folder_id, archive_id in folder_archive_ids.items()
+        ],
+    )
+
     _set_identity_insert(conn, dest_schema, "metadata_file", True)
     try:
         result = conn.execute(
@@ -412,12 +505,10 @@ def _copy_metadata_file(
                     mf.[file_type],
                     mf.[file_size_bytes]
                 FROM {_qname(source_schema, "metadata_file")} AS mf
-                INNER JOIN {_qname(source_schema, "metadata_folder")} AS f
-                    ON f.FolderID = mf.folder_id
-                INNER JOIN {_qname(source_schema, "metadata_archive")} AS a
-                    ON {archive_join}
+                INNER JOIN #e2ude_folder_archive_map AS m
+                    ON m.folder_id = mf.folder_id
                 INNER JOIN {_qname(dest_schema, "metadata_archive")} AS da
-                    ON da.id = a.id
+                    ON da.id = m.archive_id
                 """
             )
         )
@@ -592,14 +683,13 @@ def seed_legacy_schema(args: argparse.Namespace) -> int:
             compatible_leaf_tables, leaf_plan = _table_compatibility(
                 runtime_tables, conn, source_schema, source_tables
             )
+            mapping_results = _folder_mapping_results(conn, source_schema)
             mapping_counts = {
-                "exact-path": _file_mapping_counts(conn, source_schema, "exact-path"),
-                "archive-name": _file_mapping_counts(
-                    conn, source_schema, "archive-name"
-                ),
+                method: result["counts"] for method, result in mapping_results.items()
             }
             selected_mapping = _select_folder_mapping(args.folder_map, mapping_counts)
             file_counts = mapping_counts[selected_mapping]
+            selected_mapping_result = mapping_results[selected_mapping]
             source_counts = _source_table_counts(
                 conn,
                 source_schema,
@@ -621,8 +711,14 @@ def seed_legacy_schema(args: argparse.Namespace) -> int:
                 print("")
                 print("Ambiguous file mapping examples")
                 _print_table(
-                    ["file_id", "folder_id", "FolderPath", "archive_matches"],
-                    _unmapped_file_examples(conn, source_schema, selected_mapping),
+                    [
+                        "file_id",
+                        "folder_id",
+                        "FolderPath",
+                        "folder_key",
+                        "archive_matches",
+                    ],
+                    selected_mapping_result["examples"],
                 )
                 raise SystemExit(
                     f"Refusing to seed with ambiguous {selected_mapping} mappings."
@@ -632,8 +728,20 @@ def seed_legacy_schema(args: argparse.Namespace) -> int:
                 print("")
                 print("Unmapped file examples")
                 _print_table(
-                    ["file_id", "folder_id", "FolderPath", "archive_matches"],
-                    _unmapped_file_examples(conn, source_schema, selected_mapping),
+                    [
+                        "file_id",
+                        "folder_id",
+                        "FolderPath",
+                        "folder_key",
+                        "archive_matches",
+                    ],
+                    selected_mapping_result["examples"],
+                )
+                print("")
+                print("Archive key examples")
+                _print_table(
+                    ["archive_id", "source_path", "archive_key"],
+                    selected_mapping_result["archive_examples"],
                 )
                 if not args.allow_unmapped_files:
                     raise SystemExit(
@@ -695,7 +803,10 @@ def seed_legacy_schema(args: argparse.Namespace) -> int:
                 [
                     "metadata_file",
                     _copy_metadata_file(
-                        conn, source_schema, dest_schema, selected_mapping
+                        conn,
+                        source_schema,
+                        dest_schema,
+                        selected_mapping_result["folder_archive_ids"],
                     ),
                 ]
             )

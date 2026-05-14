@@ -145,5 +145,6 @@ copies compatible hash-addressed leaf tables, and rebuilds artifact manifest
 row counts.
 
 The default folder mapping is `auto`: first exact path, then unique archive file
-name. Use `--folder-map exact-path` or `--folder-map archive-name` only when you
-need to force one strategy.
+name. Path matching uses Windows path normalization without touching the
+filesystem. Use `--folder-map exact-path` or `--folder-map archive-name` only
+when you need to force one strategy.
