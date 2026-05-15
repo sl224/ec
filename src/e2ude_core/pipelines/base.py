@@ -1,14 +1,15 @@
 import logging
 import time
-from concurrent.futures import ThreadPoolExecutor, wait, ALL_COMPLETED
 from pathlib import Path
-from typing import Callable, List, Optional, Type
+from typing import Callable, Sequence, Type
+
 import sqlalchemy as sa
-from e2ude_core.orchestration.spec import JobRunResult
+
 from e2ude_core.db import access as sql_io
-from e2ude_core.registry import HandlerSpec
-from e2ude_core.db.models import ArtifactManifest, Base, FileHashRegistry
 from e2ude_core.db.base_session import DEFAULT_SCHEMA
+from e2ude_core.db.models import ArtifactManifest, Base
+from e2ude_core.orchestration.runs import JobRunResult
+from e2ude_core.runtime_files import RuntimeFileSpec, artifact_key_for
 
 logger = logging.getLogger(__name__)
 
@@ -27,107 +28,204 @@ def _is_mssql_deadlock(exc: Exception) -> bool:
     return "deadlock victim" in message or "(1205)" in message
 
 
-def _lock_hash_row(conn: sa.Connection, hash_id: int) -> None:
-    """
-    Serializes work for the same content hash across parallel workers.
-
-    This is intentionally coarser than a per-table lock: it avoids duplicate
-    writes for identical files without taking range locks across many manifest
-    keys, which proved deadlock-prone under real MCData fan-out.
-    """
-    if conn.dialect.name == "mssql":
-        qualified = _qualified_table_name(FileHashRegistry.__tablename__)
-        conn.execute(
-            sa.text(
-                f"""
-                SELECT id
-                FROM {qualified} WITH (UPDLOCK, HOLDLOCK)
-                WHERE id = :hash_id
-                """
-            ),
-            {"hash_id": hash_id},
-        ).scalar_one()
+def _lock_content_hash(conn: sa.Connection, content_hash: bytes) -> None:
+    if conn.dialect.name != "mssql":
         return
 
     conn.execute(
-        sa.select(FileHashRegistry.id).where(FileHashRegistry.id == hash_id)
-    ).scalar_one()
+        sa.text(
+            """
+            EXEC sp_getapplock
+                @Resource = :resource,
+                @LockMode = 'Exclusive',
+                @LockOwner = 'Transaction',
+                @LockTimeout = 60000
+            """
+        ),
+        {"resource": f"e2ude_content_hash_{content_hash.hex()}"},
+    )
 
 
-def _get_manifest_version(
-    conn: sa.Connection, hash_id: int, table_name: str
-) -> int | None:
+def _get_manifest_state(
+    conn: sa.Connection, content_hash: bytes, artifact_key: str
+) -> tuple[int, str] | None:
     if conn.dialect.name == "mssql":
         qualified = _qualified_table_name(ArtifactManifest.__tablename__)
         row = conn.execute(
             sa.text(
                 f"""
-                SELECT handler_version
+                SELECT parser_version, target_table
                 FROM {qualified} WITH (UPDLOCK, HOLDLOCK)
-                WHERE hash_id = :hash_id AND target_table = :target_table
+                WHERE content_hash = :content_hash AND artifact_key = :artifact_key
                 """
             ),
-            {"hash_id": hash_id, "target_table": table_name},
+            {"content_hash": content_hash, "artifact_key": artifact_key},
         ).first()
-        return None if row is None else row[0]
+        return None if row is None else (row[0], row[1])
 
-    return conn.execute(
-        sa.select(ArtifactManifest.handler_version).where(
-            ArtifactManifest.hash_id == hash_id,
-            ArtifactManifest.target_table == table_name,
+    row = conn.execute(
+        sa.select(ArtifactManifest.parser_version, ArtifactManifest.target_table).where(
+            ArtifactManifest.content_hash == content_hash,
+            ArtifactManifest.artifact_key == artifact_key,
         )
-    ).scalar_one_or_none()
+    ).first()
+    return None if row is None else (row.parser_version, row.target_table)
 
 
-def _upload_single_table(eng: sa.Engine, model, df, hash_id: int, version: int):
-    """Upload one model in its own transaction."""
-    table_name = model.__tablename__
+def _column_can_fill_itself(column) -> bool:
+    has_default = column.default is not None or column.server_default is not None
+    is_identity = bool(column.primary_key and column.autoincrement is not False)
+    return has_default or is_identity
+
+
+def _required_parser_columns(model: Type[Base]) -> set[str]:
+    return {
+        column.name
+        for column in model.__table__.columns
+        if column.name != "content_hash"
+        and not column.nullable
+        and not _column_can_fill_itself(column)
+    }
+
+
+def _validate_parser_output(spec: RuntimeFileSpec, payload) -> None:
+    missing_models = [
+        model.__name__ for model in spec.expected_models if model not in payload
+    ]
+    if missing_models:
+        raise RuntimeError(
+            f"{spec.parser_id} parser did not return expected outputs: "
+            f"{', '.join(sorted(missing_models))}"
+        )
+
+    unknown_models = [
+        getattr(model, "__name__", str(model))
+        for model in payload
+        if model not in spec.expected_models
+    ]
+    if unknown_models:
+        raise RuntimeError(
+            f"{spec.parser_id} parser returned unknown outputs: "
+            f"{', '.join(sorted(unknown_models))}"
+        )
+
+    for model in spec.expected_models:
+        df = payload[model]
+        missing_columns = _required_parser_columns(model) - set(df.columns)
+        if missing_columns:
+            raise RuntimeError(
+                f"{spec.parser_id} parser output for {model.__tablename__} "
+                f"is missing required columns: {', '.join(sorted(missing_columns))}"
+            )
+
+
+def _replace_artifacts(
+    conn: sa.Connection,
+    *,
+    spec: RuntimeFileSpec,
+    content_hash: bytes,
+    payload,
+    target_models: tuple[Type[Base], ...],
+    force: bool,
+) -> dict[str, int]:
+    _lock_content_hash(conn, content_hash)
+    table_rows: dict[str, int] = {}
+    version = spec.version or 0
+
+    for model in target_models:
+        artifact_key = artifact_key_for(spec, model)
+        table_name = model.__tablename__
+        current_state = _get_manifest_state(conn, content_hash, artifact_key)
+        if (
+            not force
+            and current_state is not None
+            and current_state[0] >= version
+            and current_state[1] == table_name
+        ):
+            table_rows[table_name] = 0
+            continue
+
+        df = payload[model].copy()
+        df["content_hash"] = content_hash
+
+        conn.execute(model.__table__.delete().where(model.content_hash == content_hash))
+        sql_io.bulk_upload(df, conn, model.__table__)
+
+        conn.execute(
+            ArtifactManifest.__table__.delete().where(
+                (ArtifactManifest.content_hash == content_hash)
+                & (ArtifactManifest.artifact_key == artifact_key)
+            )
+        )
+        conn.execute(
+            ArtifactManifest.__table__.insert().values(
+                content_hash=content_hash,
+                artifact_key=artifact_key,
+                target_table=table_name,
+                parser_version=version,
+                row_count=len(payload[model]),
+            )
+        )
+        table_rows[table_name] = len(payload[model])
+
+    return table_rows
+
+
+def process_file(
+    eng: sa.Engine,
+    spec: RuntimeFileSpec,
+    content_hash: bytes,
+    file_path: Path,
+    report_progress: Callable[[str], None],
+    target_models: Sequence[Type[Base]] | None = None,
+    force: bool = False,
+) -> JobRunResult:
+    pipeline_id = spec.parser_id or spec.file_type.value
+    try:
+        payload = spec.parser_func(file_path)
+    except Exception:
+        logger.error("[%s] Parser failed for %s", pipeline_id, file_path, exc_info=True)
+        raise
+
+    _validate_parser_output(spec, payload)
+    models_to_process = tuple(target_models or spec.expected_models)
+    unknown_targets = [
+        model.__name__
+        for model in models_to_process
+        if model not in spec.expected_models
+    ]
+    if unknown_targets:
+        raise RuntimeError(
+            f"{pipeline_id} was asked to write unknown outputs: "
+            f"{', '.join(sorted(unknown_targets))}"
+        )
+
+    report_progress(f"Uploading {len(models_to_process)} tables...")
     for attempt in range(1, MAX_UPLOAD_DEADLOCK_RETRIES + 1):
         try:
             with eng.begin() as conn:
-                _lock_hash_row(conn, hash_id)
-
-                current_version = _get_manifest_version(conn, hash_id, table_name)
-                if current_version is not None and current_version >= version:
-                    logger.info(
-                        "Skipping %s for hash %s; artifact already materialized at version %s.",
-                        table_name,
-                        hash_id,
-                        current_version,
-                    )
-                    return 0
-
-                df_copy = df.copy()
-                df_copy["hash_id"] = hash_id
-
-                if hasattr(model, "hash_id"):
-                    conn.execute(
-                        model.__table__.delete().where(model.hash_id == hash_id)
-                    )
-
-                sql_io.bulk_upload(df_copy, conn, model.__table__)
-
-                conn.execute(
-                    ArtifactManifest.__table__.delete().where(
-                        (ArtifactManifest.hash_id == hash_id)
-                        & (ArtifactManifest.target_table == table_name)
-                    )
+                table_rows = _replace_artifacts(
+                    conn,
+                    spec=spec,
+                    content_hash=content_hash,
+                    payload=payload,
+                    target_models=models_to_process,
+                    force=force,
                 )
-                conn.execute(
-                    ArtifactManifest.__table__.insert().values(
-                        hash_id=hash_id,
-                        target_table=table_name,
-                        handler_version=version,
-                    )
-                )
-            return len(df)
+            total_rows = sum(table_rows.values())
+            logger.info("[%s] Complete. Total rows: %s", pipeline_id, total_rows)
+            return JobRunResult(
+                rows_uploaded=total_rows,
+                table_rows=table_rows,
+                completion_message=f"{pipeline_id} processed successfully",
+            )
         except Exception as exc:
             if attempt < MAX_UPLOAD_DEADLOCK_RETRIES and _is_mssql_deadlock(exc):
                 delay = UPLOAD_DEADLOCK_RETRY_DELAY_SECONDS * attempt
                 logger.warning(
                     "Deadlock uploading %s for hash %s; retrying in %.1fs (%s/%s).",
-                    table_name,
-                    hash_id,
+                    pipeline_id,
+                    content_hash.hex(),
                     delay,
                     attempt,
                     MAX_UPLOAD_DEADLOCK_RETRIES - 1,
@@ -136,62 +234,4 @@ def _upload_single_table(eng: sa.Engine, model, df, hash_id: int, version: int):
                 continue
             raise
 
-
-def process_file(
-    eng: sa.Engine,
-    spec: HandlerSpec,
-    hash_id: int,
-    file_path: Path,
-    report_progress: Callable[[str], None],
-    target_models: Optional[List[Type[Base]]] = None,
-    db_workers: int = 4,
-) -> JobRunResult:
-    pipeline_id = spec.pipeline_id.value
-    try:
-        model_to_df_map = spec.parser_func(file_path)
-    except Exception:
-        logger.error(f"[{pipeline_id}] Parser failed for {file_path}", exc_info=True)
-        raise
-
-    payload = []
-    models_to_process = (
-        set(target_models) if target_models else set(spec.expected_models)
-    )
-
-    for model, df in model_to_df_map.items():
-        if model in models_to_process and not df.empty:
-            payload.append((model, df))
-
-    if not payload:
-        return JobRunResult(
-            rows_uploaded=0,
-            completion_message=f"{pipeline_id} had no rows to upload.",
-        )
-
-    total_rows = 0
-    errors = []
-    report_progress(f"Uploading {len(payload)} tables...")
-
-    with ThreadPoolExecutor(max_workers=db_workers) as executor:
-        future_map = {
-            executor.submit(
-                _upload_single_table, eng, m, d, hash_id, spec.version
-            ): m.__tablename__
-            for m, d in payload
-        }
-
-        done, _ = wait(future_map.keys(), return_when=ALL_COMPLETED)
-
-        for f in done:
-            t_name = future_map[f]
-            try:
-                total_rows += f.result()
-            except Exception as e:
-                logger.error(f"Failed to upload table {t_name}: {e}")
-                errors.append(f"{t_name}: {e}")
-
-    if errors:
-        raise RuntimeError(f"Partial upload failure: {errors}")
-
-    logger.info(f"[{pipeline_id}] Complete. Total rows: {total_rows}")
-    return JobRunResult(rows_uploaded=total_rows)
+    raise RuntimeError(f"{pipeline_id} upload retry loop exited unexpectedly")

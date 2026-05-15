@@ -1,9 +1,8 @@
-from pathlib import Path
 from io import BytesIO
 from zipfile import ZipFile
 
-from e2ude_core.services.file_catalog import FileType, catalog_staged_folder
-from e2ude_core.services.zip_io import UnzipContext
+from e2ude_core.runtime_files import FileType, detect_file_type
+from e2ude_core.services.zip_io import iter_archive_members
 
 
 def _build_sample_zip(zip_path):
@@ -19,20 +18,23 @@ def _build_sample_zip(zip_path):
         )
 
 
-def test_catalog_staged_folder_classifies_unzipped_fixture_structure(tmp_path):
+def test_archive_member_catalog_classifies_fixture_structure(tmp_path):
     zip_path = tmp_path / "sample_TransportRSM.fpkg.e2d.zip"
     _build_sample_zip(zip_path)
 
-    with UnzipContext(zip_path) as ctx:
-        files = {
-            Path(entry.relative_path).as_posix(): entry
-            for entry in catalog_staged_folder(ctx.temp_dir)
-        }
+    files = {entry.relative_path: entry for entry in iter_archive_members(zip_path)}
 
-    assert files["123456_20240101_000000_000_MCData"].file_type == FileType.MCDATA
     assert (
-        files["123456_20240101_000000_000_RSM_RawArchive/RSM/TMPTR_LOG"].file_type
+        detect_file_type("123456_20240101_000000_000_MCData")
+        == FileType.MCDATA
+    )
+    assert (
+        detect_file_type(
+            "123456_20240101_000000_000_RSM_RawArchive/RSM/TMPTR_LOG"
+        )
         == FileType.TMPTR_LOG
     )
-    assert files["123456_20240101_000000_000_MCData"].md5
-    assert files["123456_20240101_000000_000_RSM_RawArchive/RSM/TMPTR_LOG"].md5
+    assert files["123456_20240101_000000_000_MCData"].file_size_bytes
+    assert files[
+        "123456_20240101_000000_000_RSM_RawArchive/RSM/TMPTR_LOG"
+    ].file_size_bytes

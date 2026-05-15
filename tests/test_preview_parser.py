@@ -25,12 +25,21 @@ def test_preview_parser_auto_detects_registered_handler(run_repo_command, tmp_pa
     )
 
     result = run_repo_command(
-        [sys.executable, "scripts/preview_parser.py", str(mcdata_file), "--head", "1"]
+        [
+            sys.executable,
+            "-m",
+            "e2ude_core.cli",
+            "parser",
+            "preview",
+            str(mcdata_file),
+            "--head",
+            "1",
+        ]
     )
     payload = json.loads(result.stdout)
 
     assert payload["selected_file_type"] == "MCDATA"
-    assert payload["pipeline_id"] == "mcdata"
+    assert payload["parser_id"] == "mcdata"
     assert any(
         table["table"] == "rsmdata_mc_pfc_db" and table["rows"] == 1
         for table in payload["tables"]
@@ -52,10 +61,13 @@ def test_preview_parser_supports_explicit_file_type_override(run_repo_command, t
     result = run_repo_command(
         [
             sys.executable,
-            "scripts/preview_parser.py",
+            "-m",
+            "e2ude_core.cli",
+            "parser",
+            "preview",
             str(segments_file),
-            "--file-type",
-            "SEGMENTS",
+            "--as",
+            "segments",
             "--head",
             "1",
         ]
@@ -105,7 +117,7 @@ def test_run_fixture_zip_e2e_reports_materialized_tables_on_sqlite(
         )
 
     result = run_repo_command(
-        [sys.executable, "scripts/run_fixture_zip_e2e.py", str(zip_path), "--db-workers", "1"],
+        [sys.executable, "scripts/run_fixture_zip_e2e.py", str(zip_path)],
         {"E2UDE_CONFIG_PATH": config_path},
     )
     payload = json.loads(result.stdout[result.stdout.find("{") :])

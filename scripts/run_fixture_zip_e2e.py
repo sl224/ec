@@ -6,7 +6,6 @@ import sqlalchemy as sa
 from sqlalchemy import inspect
 
 from e2ude_core.config import settings
-from e2ude_core.context import EtlContext
 from e2ude_core.db.access import get_engine
 from e2ude_core.db.base_session import DEFAULT_SCHEMA
 from e2ude_core.db.models import (
@@ -16,8 +15,12 @@ from e2ude_core.db.models import (
 )
 from e2ude_core.db.setup import initialize_database, register_archives_bulk
 from e2ude_core.logging_conf import setup_logging
-from e2ude_core.orchestration.workflow import process_staged_archive
-from e2ude_core.services.zip_io import UnzipContext
+from e2ude_core.context import EtlContext
+from e2ude_core.orchestration.runs import (
+    create_processing_session,
+    finalize_processing_session,
+)
+from e2ude_core.orchestration.workflow import process_archive
 
 
 def _qualified_table_name(schema_name: str | None, table_name: str) -> str:
@@ -47,7 +50,8 @@ def _collect_run_status(eng: sa.Engine, archive_id: int) -> dict[str, object]:
                 ProcessingSession.start_time,
                 ProcessingSession.end_time,
             )
-            .where(ProcessingSession.archive_id == archive_id)
+            .join(ProcessingJob, ProcessingJob.session_id == ProcessingSession.id)
+            .where(ProcessingJob.archive_id == archive_id)
             .order_by(ProcessingSession.id.desc())
             .limit(1)
         ).first()
@@ -86,12 +90,6 @@ def main():
         )
     )
     parser.add_argument("zip_path", type=Path, help="Path to a TransportRSM fixture zip")
-    parser.add_argument(
-        "--db-workers",
-        type=int,
-        default=4,
-        help="Parallel DB writer count for the file-processing stage",
-    )
     args = parser.parse_args()
 
     zip_path = args.zip_path.expanduser().resolve()
@@ -111,14 +109,21 @@ def main():
             )
         archive_id = archive_map[zip_path]
 
-        with UnzipContext(zip_path) as ctx:
-            process_staged_archive(
+        session_id = create_processing_session(eng, EtlContext.capture())
+        failed = False
+        try:
+            process_archive(
                 eng=eng,
+                session_id=session_id,
                 archive_id=archive_id,
-                staged_path=Path(ctx.temp_dir),
-                context=EtlContext.capture(),
-                db_workers=args.db_workers,
+                zip_path=zip_path,
+                staging_root=settings.paths.staging_root,
             )
+        except Exception:
+            failed = True
+            raise
+        finally:
+            finalize_processing_session(eng, session_id, failed=failed)
 
         table_counts = _collect_counts(eng, DEFAULT_SCHEMA)
         materialized_tables = {

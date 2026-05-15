@@ -7,22 +7,31 @@
 Production refresh runs read from `\\Rsiny1-ilsfs\RSM` and require an explicit target schema choice on every run.
 
 ```powershell
-.\scripts\refresh-data.ps1 -Target dev -Preview
-.\scripts\refresh-data.ps1 -Target dev
-.\scripts\refresh-data.ps1 -Target prod
+uv run e2ude refresh --env dev --preview
+uv run e2ude refresh --env dev
+uv run e2ude refresh --env prod --confirm e2ude_core
+uv run e2ude refresh --schema e2ude_candidate_mytest --preview
 ```
 
-See [docs/data-refresh.md](docs/data-refresh.md) for the refresh setup and run path.
+See [docs/data-refresh.md](docs/data-refresh.md) for refresh setup and runtime behavior.
+See [docs/cli-workflows.md](docs/cli-workflows.md) for operator commands.
+Use `e2ude schema seed` before a candidate refresh when a fresh schema can reuse
+existing content-addressed catalog and parser rows.
 
 ## Development
 
-- [docs/plugin-development.md](docs/plugin-development.md)
-- [docs/architecture.md](docs/architecture.md)
+- [Parser development](docs/plugin-development.md)
+- [Architecture](docs/architecture.md)
+- [CLI workflows](docs/cli-workflows.md)
 
 Useful local commands:
 
 ```powershell
-uv run python scripts/preview_parser.py C:\temp\sample_MCData
+uv run e2ude parser list
+uv run e2ude parser preview C:\temp\sample_MCData
+uv run e2ude parser preview C:\temp\mystery_input.txt --as segments
+uv run e2ude parser status --env dev
+uv run e2ude parser backfill segments --schema e2ude_candidate_mytest --plan
 uv run python scripts/run_fixture_zip_e2e.py C:\local\e2ude_fixtures\169871\2023\11\169871_20231107_024218_987_TransportRSM.fpkg.e2d.zip
 uv run python scripts/measure_discovery.py --scan-root C:\path\to\fixture_or_share
 ```
@@ -52,28 +61,27 @@ Local configuration:
 
 The committed defaults file sets the shared scan root to `\\Rsiny1-ilsfs\RSM`.
 
-`e2ude_config.example.toml` is for local development and validation, not the routine production refresh.
-`e2ude_config.refresh.example.toml` shows the shape expected on any machine used for routine refreshes; `scripts/refresh-data.ps1` overrides only the schema so operators choose `dev` or `prod` each time.
-If you do not set `staging_root`, runs stage under the local OS temp area in an `e2ude_core_staging` folder. Override it only when you want a specific disk. On any machine with share access, SQL access, and enough local temp space, the normal flow after pulling is:
+`e2ude_config.example.toml` is for local development and validation.
+`e2ude_config.refresh.example.toml` is the template for refresh machines. `e2ude refresh --env dev` writes to `e2ude_core_dev`, `e2ude refresh --env prod --confirm e2ude_core` writes to production, and `--schema` writes to a named candidate or experiment schema.
+If `staging_root` is unset, runs extract selected parser inputs under the OS temp directory in an `e2ude_core_staging` folder. Override it only when staging should use a specific disk. On a machine with share access, SQL access, and enough local temp space, the normal dev refresh is:
 
 ```powershell
-.\scripts\refresh-data.ps1 -Target dev
+uv run e2ude refresh --env dev
 ```
 
-Runtime tuning now lives under `[runtime]` and `[diagnostics]` in config. Discovery now defaults to `discovery_mode = "incremental"`, which relists known archive directories every run and uses directory membership checks for non-archive frontier directories. `discovery_mode = "reconcile"` still forces a full source walk. If you need an env override, use the nested Pydantic names such as `E2UDE_RUNTIME__PROCESS_WORKERS`, `E2UDE_RUNTIME__DISCOVERY_MODE`, or `E2UDE_PATHS__STAGING_ROOT`.
+Runtime tuning lives under `[runtime]` and `[diagnostics]`. Discovery walks the configured scan root every refresh and does not read zip contents. Environment overrides use nested Pydantic names such as `E2UDE_RUNTIME__PROCESS_WORKERS`, `E2UDE_RUNTIME__DISCOVERY_WORKERS`, and `E2UDE_PATHS__STAGING_ROOT`.
 
 ## Code Layout
 
 | Path | Purpose |
 | --- | --- |
+| `src/e2ude_core/cli.py` | Operator and parser-development CLI |
 | `src/e2ude_core/main.py` | Process entry point |
 | `src/e2ude_core/orchestration/state.py` | Archive inventory/work state and planning |
 | `src/e2ude_core/orchestration/workflow.py` | Per-archive execution and returned archive result |
-| `src/e2ude_core/runtime_files.py` | File type and handler specs |
-| `src/e2ude_core/services/file_catalog.py` | File typing and hashing |
-| `scripts/refresh-data.ps1` | Refresh entry point for dev/prod target selection |
-| `scripts/preview_parser.py` | Single-file parser preview |
+| `src/e2ude_core/runtime_files.py` | File type and parser specs |
+| `src/e2ude_core/orchestration/catalog.py` | Archive member catalog and content hashing |
 | `scripts/run_fixture_zip_e2e.py` | Single-zip end-to-end validation |
-| `scripts/measure_discovery.py` | Discovery baseline and incremental-vs-reconcile measurement |
+| `scripts/measure_discovery.py` | Discovery baseline measurement |
 
-When adding or changing a handled file type, update `src/e2ude_core/runtime_files.py`.
+When adding or changing a parsed file type, update `src/e2ude_core/runtime_files.py`.

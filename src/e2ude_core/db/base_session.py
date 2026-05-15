@@ -1,4 +1,4 @@
-from sqlalchemy.orm import declarative_base, sessionmaker
+from sqlalchemy.orm import declarative_base
 from e2ude_core.config import settings
 from sqlalchemy.dialects.mssql import DATETIME2
 from sqlalchemy.sql.sqltypes import DateTime, TypeDecorator
@@ -40,7 +40,3 @@ def schema_fkey(key: str) -> str:
     if DEFAULT_SCHEMA:
         return f"{DEFAULT_SCHEMA}.{key}"
     return key
-
-
-# A factory for creating new Session objects.
-SessionLocal = sessionmaker(autocommit=False, autoflush=False)

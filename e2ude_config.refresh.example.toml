@@ -1,8 +1,6 @@
 # Copy this file to `e2ude_config.toml` on any machine you use for routine refreshes.
-# `scripts/refresh-data.ps1` will override only `database.schema_name`
-# so operators explicitly choose `dev` or `prod` on each run.
-
-worker_threads = 64
+# The `e2ude refresh` CLI selects the destination schema per run.
+# Keep server, database, scan root, and runtime settings here.
 
 [database]
 type = "mssql"
@@ -16,17 +14,13 @@ schema_name = "e2ude_core_dev"
 # The shared scan root is already provided by repo defaults. Keep it only if
 # you want the refresh machine config to make the source explicit.
 scan_root = "\\\\Rsiny1-ilsfs\\RSM"
-# Optional. If omitted, refresh runs stage under the OS temp area in an
-# `e2ude_core_staging` subdirectory. Set this only if you need a specific disk.
+# Optional. If omitted, refresh extracts selected parser inputs under the OS
+# temp area in an `e2ude_core_staging` subdirectory.
 # staging_root = "D:/E2UDE_STAGING"
 
 [runtime]
-discovery_mode = "incremental"
 discovery_workers = 1024
-pipeline_buffer_size = 60
-unzip_workers = 60
 process_workers = 8
-db_write_workers = 4
 
 [diagnostics]
 enable_viztracer = false

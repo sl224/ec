@@ -1,355 +1,416 @@
 from __future__ import annotations
 
-import logging
 from collections import defaultdict
 from dataclasses import dataclass
 from pathlib import Path
-from typing import Callable, Dict, Iterable, Tuple, Type
+from typing import Iterable, Type
 
 import sqlalchemy as sa
 
 from e2ude_core.db.base_session import Base
 from e2ude_core.db.models import (
     ArchiveMetadata,
-    ArchiveStateEnum,
     ArtifactManifest,
     FileMetadata,
 )
-from e2ude_core.registry import CURRENT_HANDLER_GENERATION, HANDLER_REGISTRY
-from e2ude_core.runtime_files import FileType, PipelineId, coerce_file_type
-
-logger = logging.getLogger(__name__)
+from e2ude_core.runtime_files import (
+    CURRENT_ARCHIVE_CATALOG_VERSION,
+    HANDLED_FILE_SPECS,
+    FileType,
+    RuntimeFileSpec,
+    artifact_key_for,
+    handled_specs_for_path,
+    parser_id_for,
+)
 
 SQL_BATCH_SIZE = 2000
 
 
 @dataclass(frozen=True)
-class ArchiveSummary:
-    status: ArchiveStateEnum
-    work_reason: str | None = None
+class PendingArtifact:
+    archive_id: int
+    locator_path: Path
+    file_id: int
+    relative_path: str
+    content_hash: bytes | None
+    file_type: FileType
+    parser_id: str
+    artifact_key: str
+    target_table: str
+    parser_version: int
+    target_model: Type[Base]
 
 
 @dataclass(frozen=True)
-class FileWorkPlan:
+class ParserWorkItem:
+    archive_id: int
+    locator_path: Path
     file_id: int
-    hash_id: int
+    content_hash: bytes | None
     file_type: FileType
     relative_path: str
-    target_models: Tuple[Type[Base], ...]
-    pipeline_id: PipelineId
-    handler_version: int
+    parser_id: str
+    parser_version: int
+    spec: RuntimeFileSpec
+    target_models: tuple[Type[Base], ...]
 
 
 @dataclass(frozen=True)
 class ArchiveRunPlan:
-    summary: ArchiveSummary
-    work_items: Tuple[FileWorkPlan, ...] = ()
+    needs_catalog: bool
+    work_items: tuple[ParserWorkItem, ...] = ()
 
 
-def _fetch_archive_rows(
-    conn: sa.Connection, archive_ids: Iterable[int]
-) -> Dict[int, sa.Row]:
-    archive_id_list = list(archive_ids)
-    if not archive_id_list:
-        return {}
-
-    rows: Dict[int, sa.Row] = {}
-    for i in range(0, len(archive_id_list), SQL_BATCH_SIZE):
-        batch = archive_id_list[i : i + SQL_BATCH_SIZE]
-        query = sa.select(
-            ArchiveMetadata.id,
-            ArchiveMetadata.state,
-            ArchiveMetadata.work_reason,
-            ArchiveMetadata.required_scan_version,
-            ArchiveMetadata.completed_scan_version,
-            ArchiveMetadata.required_handler_generation,
-            ArchiveMetadata.completed_handler_generation,
-            ArchiveMetadata.is_present,
-        ).where(ArchiveMetadata.id.in_(batch))
-        for row in conn.execute(query):
-            rows[row.id] = row
-
-    return rows
+def _parser_id(spec: RuntimeFileSpec) -> str:
+    return parser_id_for(spec)
 
 
-def _fetch_archive_files(
-    conn: sa.Connection, archive_ids: Iterable[int]
-) -> Dict[int, list]:
-    archive_id_list = list(archive_ids)
-    if not archive_id_list:
-        return {}
-
-    archive_files = defaultdict(list)
-    for i in range(0, len(archive_id_list), SQL_BATCH_SIZE):
-        batch = archive_id_list[i : i + SQL_BATCH_SIZE]
-        query = sa.select(
-            FileMetadata.archive_id,
-            FileMetadata.id,
-            FileMetadata.hash_id,
-            FileMetadata.file_type,
-            FileMetadata.relative_path,
-        ).where(FileMetadata.archive_id.in_(batch))
-        for row in conn.execute(query):
-            archive_files[row.archive_id].append(row)
-
-    return archive_files
+def _handled_specs_by_parser_id() -> dict[str, RuntimeFileSpec]:
+    return {_parser_id(spec): spec for spec in HANDLED_FILE_SPECS}
 
 
-def _fetch_artifact_versions(
-    conn: sa.Connection, hash_ids: Iterable[int]
-) -> Dict[int, Dict[str, int]]:
-    hash_id_list = sorted(set(hash_ids))
-    if not hash_id_list:
-        return {}
-
-    artifacts: Dict[int, Dict[str, int]] = defaultdict(dict)
-    for i in range(0, len(hash_id_list), SQL_BATCH_SIZE):
-        batch = hash_id_list[i : i + SQL_BATCH_SIZE]
-        query = sa.select(
-            ArtifactManifest.hash_id,
-            ArtifactManifest.target_table,
-            ArtifactManifest.handler_version,
-        ).where(ArtifactManifest.hash_id.in_(batch))
-        for row in conn.execute(query):
-            current = artifacts[row.hash_id].get(row.target_table, 0)
-            artifacts[row.hash_id][row.target_table] = max(current, row.handler_version)
-
-    return artifacts
-
-
-def _summarize_archive_row(row: sa.Row | None) -> ArchiveSummary:
-    if row is None:
-        return ArchiveSummary(
-            status=ArchiveStateEnum.NEEDS_SCAN,
-            work_reason="Archive missing from inventory",
-        )
-
-    if not row.is_present:
-        return ArchiveSummary(
-            status=ArchiveStateEnum.UP_TO_DATE,
-            work_reason="Archive not present on source share",
-        )
-
-    if row.completed_scan_version < row.required_scan_version:
-        return ArchiveSummary(
-            status=ArchiveStateEnum.NEEDS_SCAN,
-            work_reason=row.work_reason or "Archive scan required",
-        )
-
-    if row.completed_handler_generation != row.required_handler_generation:
-        return ArchiveSummary(
-            status=ArchiveStateEnum.NEEDS_PROCESSING,
-            work_reason=row.work_reason or "Archive processing required",
-        )
-
-    if row.state == ArchiveStateEnum.UP_TO_DATE:
-        return ArchiveSummary(status=ArchiveStateEnum.UP_TO_DATE)
-
-    return ArchiveSummary(
-        status=ArchiveStateEnum.NEEDS_PROCESSING,
-        work_reason=row.work_reason or "Archive processing required",
+def archive_catalog_current(row) -> bool:
+    return (
+        bool(row.is_present)
+        and row.cataloged_at is not None
+        and row.catalog_version >= CURRENT_ARCHIVE_CATALOG_VERSION
     )
 
 
-def summarize_archives_bulk(
-    eng: sa.Engine,
-    archive_ids: list[int],
-) -> Dict[int, ArchiveSummary]:
-    if not archive_ids:
+def archive_needs_catalog(row) -> bool:
+    return bool(row.is_present) and not archive_catalog_current(row)
+
+
+def archive_id_needs_catalog(eng: sa.Engine, archive_id: int) -> bool:
+    with eng.connect() as conn:
+        row = conn.execute(
+            sa.select(
+                ArchiveMetadata.is_present,
+                ArchiveMetadata.cataloged_at,
+                ArchiveMetadata.catalog_version,
+            ).where(ArchiveMetadata.id == archive_id)
+        ).first()
+    return True if row is None else archive_needs_catalog(row)
+
+
+def load_archives_requiring_catalog(eng: sa.Engine) -> dict[Path, int]:
+    with eng.connect() as conn:
+        rows = conn.execute(
+            sa.select(ArchiveMetadata.id, ArchiveMetadata.locator_path).where(
+                ArchiveMetadata.is_present == sa.true(),
+                sa.or_(
+                    ArchiveMetadata.cataloged_at.is_(None),
+                    ArchiveMetadata.catalog_version < CURRENT_ARCHIVE_CATALOG_VERSION,
+                ),
+            )
+        ).fetchall()
+
+    return {Path(row.locator_path): row.id for row in rows}
+
+
+def _fetch_manifest_states(
+    conn: sa.Connection, content_hashes: Iterable[bytes]
+) -> dict[bytes, dict[str, tuple[int, str]]]:
+    content_hash_list = sorted(set(content_hashes))
+    if not content_hash_list:
         return {}
 
+    states: dict[bytes, dict[str, tuple[int, str]]] = defaultdict(dict)
+    for i in range(0, len(content_hash_list), SQL_BATCH_SIZE):
+        batch = content_hash_list[i : i + SQL_BATCH_SIZE]
+        rows = conn.execute(
+            sa.select(
+                ArtifactManifest.content_hash,
+                ArtifactManifest.artifact_key,
+                ArtifactManifest.target_table,
+                ArtifactManifest.parser_version,
+            ).where(ArtifactManifest.content_hash.in_(batch))
+        )
+        for row in rows:
+            current = states[row.content_hash].get(row.artifact_key)
+            if current is None or row.parser_version > current[0]:
+                states[row.content_hash][row.artifact_key] = (
+                    row.parser_version,
+                    row.target_table,
+                )
+    return states
+
+
+def _select_catalog_rows(
+    conn: sa.Connection,
+    *,
+    archive_ids: list[int] | None,
+    content_hashes: list[bytes] | None,
+):
+    stmt = (
+        sa.select(
+            ArchiveMetadata.id.label("archive_id"),
+            ArchiveMetadata.locator_path,
+            FileMetadata.id.label("file_id"),
+            FileMetadata.relative_path,
+            FileMetadata.content_hash,
+        )
+        .select_from(FileMetadata)
+        .join(ArchiveMetadata, ArchiveMetadata.id == FileMetadata.archive_id)
+        .where(
+            ArchiveMetadata.is_present == sa.true(),
+            ArchiveMetadata.cataloged_at.is_not(None),
+            ArchiveMetadata.catalog_version >= CURRENT_ARCHIVE_CATALOG_VERSION,
+        )
+    )
+    if archive_ids:
+        stmt = stmt.where(FileMetadata.archive_id.in_(archive_ids))
+    if content_hashes:
+        stmt = stmt.where(FileMetadata.content_hash.in_(content_hashes))
+    return conn.execute(stmt).fetchall()
+
+
+def load_pending_artifacts(
+    eng: sa.Engine,
+    *,
+    parser_id: str | None = None,
+    archive_ids: list[int] | None = None,
+    content_hashes: list[bytes] | None = None,
+    limit: int | None = None,
+    force: bool = False,
+) -> list[PendingArtifact]:
+    specs_by_parser = _handled_specs_by_parser_id()
+    if parser_id is not None:
+        if parser_id not in specs_by_parser:
+            raise ValueError(f"Unknown parser {parser_id!r}")
+        allowed_specs = (specs_by_parser[parser_id],)
+    else:
+        allowed_specs = tuple(specs_by_parser.values())
+    allowed_by_id = {_parser_id(spec): spec for spec in allowed_specs}
+
     with eng.connect() as conn:
-        archive_rows = _fetch_archive_rows(conn, archive_ids)
+        rows = _select_catalog_rows(
+            conn,
+            archive_ids=archive_ids,
+            content_hashes=content_hashes,
+        )
+        manifest_states = _fetch_manifest_states(
+            conn, (row.content_hash for row in rows if row.content_hash is not None)
+        )
 
-    return {
-        archive_id: _summarize_archive_row(archive_rows.get(archive_id))
-        for archive_id in archive_ids
-    }
-
-
-def summarize_archive(eng: sa.Engine, archive_id: int) -> ArchiveSummary:
-    return summarize_archives_bulk(eng, [archive_id]).get(
-        archive_id,
-        ArchiveSummary(
-            status=ArchiveStateEnum.NEEDS_SCAN,
-            work_reason="Archive missing from inventory",
+    pending: list[PendingArtifact] = []
+    for row in sorted(
+        rows,
+        key=lambda item: (
+            item.content_hash or b"",
+            str(item.locator_path),
+            item.file_id,
         ),
+    ):
+        for spec in handled_specs_for_path(row.relative_path):
+            spec_parser_id = _parser_id(spec)
+            if spec_parser_id not in allowed_by_id:
+                continue
+
+            current_states = manifest_states.get(row.content_hash, {})
+            for model in spec.expected_models:
+                artifact_key = artifact_key_for(spec, model)
+                target_table = model.__tablename__
+                current_state = current_states.get(artifact_key)
+                if (
+                    row.content_hash is not None
+                    and not force
+                    and current_state is not None
+                    and current_state[0] >= (spec.version or 0)
+                    and current_state[1] == target_table
+                ):
+                    continue
+                pending.append(
+                    PendingArtifact(
+                        archive_id=row.archive_id,
+                        locator_path=Path(row.locator_path),
+                        file_id=row.file_id,
+                        relative_path=row.relative_path,
+                        content_hash=row.content_hash,
+                        file_type=spec.file_type,
+                        parser_id=spec_parser_id,
+                        artifact_key=artifact_key,
+                        target_table=target_table,
+                        parser_version=spec.version or 0,
+                        target_model=model,
+                    )
+                )
+
+    pending.sort(
+        key=lambda item: (
+            str(item.locator_path),
+            item.relative_path,
+            item.content_hash or b"",
+            item.parser_id,
+            item.artifact_key,
+            item.target_table,
+        )
+    )
+    if limit is not None:
+        allowed_groups: set[tuple[bytes | None, int, str]] = set()
+        limited: list[PendingArtifact] = []
+        for item in pending:
+            key = (item.content_hash, item.file_id, item.parser_id)
+            if key not in allowed_groups:
+                if len(allowed_groups) >= limit:
+                    continue
+                allowed_groups.add(key)
+            limited.append(item)
+        pending = limited
+    return pending
+
+
+def group_pending_artifacts(
+    artifacts: Iterable[PendingArtifact],
+) -> tuple[ParserWorkItem, ...]:
+    specs_by_parser = _handled_specs_by_parser_id()
+    grouped: dict[tuple[bytes | None, int, str], list[PendingArtifact]] = defaultdict(
+        list
+    )
+    for artifact in artifacts:
+        grouped[(artifact.content_hash, artifact.file_id, artifact.parser_id)].append(
+            artifact
+        )
+
+    items: list[ParserWorkItem] = []
+    for (_content_hash, _file_id, parser_id), group in grouped.items():
+        group = sorted(group, key=lambda item: item.target_table)
+        first = group[0]
+        items.append(
+            ParserWorkItem(
+                archive_id=first.archive_id,
+                locator_path=first.locator_path,
+                file_id=first.file_id,
+                content_hash=first.content_hash,
+                file_type=first.file_type,
+                relative_path=first.relative_path,
+                parser_id=parser_id,
+                parser_version=first.parser_version,
+                spec=specs_by_parser[parser_id],
+                target_models=tuple(item.target_model for item in group),
+            )
+        )
+
+    return tuple(
+        sorted(
+            items,
+            key=lambda item: (
+                str(item.locator_path),
+                item.relative_path,
+                item.content_hash or b"",
+                item.parser_id,
+            ),
+        )
+    )
+
+
+def count_parser_artifacts(
+    eng: sa.Engine, specs: Iterable[RuntimeFileSpec]
+) -> dict[str, dict[str, int]]:
+    counts: dict[str, dict[str, int]] = {}
+    for spec in specs:
+        parser_id = _parser_id(spec)
+        artifacts = load_pending_artifacts(eng, parser_id=parser_id)
+        with eng.connect() as conn:
+            file_rows = [
+                row
+                for row in _select_catalog_rows(
+                    conn,
+                    archive_ids=None,
+                    content_hashes=None,
+                )
+                if spec in handled_specs_for_path(row.relative_path)
+            ]
+            content_hashes = {
+                row.content_hash for row in file_rows if row.content_hash is not None
+            }
+            artifact_targets = {
+                artifact_key_for(spec, model): model.__tablename__
+                for model in spec.expected_models
+            }
+            rows_uploaded = 0
+            complete = 0
+            if content_hashes and artifact_targets:
+                manifest_rows = conn.execute(
+                    sa.select(
+                        ArtifactManifest.content_hash,
+                        ArtifactManifest.artifact_key,
+                        ArtifactManifest.target_table,
+                        ArtifactManifest.row_count,
+                    ).where(
+                        ArtifactManifest.content_hash.in_(content_hashes),
+                        ArtifactManifest.artifact_key.in_(list(artifact_targets)),
+                        ArtifactManifest.parser_version >= (spec.version or 0),
+                    )
+                ).fetchall()
+                by_hash: dict[bytes, set[str]] = defaultdict(set)
+                for row in manifest_rows:
+                    if artifact_targets.get(row.artifact_key) != row.target_table:
+                        continue
+                    by_hash[row.content_hash].add(row.artifact_key)
+                    rows_uploaded += row.row_count or 0
+                complete = sum(
+                    1
+                    for artifact_set in by_hash.values()
+                    if len(artifact_set) == len(artifact_targets)
+                )
+
+        counts[parser_id] = {
+            "files": len(file_rows),
+            "hashed": sum(1 for row in file_rows if row.content_hash is not None),
+            "hashes": len(content_hashes),
+            "complete": complete,
+            "missing": len(
+                {
+                    (item.content_hash, item.file_id, item.parser_id)
+                    for item in artifacts
+                }
+            ),
+            "rows": rows_uploaded,
+        }
+    return counts
+
+
+def target_models_needing_work(
+    eng: sa.Engine,
+    *,
+    content_hash: bytes,
+    spec: RuntimeFileSpec,
+    target_models: tuple[Type[Base], ...],
+    force: bool = False,
+) -> tuple[Type[Base], ...]:
+    if force:
+        return target_models
+
+    with eng.connect() as conn:
+        states = _fetch_manifest_states(conn, [content_hash]).get(content_hash, {})
+
+    return tuple(
+        model
+        for model in target_models
+        if (
+            (state := states.get(artifact_key_for(spec, model))) is None
+            or state[0] < (spec.version or 0)
+            or state[1] != model.__tablename__
+        )
     )
 
 
 def plan_archive_run(eng: sa.Engine, archive_id: int) -> ArchiveRunPlan:
-    summary = summarize_archive(eng, archive_id)
-    if summary.status == ArchiveStateEnum.NEEDS_SCAN:
-        return ArchiveRunPlan(summary=summary)
+    needs_catalog = archive_id_needs_catalog(eng, archive_id)
+    if needs_catalog:
+        return ArchiveRunPlan(needs_catalog=True)
 
-    with eng.connect() as conn:
-        file_rows = _fetch_archive_files(conn, [archive_id]).get(archive_id, [])
-        artifact_versions = _fetch_artifact_versions(
-            conn, (row.hash_id for row in file_rows)
-        )
-
-    if not file_rows:
-        return ArchiveRunPlan(
-            summary=ArchiveSummary(status=ArchiveStateEnum.UP_TO_DATE),
-            work_items=(),
-        )
-
-    representatives: dict[tuple[int, FileType], tuple[object, FileType]] = {}
-    for row in sorted(
-        file_rows,
-        key=lambda item: (
-            item.hash_id,
-            coerce_file_type(item.file_type).value,
-            item.id,
-        ),
-    ):
-        file_type = coerce_file_type(row.file_type)
-        representatives.setdefault((row.hash_id, file_type), (row, file_type))
-
-    work_items: list[FileWorkPlan] = []
-    for row, file_type in representatives.values():
-        handler_spec = HANDLER_REGISTRY.get(file_type)
-        if not handler_spec:
-            continue
-
-        current_versions = artifact_versions.get(row.hash_id, {})
-        missing_models = tuple(
-            model
-            for model in handler_spec.expected_models
-            if current_versions.get(model.__tablename__, 0) < handler_spec.version
-        )
-        if not missing_models:
-            continue
-
-        work_items.append(
-            FileWorkPlan(
-                file_id=row.id,
-                hash_id=row.hash_id,
-                file_type=file_type,
-                relative_path=row.relative_path,
-                target_models=missing_models,
-                pipeline_id=handler_spec.pipeline_id,
-                handler_version=handler_spec.version,
-            )
-        )
-
-    if not work_items:
-        return ArchiveRunPlan(
-            summary=ArchiveSummary(status=ArchiveStateEnum.UP_TO_DATE),
-            work_items=(),
-        )
-
-    ordered_items = tuple(
-        sorted(work_items, key=lambda item: (item.relative_path, item.file_type.value))
-    )
     return ArchiveRunPlan(
-        summary=ArchiveSummary(status=ArchiveStateEnum.NEEDS_PROCESSING),
-        work_items=ordered_items,
+        needs_catalog=False,
+        work_items=group_pending_artifacts(
+            load_pending_artifacts(eng, archive_ids=[archive_id])
+        ),
     )
 
 
-def select_archives_requiring_work(
-    eng: sa.Engine,
-    archive_map: Dict[Path, int],
-    *,
-    batch_size: int = 5000,
-    progress_callback: Callable[[int], None] | None = None,
-) -> Dict[Path, int]:
-    """Return the archive subset whose summaries are not UP_TO_DATE."""
-    total = len(archive_map)
-    logger.info("Checking state for %s archives...", total)
-
-    needed: Dict[Path, int] = {}
-    all_paths = list(archive_map.keys())
-
-    for i in range(0, total, batch_size):
-        chunk_paths = all_paths[i : i + batch_size]
-        chunk_ids = [archive_map[path] for path in chunk_paths]
-
-        try:
-            summaries = summarize_archives_bulk(eng, chunk_ids)
-            for path, archive_id in zip(chunk_paths, chunk_ids):
-                summary = summaries.get(
-                    archive_id,
-                    ArchiveSummary(status=ArchiveStateEnum.NEEDS_SCAN),
-                )
-                if summary.status != ArchiveStateEnum.UP_TO_DATE:
-                    needed[path] = archive_id
-        except Exception as exc:
-            logger.error("Failed batch state check: %s", exc)
-            for path, archive_id in zip(chunk_paths, chunk_ids):
-                needed[path] = archive_id
-        finally:
-            if progress_callback is not None:
-                progress_callback(len(chunk_paths))
-
-    logger.info("State check complete. %s archives require processing.", len(needed))
-    return needed
-
-
-def load_archives_requiring_work(eng: sa.Engine) -> Dict[Path, int]:
-    """Load all present archives whose canonical work state is not up to date."""
-    with eng.connect() as conn:
-        rows = conn.execute(
-            sa.select(ArchiveMetadata.id, ArchiveMetadata.source_path).where(
-                ArchiveMetadata.is_present == sa.true(),
-                ArchiveMetadata.state != ArchiveStateEnum.UP_TO_DATE,
-            )
-        ).fetchall()
-
-    return {Path(row.source_path): row.id for row in rows}
-
-
-def mark_archive_scan_complete(
-    eng: sa.Engine,
-    archive_id: int,
-    *,
-    work_reason: str | None = None,
-) -> None:
-    with eng.begin() as conn:
-        conn.execute(
-            sa.update(ArchiveMetadata)
-            .where(ArchiveMetadata.id == archive_id)
-            .values(
-                completed_scan_version=ArchiveMetadata.required_scan_version,
-                state=ArchiveStateEnum.NEEDS_PROCESSING,
-                work_reason=work_reason,
-                last_error_at=None,
-                last_error_message=None,
-            )
-        )
-
-
-def mark_archive_processing_complete(eng: sa.Engine, archive_id: int) -> None:
-    with eng.begin() as conn:
-        conn.execute(
-            sa.update(ArchiveMetadata)
-            .where(ArchiveMetadata.id == archive_id)
-            .values(
-                completed_handler_generation=CURRENT_HANDLER_GENERATION,
-                state=ArchiveStateEnum.UP_TO_DATE,
-                work_reason=None,
-                last_success_at=sa.func.now(),
-                last_error_at=None,
-                last_error_message=None,
-            )
-        )
-
-
-def mark_archive_error(
-    eng: sa.Engine,
-    archive_id: int,
-    *,
-    state: ArchiveStateEnum,
-    error_message: str,
-) -> None:
-    with eng.begin() as conn:
-        conn.execute(
-            sa.update(ArchiveMetadata)
-            .where(ArchiveMetadata.id == archive_id)
-            .values(
-                state=state,
-                last_error_at=sa.func.now(),
-                last_error_message=error_message,
-            )
-        )
+def load_archives_requiring_work(eng: sa.Engine) -> dict[Path, int]:
+    work = load_archives_requiring_catalog(eng)
+    for item in load_pending_artifacts(eng):
+        work.setdefault(item.locator_path, item.archive_id)
+    return work

@@ -61,12 +61,8 @@ class PathsConfig(BaseModel):
 
 
 class RuntimeConfig(BaseModel):
-    discovery_mode: Literal["incremental", "reconcile"] = "incremental"
     discovery_workers: int = Field(default=1024, gt=0)
-    pipeline_buffer_size: int = Field(default=60, gt=0)
-    unzip_workers: int = Field(default=60, gt=0)
     process_workers: int = Field(default=8, gt=0)
-    db_write_workers: int = Field(default=4, gt=0)
 
 
 class DiagnosticsConfig(BaseModel):
@@ -75,9 +71,6 @@ class DiagnosticsConfig(BaseModel):
 
 class AppSettings(BaseSettings):
     """Runtime settings."""
-
-    # Default thread count and fallback DB pool size.
-    worker_threads: int = Field(default=64, gt=0)
 
     logging: LoggingConfig = LoggingConfig()
     database: DatabaseConfig = Field(default=SQLiteConfig(), discriminator="type")

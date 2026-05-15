@@ -1,10 +1,9 @@
-"""Runtime file specs used by staging, detection, and handler dispatch."""
+"""Runtime file specs used for zip-member matching and parser dispatch."""
 
 from __future__ import annotations
 
 from dataclasses import dataclass
 from enum import StrEnum
-from hashlib import sha1
 from pathlib import Path
 from pathlib import PurePosixPath
 from typing import Callable, Iterable, Sequence, Type
@@ -70,20 +69,6 @@ class FileType(StrEnum):
     DIA_MAINT_STATUS = "DIA_MAINT_STATUS"
 
 
-@dataclass(frozen=True, order=True)
-class PipelineId:
-    value: str
-
-    def __post_init__(self):
-        normalized = self.value.strip()
-        if not normalized:
-            raise ValueError("pipeline_id must be a non-empty string")
-        object.__setattr__(self, "value", normalized)
-
-    def __str__(self) -> str:
-        return self.value
-
-
 ParserFunc = Callable[[Path], dict[Type[Base], pd.DataFrame]]
 
 
@@ -91,7 +76,7 @@ ParserFunc = Callable[[Path], dict[Type[Base], pd.DataFrame]]
 class RuntimeFileSpec:
     file_type: FileType
     match_patterns: tuple[str, ...]
-    pipeline_id: PipelineId | None = None
+    parser_id: str | None = None
     version: int | None = None
     parser_func: ParserFunc | None = None
     expected_models: tuple[Type[Base], ...] = ()
@@ -99,7 +84,7 @@ class RuntimeFileSpec:
     @property
     def is_handled(self) -> bool:
         return (
-            self.pipeline_id is not None
+            self.parser_id is not None
             and self.version is not None
             and self.parser_func is not None
             and bool(self.expected_models)
@@ -127,7 +112,7 @@ RUNTIME_FILE_SPECS: tuple[RuntimeFileSpec, ...] = (
     RuntimeFileSpec(
         FileType.MCDATA,
         ("*_MCData",),
-        PipelineId("mcdata"),
+        "mcdata",
         1,
         parse_mcdata,
         (
@@ -145,7 +130,7 @@ RUNTIME_FILE_SPECS: tuple[RuntimeFileSpec, ...] = (
     RuntimeFileSpec(
         FileType.SEGMENTS,
         ("*_Segments",),
-        PipelineId("segments"),
+        "segments",
         1,
         parse_segment,
         (SegmentsData,),
@@ -158,8 +143,8 @@ RUNTIME_FILE_SPECS: tuple[RuntimeFileSpec, ...] = (
     RuntimeFileSpec(
         FileType.ENGINE_ON_OFF,
         ("*_Engine",),
-        PipelineId("engine_on_off"),
-        1,
+        "engine_on_off",
+        2,
         parse_engine_on_off_dataframe,
         (EngineOnOff,),
     ),
@@ -183,8 +168,8 @@ RUNTIME_FILE_SPECS: tuple[RuntimeFileSpec, ...] = (
     RuntimeFileSpec(
         FileType.TMPTR_LOG,
         ("*_RSM_RawArchive/RSM/TMPTR_LOG",),
-        PipelineId("tmptr_log"),
-        1,
+        "tmptr_log",
+        2,
         parse_tmptr_dataframe,
         (TmptrData,),
     ),
@@ -260,9 +245,6 @@ STAGE_DEPENDENCIES: tuple[StageDependencySpec, ...] = (
 )
 
 
-RUNTIME_FILE_SPECS_BY_TYPE = {spec.file_type: spec for spec in RUNTIME_FILE_SPECS}
-
-
 def _pattern_sort_key(pattern: str) -> tuple[int, int, int, int, int, str]:
     posix_path = PurePosixPath(pattern)
     parts = posix_path.parts
@@ -297,49 +279,61 @@ def _build_catalog_patterns(
 CATALOG_FILE_PATTERNS: tuple[tuple[FileType, str], ...] = _build_catalog_patterns()
 
 
-def compute_metadata_catalog_generation(
-    specs: Iterable[RuntimeFileSpec] | None = None,
-    stage_dependencies: Iterable[StageDependencySpec] | None = None,
-) -> int:
-    specs_tuple = tuple(RUNTIME_FILE_SPECS if specs is None else specs)
-    stage_dependencies_tuple = tuple(
-        STAGE_DEPENDENCIES if stage_dependencies is None else stage_dependencies
-    )
-    catalog_patterns = _build_catalog_patterns(specs_tuple)
-    active_patterns = tuple(
-        sorted(
-            (
-                (spec.file_type, pattern)
-                for spec in specs_tuple
-                if spec.is_handled
-                for pattern in spec.match_patterns
-            ),
-            key=lambda item: (_pattern_sort_key(item[1]), item[0].value),
-        )
-    )
-
-    signature_parts = ["logic:2"]
-    signature_parts.extend(
-        f"catalog:{file_type.value}|{pattern}"
-        for file_type, pattern in catalog_patterns
-    )
-    signature_parts.extend(
-        f"active:{file_type.value}|{pattern}" for file_type, pattern in active_patterns
-    )
-    signature_parts.extend(
-        f"stage:{dependency.name}|{pattern}"
-        for dependency in stage_dependencies_tuple
-        for pattern in dependency.match_patterns
-    )
-    digest = sha1("\n".join(signature_parts).encode("utf-8")).hexdigest()
-    return int(digest[:7], 16) or 1
+CURRENT_ARCHIVE_CATALOG_VERSION = 1
+CURRENT_METADATA_CATALOG_GENERATION = CURRENT_ARCHIVE_CATALOG_VERSION
 
 
-CURRENT_METADATA_CATALOG_GENERATION = compute_metadata_catalog_generation()
+HANDLED_FILE_SPECS: tuple[RuntimeFileSpec, ...] = tuple(
+    spec for spec in RUNTIME_FILE_SPECS if spec.is_handled
+)
+HANDLED_FILE_SPECS_BY_TYPE: dict[FileType, RuntimeFileSpec] = {
+    spec.file_type: spec for spec in HANDLED_FILE_SPECS
+}
 
 
-def iter_handled_file_specs() -> Iterable[RuntimeFileSpec]:
-    return (spec for spec in RUNTIME_FILE_SPECS if spec.is_handled)
+def parser_id_for(spec: RuntimeFileSpec) -> str:
+    if spec.parser_id is None:
+        raise ValueError("handled parser spec must have a parser_id")
+    return spec.parser_id
+
+
+def artifact_key_for(spec: RuntimeFileSpec, model: Type[Base]) -> str:
+    parser_id = parser_id_for(spec)
+    if len(spec.expected_models) == 1:
+        return parser_id
+    return f"{parser_id}.{model.__name__}"
+
+
+def normalize_member_path(relative_path: Path | str) -> str:
+    return str(PurePosixPath(str(relative_path).replace("\\", "/")))
+
+
+def path_matches_pattern(relative_path: Path | str, pattern: str) -> bool:
+    return PurePosixPath(normalize_member_path(relative_path)).match(pattern)
+
+
+def spec_matches_path(spec: RuntimeFileSpec, relative_path: Path | str) -> bool:
+    return any(
+        path_matches_pattern(relative_path, pattern) for pattern in spec.match_patterns
+    )
+
+
+def spec_for_path(relative_path: Path | str) -> RuntimeFileSpec | None:
+    for spec in RUNTIME_FILE_SPECS:
+        if spec_matches_path(spec, relative_path):
+            return spec
+    return None
+
+
+def handled_specs_for_path(relative_path: Path | str) -> tuple[RuntimeFileSpec, ...]:
+    return tuple(
+        spec for spec in HANDLED_FILE_SPECS if spec_matches_path(spec, relative_path)
+    )
+
+
+def detect_file_type(relative_path: Path | str) -> FileType:
+    spec = spec_for_path(relative_path)
+    return FileType.UNKNOWN if spec is None else spec.file_type
 
 
 def build_active_stage_patterns(active_types: Sequence[FileType]) -> list[str]:

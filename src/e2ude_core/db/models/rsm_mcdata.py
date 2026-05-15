@@ -1,7 +1,6 @@
-from sqlalchemy import Column, Integer, Float, Boolean, String, ForeignKey
+from sqlalchemy import Boolean, Column, Float, Integer, String, VARBINARY
 
-# Import Base AND the new schema_fkey helper
-from e2ude_core.db.base_session import Base, schema_fkey, E2UDE_DATETIME
+from e2ude_core.db.base_session import Base, E2UDE_DATETIME
 
 
 # DATETIME2 variant for MSSQL compatibility.
@@ -10,10 +9,7 @@ from e2ude_core.db.base_session import Base, schema_fkey, E2UDE_DATETIME
 class Rpcs(Base):
     __tablename__ = "rsmdata_mc_rpcs"
 
-    # Use `schema_fkey` to create a schema-qualified foreign key reference.
-    hash_id = Column(
-        Integer, ForeignKey(schema_fkey("metadata_hash_registry.id")), primary_key=True
-    )
+    content_hash = Column(VARBINARY(16), primary_key=True)
     line_number = Column("LineNumber", Integer, primary_key=True)
     system_time_stamp = Column("System TimeStamp", E2UDE_DATETIME(0))
     humidity_b = Column("Humidity B", Float)
@@ -28,10 +24,7 @@ class Rpcs(Base):
 class RpcsPres(Base):
     __tablename__ = "rsmdata_mc_rpcs_pres"
 
-    # Use `schema_fkey` to create a schema-qualified foreign key reference.
-    hash_id = Column(
-        Integer, ForeignKey(schema_fkey("metadata_hash_registry.id")), primary_key=True
-    )
+    content_hash = Column(VARBINARY(16), primary_key=True)
     line_number = Column("LineNumber", Integer, primary_key=True)
     system_time_stamp = Column("System TimeStamp", E2UDE_DATETIME(0))
     dataset_time_stamp = Column("Dataset TimeStamp", E2UDE_DATETIME(0))
@@ -59,10 +52,7 @@ class RpcsPres(Base):
 class NavData(Base):
     __tablename__ = "rsmdata_mc_nav_data"
 
-    # Use `schema_fkey` to create a schema-qualified foreign key reference.
-    hash_id = Column(
-        Integer, ForeignKey(schema_fkey("metadata_hash_registry.id")), primary_key=True
-    )
+    content_hash = Column(VARBINARY(16), primary_key=True)
     line_number = Column("LineNumber", Integer, primary_key=True)
     system_time_stamp = Column("System TimeStamp", E2UDE_DATETIME(0))
     nav_mode = Column("Nav Mode", String(50))
@@ -102,10 +92,7 @@ class NavData(Base):
 class RadarState(Base):
     __tablename__ = "rsmdata_mc_radar_state"
 
-    # Use `schema_fkey` to create a schema-qualified foreign key reference.
-    hash_id = Column(
-        Integer, ForeignKey(schema_fkey("metadata_hash_registry.id")), primary_key=True
-    )
+    content_hash = Column(VARBINARY(16), primary_key=True)
     line_number = Column("LineNumber", Integer, primary_key=True)
     system_time_stamp = Column("System TimeStamp", E2UDE_DATETIME(0))
     rscp_off_switch_state = Column("RSCP_OFF_Switch_State", String)
@@ -124,10 +111,7 @@ class RadarState(Base):
 class RotoScan(Base):
     __tablename__ = "rsmdata_mc_rotoscan"
 
-    # Use `schema_fkey` to create a schema-qualified foreign key reference.
-    hash_id = Column(
-        Integer, ForeignKey(schema_fkey("metadata_hash_registry.id")), primary_key=True
-    )
+    content_hash = Column(VARBINARY(16), primary_key=True)
     line_number = Column("LineNumber", Integer, primary_key=True)
     system_time_stamp = Column("System TimeStamp", E2UDE_DATETIME(0))
     scan_mode = Column("ScanMode", String)
@@ -137,33 +121,10 @@ class RotoScan(Base):
     scan_time = Column("ScanTime", Float)
 
 
-class GfcDb(Base):
-    __tablename__ = "rsmdata_mc_gfc_db"
-
-    # Use `schema_fkey` to create a schema-qualified foreign key reference.
-    hash_id = Column(
-        Integer, ForeignKey(schema_fkey("metadata_hash_registry.id")), primary_key=True
-    )
-    line_number = Column("LineNumber", Integer, primary_key=True)
-    system_time_stamp = Column("System TimeStamp", E2UDE_DATETIME(0))
-    time_stamp = Column("Time Stamp", String)
-    group_fault_code = Column("Group Fault Code", Integer)
-    confirmation_status = Column("Confirmation Status", String)
-    group_evaluation_result = Column("Group Evaluation Result", String)
-    intermittent_result = Column("Intermittent Result", String)
-    transition_count = Column("Transition Count", Integer)
-    display_fault_code = Column("Display Fault Code", Integer)
-    primary_reference_designator = Column("Primary Reference Designator", String)
-    secondary_reference_designator = Column("Secondary Reference Designator", String)
-
-
 class PfcDb(Base):
     __tablename__ = "rsmdata_mc_pfc_db"
 
-    # Use `schema_fkey` to create a schema-qualified foreign key reference.
-    hash_id = Column(
-        Integer, ForeignKey(schema_fkey("metadata_hash_registry.id")), primary_key=True
-    )
+    content_hash = Column(VARBINARY(16), primary_key=True)
     line_number = Column("LineNumber", Integer, primary_key=True)
     system_time_stamp = Column("System TimeStamp", E2UDE_DATETIME(0))
     processed_fault_code = Column("Processed Fault Code", Integer)
@@ -175,10 +136,7 @@ class PfcDb(Base):
 class RfcDb(Base):
     __tablename__ = "rsmdata_mc_rfc_db"
 
-    # Use `schema_fkey` to create a schema-qualified foreign key reference.
-    hash_id = Column(
-        Integer, ForeignKey(schema_fkey("metadata_hash_registry.id")), primary_key=True
-    )
+    content_hash = Column(VARBINARY(16), primary_key=True)
     line_number = Column("LineNumber", Integer, primary_key=True)
     system_time_stamp = Column("System TimeStamp", E2UDE_DATETIME(0))
     fci_indicator = Column("FCI Indicator", String)
@@ -199,10 +157,7 @@ class RfcDb(Base):
 class LcsTemp(Base):
     __tablename__ = "rsmdata_mc_lcs_temp"
 
-    # Use `schema_fkey` to create a schema-qualified foreign key reference.
-    hash_id = Column(
-        Integer, ForeignKey(schema_fkey("metadata_hash_registry.id")), primary_key=True
-    )
+    content_hash = Column(VARBINARY(16), primary_key=True)
     line_number = Column("LineNumber", Integer, primary_key=True)
     system_time_stamp = Column("System TimeStamp", E2UDE_DATETIME(0))
     lcs_temp_f = Column("LCS Temp F", String)
@@ -213,10 +168,7 @@ class LcsTemp(Base):
 class McInDiscr(Base):
     __tablename__ = "rsmdata_mc_mc_in_discr"
 
-    # Use `schema_fkey` to create a schema-qualified foreign key reference.
-    hash_id = Column(
-        Integer, ForeignKey(schema_fkey("metadata_hash_registry.id")), primary_key=True
-    )
+    content_hash = Column(VARBINARY(16), primary_key=True)
     line_number = Column("LineNumber", Integer, primary_key=True)
     system_time_stamp = Column("System TimeStamp", E2UDE_DATETIME(0))
     power_on = Column("Power On", Boolean)

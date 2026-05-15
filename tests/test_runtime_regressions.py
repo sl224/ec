@@ -4,13 +4,17 @@ import json
 import os
 import tempfile
 from pathlib import PureWindowsPath
+from zipfile import ZipFile
 
 import pytest
 import sqlalchemy as sa
 
-import e2ude_core.main as app_main
 import e2ude_core.db.setup as db_setup
-from e2ude_core.db.models import ArchiveMetadata, ArchiveStateEnum, PfcDb, SegmentsData
+import e2ude_core.main as app_main
+from e2ude_core.db.models import ArchiveMetadata
+from e2ude_core.db.models import ArtifactManifest
+from e2ude_core.db.models import FileMetadata
+from e2ude_core.orchestration.state import plan_archive_run
 from e2ude_core.db.schema_safety import (
     SchemaClassification,
     format_target_banner,
@@ -18,69 +22,19 @@ from e2ude_core.db.schema_safety import (
     is_protected_schema,
     schema_classification,
 )
-from e2ude_core.orchestration.spec import JobSpec, JobSubjectKind, build_job_target
-from e2ude_core.registry import HANDLER_REGISTRY
 from e2ude_core.runtime_files import (
-    CURRENT_METADATA_CATALOG_GENERATION,
-    FileType,
-    PipelineId,
-    RuntimeFileSpec,
+    CURRENT_ARCHIVE_CATALOG_VERSION,
+    HANDLED_FILE_SPECS_BY_TYPE,
     build_active_stage_patterns,
-    compute_metadata_catalog_generation,
+    handled_specs_for_path,
+    path_matches_pattern,
 )
-from e2ude_core.pipelines.scanner import SCANNER_VERSION
-from e2ude_core.services.discovery import DiscoveryMode, discover_archives
-
-
-def test_build_job_target_hashes_multi_table_batches_stably():
-    first = build_job_target([PfcDb, SegmentsData])
-    second = build_job_target([SegmentsData, PfcDb])
-    single = build_job_target([SegmentsData])
-
-    assert first == second
-    assert first.label == "BATCH"
-    assert first.key.startswith("batch:2:")
-    assert single.label == "rsmdata_segments"
-    assert single.key == "rsmdata_segments"
-
-
-def test_job_spec_factories_keep_scan_jobs_and_file_jobs_distinct():
-    scan_job = JobSpec.for_metadata_scan(
-        pipeline_id=PipelineId("metadata_scan"),
-        job_name="scan folder",
-        target_label="metadata_file",
-        target_key="metadata_file",
-        handler_version=1,
-    )
-    file_job = JobSpec.for_file(
-        pipeline_id=PipelineId("segments"),
-        job_name="segments: sample",
-        target_label="rsmdata_segments",
-        target_key="rsmdata_segments",
-        handler_version=1,
-        file_type=FileType.SEGMENTS,
-    )
-
-    assert scan_job.subject_kind == JobSubjectKind.METADATA_SCAN
-    assert scan_job.file_type is None
-    assert file_job.subject_kind == JobSubjectKind.FILE_ARTIFACT
-    assert file_job.file_type == FileType.SEGMENTS
-
-    with pytest.raises(ValueError):
-        JobSpec(
-            pipeline_id=PipelineId("metadata_scan"),
-            job_name="broken scan",
-            target_label="metadata_file",
-            target_key="metadata_file",
-            handler_version=1,
-            subject_kind=JobSubjectKind.METADATA_SCAN,
-            file_type=FileType.SEGMENTS,
-        )
+from e2ude_core.services.discovery import discover_archives
 
 
 def test_active_stage_patterns_include_nested_archive_dependency_for_runtime_handlers():
     patterns = build_active_stage_patterns(
-        sorted(HANDLER_REGISTRY.keys(), key=lambda file_type: file_type.value)
+        sorted(HANDLED_FILE_SPECS_BY_TYPE, key=lambda file_type: file_type.value)
     )
 
     assert "*_MCData" in patterns
@@ -90,48 +44,18 @@ def test_active_stage_patterns_include_nested_archive_dependency_for_runtime_han
     assert "*_Versions.xml" not in patterns
 
 
-def test_scanner_version_tracks_derived_metadata_catalog_generation():
-    assert SCANNER_VERSION == CURRENT_METADATA_CATALOG_GENERATION
-    assert SCANNER_VERSION > 0
+def test_archive_catalog_version_is_explicit():
+    assert CURRENT_ARCHIVE_CATALOG_VERSION == 1
 
 
-def test_metadata_catalog_generation_changes_when_file_type_becomes_active():
-    def parse_noop(_path):
-        return {}
+def test_runtime_matching_uses_logical_zip_member_paths():
+    tmptr_path = "123456_20240101_000000_000_RSM_RawArchive/RSM/TMPTR_LOG"
 
-    unhandled_generation = compute_metadata_catalog_generation(
-        [RuntimeFileSpec(FileType.ENGINE, ("*_Engine",))],
-        stage_dependencies=(),
-    )
-    handled_generation = compute_metadata_catalog_generation(
-        [
-            RuntimeFileSpec(
-                FileType.ENGINE,
-                ("*_Engine",),
-                PipelineId("engine"),
-                1,
-                parse_noop,
-                (SegmentsData,),
-            )
-        ],
-        stage_dependencies=(),
-    )
-    handler_bump_generation = compute_metadata_catalog_generation(
-        [
-            RuntimeFileSpec(
-                FileType.ENGINE,
-                ("*_Engine",),
-                PipelineId("engine"),
-                2,
-                parse_noop,
-                (SegmentsData,),
-            )
-        ],
-        stage_dependencies=(),
-    )
-
-    assert handled_generation != unhandled_generation
-    assert handler_bump_generation == handled_generation
+    assert path_matches_pattern(tmptr_path, "*_RSM_RawArchive/RSM/TMPTR_LOG")
+    assert [spec.parser_id for spec in handled_specs_for_path(tmptr_path)] == [
+        "tmptr_log"
+    ]
+    assert handled_specs_for_path("123456_20240101_000000_000_Versions.xml") == ()
 
 
 def test_schema_safety_marks_shared_and_disposable_names_by_convention():
@@ -170,7 +94,9 @@ def test_main_exits_nonzero_on_fatal_error(monkeypatch, tmp_path):
 
     monkeypatch.setattr(app_main, "_resolve_staging_root", lambda: tmp_path / "staging")
     monkeypatch.setattr(app_main, "setup_logging", lambda _settings: None)
-    monkeypatch.setattr(app_main.sql_io, "get_engine", lambda *args, **kwargs: DummyEngine())
+    monkeypatch.setattr(
+        app_main.sql_io, "get_engine", lambda *args, **kwargs: DummyEngine()
+    )
     monkeypatch.setattr(
         app_main,
         "initialize_database",
@@ -314,6 +240,8 @@ def test_register_archives_bulk_keeps_same_second_archives_distinct(
     sqlite_path = tmp_path / "register.sqlite3"
     zip_a = tmp_path / "169871_20231107_024218_025_TransportRSM.fpkg.e2d.zip"
     zip_b = tmp_path / "169871_20231107_024218_999_TransportRSM.fpkg.e2d.zip"
+    zip_a.write_text("a", encoding="utf-8")
+    zip_b.write_text("bb", encoding="utf-8")
 
     script = """
 import json
@@ -334,8 +262,8 @@ archive_map = register_archives_bulk(eng, [zip_a, zip_b])
 with eng.connect() as conn:
     rows = conn.execute(
         text(
-            "SELECT id, source_path, source_size_bytes, source_mtime_ns, "
-            "required_scan_version, completed_scan_version, state "
+            "SELECT id, archive_key, locator_path, locator_size_bytes, locator_mtime_ns, "
+            "catalog_version, cataloged_at "
             "FROM metadata_archive ORDER BY id"
         )
     ).fetchall()
@@ -345,12 +273,12 @@ print(
         {
             "archive_ids": [archive_map[zip_a], archive_map[zip_b]],
             "row_count": len(rows),
-            "paths": [row.source_path for row in rows],
-            "source_sizes": [row.source_size_bytes for row in rows],
-            "source_mtimes": [row.source_mtime_ns for row in rows],
-            "required_scan_versions": [row.required_scan_version for row in rows],
-            "completed_scan_versions": [row.completed_scan_version for row in rows],
-            "states": [row.state for row in rows],
+            "archive_keys": [row.archive_key for row in rows],
+            "paths": [row.locator_path for row in rows],
+            "source_sizes": [row.locator_size_bytes for row in rows],
+            "locator_mtimes": [row.locator_mtime_ns for row in rows],
+            "catalog_versions": [row.catalog_version for row in rows],
+            "cataloged": [row.cataloged_at is not None for row in rows],
         }
     )
 )
@@ -370,14 +298,85 @@ print(
 
     assert payload["row_count"] == 2
     assert payload["archive_ids"][0] != payload["archive_ids"][1]
+    assert payload["archive_keys"] == [
+        "169871_20231107_024218_025",
+        "169871_20231107_024218_999",
+    ]
     assert str(zip_a) in payload["paths"]
     assert str(zip_b) in payload["paths"]
-    assert payload["required_scan_versions"] == [SCANNER_VERSION, SCANNER_VERSION]
-    assert payload["completed_scan_versions"] == [0, 0]
-    assert payload["states"] == ["NEEDS_SCAN", "NEEDS_SCAN"]
+    assert payload["catalog_versions"] == [0, 0]
+    assert payload["cataloged"] == [False, False]
 
 
-def test_register_archives_bulk_chunks_large_existing_path_lookups(
+def test_register_archives_bulk_rejects_size_change_for_locator(tmp_path):
+    db_path = tmp_path / "register_size_guard.sqlite3"
+    eng = sa.create_engine(f"sqlite:///{db_path}")
+    db_setup.initialize_database(eng, reset_tables=True)
+
+    zip_path = tmp_path / "169871_20231107_024218_025_TransportRSM.fpkg.e2d.zip"
+    zip_path.write_text("archive", encoding="utf-8")
+    db_setup.register_archives_bulk(eng, [zip_path])
+
+    zip_path.write_text("archive changed", encoding="utf-8")
+
+    with pytest.raises(
+        ValueError, match="Immutable archive locator changed size"
+    ) as exc_info:
+        db_setup.register_archives_bulk(eng, [zip_path])
+
+    assert str(zip_path) in str(exc_info.value)
+
+
+def test_register_archives_bulk_allows_duplicate_archive_keys(tmp_path):
+    db_path = tmp_path / "register_duplicate_locator.sqlite3"
+    eng = sa.create_engine(f"sqlite:///{db_path}")
+    db_setup.initialize_database(eng, reset_tables=True)
+
+    zip_a = tmp_path / "a" / "169871_20231107_024218_025_TransportRSM.fpkg.e2d.zip"
+    zip_b = tmp_path / "b" / "169871_20231107_024218_025_TransportRSM.fpkg.e2d.zip"
+    zip_a.parent.mkdir()
+    zip_b.parent.mkdir()
+    zip_a.write_text("archive", encoding="utf-8")
+    zip_b.write_text("archive", encoding="utf-8")
+
+    archive_map = db_setup.register_archives_bulk(eng, [zip_a, zip_b])
+
+    with eng.connect() as conn:
+        rows = conn.execute(sa.select(ArchiveMetadata)).fetchall()
+
+    assert len(rows) == 2
+    assert {row.archive_key for row in rows} == {"169871_20231107_024218_025"}
+    assert archive_map[zip_a] != archive_map[zip_b]
+
+
+def test_register_archives_bulk_allows_duplicate_archive_keys_with_different_sizes(
+    tmp_path,
+):
+    db_path = tmp_path / "register_duplicate_size.sqlite3"
+    eng = sa.create_engine(f"sqlite:///{db_path}")
+    db_setup.initialize_database(eng, reset_tables=True)
+
+    zip_a = tmp_path / "a" / "169871_20231107_024218_025_TransportRSM.fpkg.e2d.zip"
+    zip_b = tmp_path / "b" / "169871_20231107_024218_025_TransportRSM.fpkg.e2d.zip"
+    zip_a.parent.mkdir()
+    zip_b.parent.mkdir()
+    zip_a.write_text("archive", encoding="utf-8")
+    zip_b.write_text("archive changed", encoding="utf-8")
+
+    archive_map = db_setup.register_archives_bulk(eng, [zip_a, zip_b])
+
+    with eng.connect() as conn:
+        rows = conn.execute(
+            sa.select(ArchiveMetadata.archive_key, ArchiveMetadata.locator_size_bytes)
+        ).fetchall()
+
+    assert len(rows) == 2
+    assert {row.archive_key for row in rows} == {"169871_20231107_024218_025"}
+    assert sorted(row.locator_size_bytes for row in rows) == [7, 15]
+    assert archive_map[zip_a] != archive_map[zip_b]
+
+
+def test_register_archives_bulk_chunks_large_existing_identity_lookups(
     monkeypatch, tmp_path
 ):
     db_path = tmp_path / "register_chunk.sqlite3"
@@ -389,16 +388,16 @@ def test_register_archives_bulk_chunks_large_existing_path_lookups(
         for idx in range(5)
     ]
 
-    seen_batches: list[list[str]] = []
-    original_iter = db_setup._iter_path_batches
+    seen_batches: list[list[tuple]] = []
+    original_iter = db_setup._iter_batches
 
-    def recording_batches(paths, batch_size=None):
-        for batch in original_iter(paths, batch_size=batch_size):
+    def recording_batches(values, batch_size=None):
+        for batch in original_iter(values, batch_size=batch_size):
             seen_batches.append(list(batch))
             yield batch
 
-    monkeypatch.setattr(db_setup, "ARCHIVE_LOOKUP_BATCH_SIZE", 2)
-    monkeypatch.setattr(db_setup, "_iter_path_batches", recording_batches)
+    monkeypatch.setattr(db_setup, "ARCHIVE_IDENTITY_LOOKUP_BATCH_SIZE", 2)
+    monkeypatch.setattr(db_setup, "_iter_batches", recording_batches)
 
     archive_map = db_setup.register_archives_bulk(eng, zip_paths)
 
@@ -406,9 +405,116 @@ def test_register_archives_bulk_chunks_large_existing_path_lookups(
     assert [len(batch) for batch in seen_batches] == [2, 2, 1, 2, 2, 1]
 
 
-def test_incremental_discovery_enumerates_known_archives_each_run_for_correctness(
-    tmp_path,
-):
+def test_register_archives_bulk_batches_new_archive_inserts(monkeypatch, tmp_path):
+    db_path = tmp_path / "register_insert_chunk.sqlite3"
+    eng = sa.create_engine(f"sqlite:///{db_path}")
+    ArchiveMetadata.__table__.create(eng)
+
+    zip_paths = [
+        tmp_path / f"16987{idx}_20231107_02421{idx}_{idx:03d}_TransportRSM.fpkg.e2d.zip"
+        for idx in range(5)
+    ]
+
+    insert_batch_sizes: list[int] = []
+
+    @sa.event.listens_for(eng, "before_cursor_execute")
+    def record_insert_batch(conn, cursor, statement, parameters, context, executemany):
+        if not statement.lstrip().lower().startswith("insert into metadata_archive"):
+            return
+        insert_batch_sizes.append(len(parameters) if executemany else 1)
+
+    monkeypatch.setattr(db_setup, "ARCHIVE_INSERT_BATCH_SIZE", 2)
+
+    archive_map = db_setup.register_archives_bulk(eng, zip_paths)
+
+    assert len(archive_map) == len(zip_paths)
+    assert insert_batch_sizes == [2, 2, 1]
+
+
+def test_register_archives_bulk_skips_unchanged_archive_updates(tmp_path):
+    db_path = tmp_path / "register_skip_updates.sqlite3"
+    eng = sa.create_engine(f"sqlite:///{db_path}")
+    db_setup.initialize_database(eng, reset_tables=True)
+
+    zip_path = tmp_path / "169871_20231107_024218_025_TransportRSM.fpkg.e2d.zip"
+    zip_path.write_text("archive", encoding="utf-8")
+
+    db_setup.register_archives_bulk(eng, [zip_path])
+
+    update_count = 0
+
+    @sa.event.listens_for(eng, "before_cursor_execute")
+    def record_archive_update(
+        conn, cursor, statement, parameters, context, executemany
+    ):
+        nonlocal update_count
+        if statement.lstrip().lower().startswith("update metadata_archive"):
+            update_count += 1
+
+    archive_map = db_setup.register_archives_bulk(eng, [zip_path])
+
+    assert archive_map[zip_path] > 0
+    assert update_count == 0
+
+
+def test_catalog_archive_is_frozen_after_first_catalog(tmp_path):
+    from zipfile import ZipFile
+
+    from e2ude_core.db.models import FileMetadata
+    from e2ude_core.orchestration.catalog import catalog_archive
+
+    db_path = tmp_path / "frozen_catalog.sqlite3"
+    eng = sa.create_engine(f"sqlite:///{db_path}")
+    db_setup.initialize_database(eng, reset_tables=True)
+
+    zip_path = tmp_path / "169871_20231107_024218_025_TransportRSM.fpkg.e2d.zip"
+    with ZipFile(zip_path, "w") as zip_file:
+        zip_file.writestr("169871_20231107_024218_025_Segments", "segments")
+
+    archive_id = db_setup.register_archives_bulk(eng, [zip_path])[zip_path]
+    first = catalog_archive(eng, archive_id, zip_path, lambda _message: None)
+    assert first.rows_uploaded == 1
+
+    content_hash = b"1234567890abcdef"
+    with eng.begin() as conn:
+        file_id = conn.execute(
+            sa.select(FileMetadata.id).where(FileMetadata.archive_id == archive_id)
+        ).scalar_one()
+        conn.execute(
+            sa.update(FileMetadata)
+            .where(FileMetadata.id == file_id)
+            .values(content_hash=content_hash)
+        )
+
+    second = catalog_archive(eng, archive_id, zip_path, lambda _message: None)
+    assert second.rows_uploaded == 0
+
+    with eng.connect() as conn:
+        preserved_hash = conn.execute(
+            sa.select(FileMetadata.content_hash).where(FileMetadata.id == file_id)
+        ).scalar_one()
+        assert preserved_hash == content_hash
+
+    with ZipFile(zip_path, "w") as zip_file:
+        zip_file.writestr("169871_20231107_024218_025_Segments", "segments")
+        zip_file.writestr("169871_20231107_024218_025_Engine", "engine")
+
+    with pytest.raises(ValueError, match="Immutable archive catalog changed"):
+        catalog_archive(eng, archive_id, zip_path, lambda _message: None)
+
+    with eng.connect() as conn:
+        rows = conn.execute(
+            sa.select(FileMetadata.relative_path, FileMetadata.content_hash)
+            .where(FileMetadata.archive_id == archive_id)
+            .order_by(FileMetadata.relative_path)
+        ).fetchall()
+
+    assert [(row.relative_path, row.content_hash) for row in rows] == [
+        ("169871_20231107_024218_025_Segments", content_hash)
+    ]
+
+
+def test_discovery_scans_full_tree_each_run(tmp_path):
     db_path = tmp_path / "discovery.sqlite3"
     eng = sa.create_engine(f"sqlite:///{db_path}")
     db_setup.initialize_database(eng, reset_tables=True)
@@ -422,62 +528,28 @@ def test_incremental_discovery_enumerates_known_archives_each_run_for_correctnes
 
     first = discover_archives(
         scan_root,
-        known_directory_states={},
-        mode=DiscoveryMode.INCREMENTAL,
         max_workers=4,
     )
-    db_setup.record_directory_snapshots(eng, first.directory_snapshots)
-    db_setup.register_archives_bulk(
-        eng,
-        list(first.archives),
-        scanned_directory_paths=first.scanned_directory_paths,
-        missing_directory_paths=first.missing_directory_paths,
-    )
+    db_setup.register_archives_bulk(eng, list(first.archives))
 
     assert [archive.path for archive in first.archives] == [zip_a]
     assert first.scanned_directory_count >= 4
 
-    second = discover_archives(
-        scan_root,
-        known_directory_states=db_setup.load_directory_scan_cache(
-            eng, root_path=scan_root
-        ),
-        mode=DiscoveryMode.INCREMENTAL,
-        max_workers=4,
-    )
-    assert [archive.path for archive in second.archives] == [zip_a]
-    assert second.archive_directory_scan_count == 1
-    assert second.frontier_directory_scan_count >= 1
-    assert second.skipped_directory_count >= 1
-
-    year_dir = scan_root / "169871" / "2024"
-    original_year_dir_mtime_ns = year_dir.stat().st_mtime_ns
     new_leaf_dir = scan_root / "169871" / "2024" / "02"
     new_leaf_dir.mkdir(parents=True, exist_ok=True)
     zip_b = new_leaf_dir / "169871_20240102_000000_000_TransportRSM.fpkg.e2d.zip"
     zip_b.write_text("b", encoding="utf-8")
-    os.utime(
-        year_dir,
-        ns=(original_year_dir_mtime_ns + 1_000_000_000,) * 2,
-    )
 
-    third = discover_archives(
+    second = discover_archives(
         scan_root,
-        known_directory_states=db_setup.load_directory_scan_cache(
-            eng, root_path=scan_root
-        ),
-        mode=DiscoveryMode.INCREMENTAL,
         max_workers=4,
     )
 
-    assert set(archive.path for archive in third.archives) == {zip_a, zip_b}
-    assert leaf_dir in third.scanned_directory_paths
-    assert new_leaf_dir in third.scanned_directory_paths
+    assert set(archive.path for archive in second.archives) == {zip_a, zip_b}
+    assert second.scanned_directory_count >= 5
 
 
-def test_incremental_discovery_catches_in_place_archive_edit_when_parent_dir_mtime_is_preserved(
-    tmp_path,
-):
+def test_full_scan_rejects_in_place_archive_edit(tmp_path):
     db_path = tmp_path / "discovery_edit.sqlite3"
     eng = sa.create_engine(f"sqlite:///{db_path}")
     db_setup.initialize_database(eng, reset_tables=True)
@@ -491,73 +563,51 @@ def test_incremental_discovery_catches_in_place_archive_edit_when_parent_dir_mti
 
     first = discover_archives(
         scan_root,
-        known_directory_states={},
-        mode=DiscoveryMode.INCREMENTAL,
         max_workers=4,
     )
-    db_setup.record_directory_snapshots(eng, first.directory_snapshots)
-    archive_map = db_setup.register_archives_bulk(
-        eng,
-        list(first.archives),
-        scanned_directory_paths=first.scanned_directory_paths,
-        missing_directory_paths=first.missing_directory_paths,
-    )
+    archive_map = db_setup.register_archives_bulk(eng, list(first.archives))
     archive_id = archive_map[zip_a]
 
     with eng.connect() as conn:
         original_row = conn.execute(
             sa.select(
-                ArchiveMetadata.source_size_bytes,
-                ArchiveMetadata.source_mtime_ns,
-                ArchiveMetadata.state,
+                ArchiveMetadata.locator_size_bytes,
+                ArchiveMetadata.locator_mtime_ns,
             ).where(ArchiveMetadata.id == archive_id)
         ).one()
 
-    original_dir_mtime_ns = leaf_dir.stat().st_mtime_ns
     updated_payload = "archive contents changed"
     zip_a.write_text(updated_payload, encoding="utf-8")
     os.utime(
         zip_a,
-        ns=(original_row.source_mtime_ns + 1_000_000_000,) * 2,
+        ns=(original_row.locator_mtime_ns + 1_000_000_000,) * 2,
     )
-    os.utime(leaf_dir, ns=(original_dir_mtime_ns, original_dir_mtime_ns))
 
     second = discover_archives(
         scan_root,
-        known_directory_states=db_setup.load_directory_scan_cache(
-            eng, root_path=scan_root
-        ),
-        mode=DiscoveryMode.INCREMENTAL,
         max_workers=4,
     )
-    db_setup.record_directory_snapshots(eng, second.directory_snapshots)
-    db_setup.register_archives_bulk(
-        eng,
-        list(second.archives),
-        scanned_directory_paths=second.scanned_directory_paths,
-        missing_directory_paths=second.missing_directory_paths,
-    )
+    with pytest.raises(ValueError, match="Immutable archive locator changed size"):
+        db_setup.register_archives_bulk(eng, list(second.archives))
 
     with eng.connect() as conn:
-        updated_row = conn.execute(
+        stored_row = conn.execute(
             sa.select(
-                ArchiveMetadata.source_size_bytes,
-                ArchiveMetadata.source_mtime_ns,
-                ArchiveMetadata.state,
-                ArchiveMetadata.work_reason,
+                ArchiveMetadata.is_present,
+                ArchiveMetadata.locator_size_bytes,
+                ArchiveMetadata.locator_mtime_ns,
+                ArchiveMetadata.cataloged_at,
             ).where(ArchiveMetadata.id == archive_id)
         ).one()
 
     assert [archive.path for archive in second.archives] == [zip_a]
-    assert second.archive_directory_scan_count == 1
-    assert second.frontier_directory_scan_count >= 1
-    assert updated_row.source_size_bytes == len(updated_payload)
-    assert updated_row.source_mtime_ns > original_row.source_mtime_ns
-    assert updated_row.state == ArchiveStateEnum.NEEDS_SCAN
-    assert updated_row.work_reason == "Source archive changed"
+    assert stored_row.is_present is True
+    assert stored_row.locator_size_bytes == original_row.locator_size_bytes
+    assert stored_row.locator_mtime_ns == original_row.locator_mtime_ns
+    assert stored_row.cataloged_at is None
 
 
-def test_register_archives_bulk_marks_absence_only_in_scanned_directories(tmp_path):
+def test_register_archives_bulk_marks_missing_locators_absent(tmp_path):
     db_path = tmp_path / "archive_presence.sqlite3"
     eng = sa.create_engine(f"sqlite:///{db_path}")
     db_setup.initialize_database(eng, reset_tables=True)
@@ -573,31 +623,43 @@ def test_register_archives_bulk_marks_absence_only_in_scanned_directories(tmp_pa
     for path, payload in ((zip_a1, "a1"), (zip_a2, "a2"), (zip_b1, "b1")):
         path.write_text(payload, encoding="utf-8")
 
-    db_setup.register_archives_bulk(
-        eng,
-        [zip_a1, zip_a2, zip_b1],
-        scanned_directory_paths=[dir_a, dir_b],
-    )
-    db_setup.register_archives_bulk(
-        eng,
-        [zip_a1],
-        scanned_directory_paths=[dir_a],
-    )
+    db_setup.register_archives_bulk(eng, [zip_a1, zip_a2, zip_b1])
+    db_setup.register_archives_bulk(eng, [zip_a1])
 
     with eng.connect() as conn:
         rows = conn.execute(
-            sa.select(ArchiveMetadata.source_path, ArchiveMetadata.is_present)
+            sa.select(ArchiveMetadata.locator_path, ArchiveMetadata.is_present)
         ).fetchall()
 
-    presence = {row.source_path: row.is_present for row in rows}
+    presence = {row.locator_path: row.is_present for row in rows}
     assert presence[str(zip_a1)] is True
     assert presence[str(zip_a2)] is False
-    assert presence[str(zip_b1)] is True
+    assert presence[str(zip_b1)] is False
 
 
-def test_handler_version_downgrade_marks_archive_needs_processing(
-    run_repo_python, tmp_path
-):
+def test_register_archives_bulk_refuses_empty_scan_when_archives_exist(tmp_path):
+    db_path = tmp_path / "empty_scan_guard.sqlite3"
+    eng = sa.create_engine(f"sqlite:///{db_path}")
+    db_setup.initialize_database(eng, reset_tables=True)
+
+    zip_path = tmp_path / "169871_20240101_000000_000_TransportRSM.fpkg.e2d.zip"
+    zip_path.write_text("archive", encoding="utf-8")
+    db_setup.register_archives_bulk(eng, [zip_path])
+
+    with pytest.raises(ValueError, match="no parseable locators"):
+        db_setup.register_archives_bulk(eng, [])
+
+    with eng.connect() as conn:
+        is_present = conn.execute(
+            sa.select(ArchiveMetadata.is_present).where(
+                ArchiveMetadata.locator_path == str(zip_path)
+            )
+        ).scalar_one()
+
+    assert is_present is True
+
+
+def test_old_parser_version_marks_artifact_pending(run_repo_python, tmp_path):
     sqlite_path = tmp_path / "state.sqlite3"
     zip_path = tmp_path / "169871_20231107_024218_025_TransportRSM.fpkg.e2d.zip"
 
@@ -605,21 +667,17 @@ def test_handler_version_downgrade_marks_archive_needs_processing(
 import json
 import os
 from pathlib import Path
+import sqlalchemy as sa
 from e2ude_core.config import settings
 from e2ude_core.db.access import get_engine
 from e2ude_core.db.models import (
     ArchiveMetadata,
     ArtifactManifest,
-    FileHashRegistry,
     FileMetadata,
 )
 from e2ude_core.db.setup import initialize_database, register_archives_bulk
-from e2ude_core.orchestration.state import (
-    plan_archive_run,
-    select_archives_requiring_work,
-    summarize_archive,
-    summarize_archives_bulk,
-)
+from e2ude_core.orchestration.state import plan_archive_run
+from e2ude_core.runtime_files import CURRENT_ARCHIVE_CATALOG_VERSION
 
 zip_path = Path(os.environ["ZIP_PATH"])
 
@@ -628,26 +686,23 @@ initialize_database(eng, reset_tables=True)
 archive_id = register_archives_bulk(eng, [zip_path])[zip_path]
 
 with eng.begin() as conn:
-    hash_result = conn.execute(
-        FileHashRegistry.__table__.insert().values(md5=b"1234567890abcdef")
-    )
-    hash_id = hash_result.inserted_primary_key[0]
+    content_hash = b"1234567890abcdef"
 
     conn.execute(
         FileMetadata.__table__.insert().values(
             archive_id=archive_id,
-            hash_id=hash_id,
+            content_hash=content_hash,
             relative_path="sample_Segments",
-            file_type="SEGMENTS",
             file_size_bytes=1,
         )
     )
 
     conn.execute(
         ArtifactManifest.__table__.insert().values(
-            hash_id=hash_id,
+            content_hash=content_hash,
+            artifact_key="segments",
             target_table="rsmdata_segments",
-            handler_version=0,
+            parser_version=0,
         )
     )
 
@@ -655,22 +710,14 @@ with eng.begin() as conn:
         ArchiveMetadata.__table__.update()
         .where(ArchiveMetadata.id == archive_id)
         .values(
-            completed_scan_version=1,
-            required_scan_version=1,
-            state="NEEDS_PROCESSING",
-            required_handler_generation="current-generation",
-            completed_handler_generation="old-generation",
+            cataloged_at=sa.func.now(),
+            catalog_version=CURRENT_ARCHIVE_CATALOG_VERSION,
         )
     )
 
-summary = summarize_archive(eng, archive_id)
-bulk_summary = summarize_archives_bulk(eng, [archive_id])[archive_id]
 plan = plan_archive_run(eng, archive_id)
-pending_count = len(
-    select_archives_requiring_work(eng, {zip_path: archive_id})
-)
 missing_items = [
-    [item.hash_id, model.__tablename__]
+    [item.content_hash.hex(), model.__tablename__]
     for item in plan.work_items
     for model in item.target_models
 ]
@@ -678,9 +725,7 @@ missing_items = [
 print(
     json.dumps(
         {
-            "bulk_status": bulk_summary.status.name,
-            "summary_status": summary.status.name,
-            "pending_count": pending_count,
+            "needs_catalog": plan.needs_catalog,
             "missing_items": missing_items,
             "work_items": [
                 {
@@ -706,9 +751,7 @@ print(
     )
     payload = json.loads(result.stdout.strip())
 
-    assert payload["bulk_status"] == "NEEDS_PROCESSING"
-    assert payload["summary_status"] == "NEEDS_PROCESSING"
-    assert payload["pending_count"] == 1
+    assert payload["needs_catalog"] is False
     assert payload["missing_items"]
     assert payload["work_items"] == [
         {
@@ -719,11 +762,54 @@ print(
     ]
 
 
-def test_process_staged_archive_records_single_metadata_scan_job(
-    run_repo_python, tmp_path
-):
+def test_current_manifest_with_old_target_table_marks_artifact_pending(tmp_path):
+    db_path = tmp_path / "state_renamed_table.sqlite3"
+    eng = sa.create_engine(f"sqlite:///{db_path}")
+    db_setup.initialize_database(eng, reset_tables=True)
+
+    zip_path = tmp_path / "169871_20231107_024218_025_TransportRSM.fpkg.e2d.zip"
+    zip_path.write_bytes(b"placeholder")
+    archive_id = db_setup.register_archives_bulk(eng, [zip_path])[zip_path]
+    content_hash = b"1234567890abcdef"
+
+    with eng.begin() as conn:
+        conn.execute(
+            FileMetadata.__table__.insert().values(
+                archive_id=archive_id,
+                content_hash=content_hash,
+                relative_path="sample_Engine",
+                file_size_bytes=1,
+            )
+        )
+        conn.execute(
+            ArtifactManifest.__table__.insert().values(
+                content_hash=content_hash,
+                artifact_key="engine_on_off",
+                target_table="rsmdata_engine_on_off5",
+                parser_version=2,
+            )
+        )
+        conn.execute(
+            ArchiveMetadata.__table__.update()
+            .where(ArchiveMetadata.id == archive_id)
+            .values(
+                cataloged_at=sa.func.now(),
+                catalog_version=CURRENT_ARCHIVE_CATALOG_VERSION,
+            )
+        )
+
+    plan = plan_archive_run(eng, archive_id)
+
+    assert plan.needs_catalog is False
+    assert len(plan.work_items) == 1
+    assert [model.__tablename__ for model in plan.work_items[0].target_models] == [
+        "rsmdata_engine_on_off"
+    ]
+
+
+def test_process_archive_records_single_catalog_job(run_repo_python, tmp_path):
     sqlite_path = tmp_path / "workflow.sqlite3"
-    staged_dir = tmp_path / "staged"
+    staging_root = tmp_path / "staging"
     zip_path = tmp_path / "123456_20240101_000000_000_TransportRSM.fpkg.e2d.zip"
 
     script = """
@@ -731,35 +817,44 @@ import json
 import os
 from pathlib import Path
 from sqlalchemy import select
+from zipfile import ZipFile
 from e2ude_core.config import settings
 from e2ude_core.context import EtlContext
 from e2ude_core.db.access import get_engine
 from e2ude_core.db.models import ProcessingJob
 from e2ude_core.db.setup import initialize_database, register_archives_bulk
-from e2ude_core.orchestration.workflow import process_staged_archive
+from e2ude_core.orchestration.runs import create_processing_session, finalize_processing_session
+from e2ude_core.orchestration.workflow import process_archive
 
-staged_dir = Path(os.environ["STAGED_DIR"])
-staged_dir.mkdir(parents=True, exist_ok=True)
-(staged_dir / "123456_20240101_000000_000_Segments").write_text(
-    (
+staging_root = Path(os.environ["STAGING_ROOT"])
+staging_root.mkdir(parents=True, exist_ok=True)
+zip_path = Path(os.environ["ZIP_PATH"])
+with ZipFile(zip_path, "w") as zip_ref:
+    zip_ref.writestr(
+        "123456_20240101_000000_000_Segments",
         "1,1,,01/13/2025 14:13:36:825,01/13/2025 15:36:51:825,"
         "01/13/2025 14:13:36:825,01/13/2025 15:36:36:825,01:23:00,,"
         "false,false,false,PreFlight,1,false,false,1690830113251412_MAINT_00,,"
         "false,0,0,,,"
-    ),
-    encoding="utf-8",
-)
-zip_path = Path(os.environ["ZIP_PATH"])
+    )
 
 eng = get_engine(settings.database)
 initialize_database(eng, reset_tables=True)
 archive_id = register_archives_bulk(eng, [zip_path])[zip_path]
-result = process_staged_archive(eng, archive_id, staged_dir, EtlContext.capture(), db_workers=1)
+session_id = create_processing_session(eng, EtlContext.capture())
+result = process_archive(
+    eng,
+    session_id=session_id,
+    archive_id=archive_id,
+    zip_path=zip_path,
+    staging_root=staging_root,
+)
+finalize_processing_session(eng, session_id)
 
 with eng.connect() as conn:
     rows = conn.execute(
-        select(ProcessingJob.job_name, ProcessingJob.target_name).where(
-            ProcessingJob.pipeline_id == "MetadataScanHandler"
+        select(ProcessingJob.parser_id, ProcessingJob.target_table).where(
+            ProcessingJob.parser_id == "archive_catalog"
         )
     ).fetchall()
 
@@ -767,8 +862,7 @@ print(
     json.dumps(
         {
             "count": len(rows),
-            "job_names": [row.job_name for row in rows],
-            "targets": [row.target_name for row in rows],
+            "targets": [row.target_table for row in rows],
             "rows_uploaded": result.rows_uploaded,
         }
     )
@@ -781,7 +875,7 @@ print(
             "E2UDE_DATABASE__TYPE": "sqlite3",
             "E2UDE_DATABASE__DB_LOCATION": sqlite_path,
             "E2UDE_DATABASE__IN_MEMORY": "false",
-            "STAGED_DIR": staged_dir,
+            "STAGING_ROOT": staging_root,
             "ZIP_PATH": zip_path,
         },
     )
@@ -790,7 +884,6 @@ print(
     assert payload["count"] == 1
     assert payload["targets"] == ["metadata_file"]
     assert payload["rows_uploaded"] > 0
-    assert all("Registry" not in name for name in payload["job_names"])
 
 
 def test_initialize_database_only_creates_runtime_tables(run_repo_python, tmp_path):
@@ -824,7 +917,7 @@ print(json.dumps({"tables": tables}))
 
     assert "metadata_archive" in payload["tables"]
     assert "metadata_file" in payload["tables"]
-    assert "metadata_hash_registry" in payload["tables"]
+    assert "metadata_hash_registry" not in payload["tables"]
     assert "processing_sessions" in payload["tables"]
     assert "processing_jobs" in payload["tables"]
     assert "metadata_artifact_manifest" in payload["tables"]
@@ -832,6 +925,33 @@ print(json.dumps({"tables": tables}))
     assert "rsmdata_segments" in payload["tables"]
     assert "rsmdata_mc_pfc_db" in payload["tables"]
     assert "rsmdata_mc_gfc_db" not in payload["tables"]
+
+
+def test_initialize_database_rejects_existing_runtime_tables_missing_columns(tmp_path):
+    db_path = tmp_path / "old_schema.sqlite3"
+    eng = sa.create_engine(f"sqlite:///{db_path}")
+    with eng.begin() as conn:
+        conn.execute(
+            sa.text(
+                """
+                CREATE TABLE processing_sessions (
+                    id INTEGER PRIMARY KEY,
+                    folder_id INTEGER NOT NULL,
+                    git_hash VARCHAR(40),
+                    user_name VARCHAR(40),
+                    status VARCHAR(20),
+                    start_time DATETIME,
+                    end_time DATETIME
+                )
+                """
+            )
+        )
+
+    with pytest.raises(RuntimeError, match="Database schema is out of date") as exc:
+        db_setup.initialize_database(eng, reset_tables=False)
+
+    message = str(exc.value)
+    assert "processing_sessions.host_name" in message
 
 
 def test_job_mark_running_preserves_original_start_time(run_repo_python, tmp_path):
@@ -849,35 +969,38 @@ from e2ude_core.context import EtlContext
 from e2ude_core.db.access import get_engine
 from e2ude_core.db.models import ProcessingJob
 from e2ude_core.db.setup import initialize_database, register_archives_bulk
-from e2ude_core.orchestration.managers import SessionManager
-from e2ude_core.orchestration.spec import JobSpec
-from e2ude_core.runtime_files import FileType, PipelineId
+from e2ude_core.orchestration.runs import (
+    create_processing_job,
+    create_processing_session,
+    finalize_processing_session,
+    mark_processing_job_completed,
+    mark_processing_job_running,
+)
 
 zip_path = Path(os.environ["ZIP_PATH"])
 eng = get_engine(settings.database)
 initialize_database(eng, reset_tables=True)
 archive_id = register_archives_bulk(eng, [zip_path])[zip_path]
 
-session_manager = SessionManager(eng, archive_id, EtlContext.capture())
-job_id = session_manager._get_or_create_job_id(
-    JobSpec.for_file(
-        pipeline_id=PipelineId("segments"),
-        job_name="segments: sample",
-        target_label="rsmdata_segments",
-        target_key="rsmdata_segments",
-        handler_version=1,
-        file_type=FileType.SEGMENTS,
-    )
+session_id = create_processing_session(eng, EtlContext.capture())
+job_id = create_processing_job(
+    eng,
+    session_id,
+    archive_id=archive_id,
+    file_type="SEGMENTS",
+    parser_id="segments",
+    target_table="rsmdata_segments",
+    parser_version=1,
 )
 
-session_manager._mark_job_running(job_id, "first progress")
+mark_processing_job_running(eng, job_id, "first progress")
 with eng.connect() as conn:
     first_start = conn.execute(
         select(ProcessingJob.start_time).where(ProcessingJob.id == job_id)
     ).scalar_one()
 
 time.sleep(1.2)
-session_manager._mark_job_running(job_id, "second progress")
+mark_processing_job_running(eng, job_id, "second progress")
 with eng.connect() as conn:
     row = conn.execute(
         select(ProcessingJob.start_time, ProcessingJob.message).where(
@@ -885,8 +1008,8 @@ with eng.connect() as conn:
         )
     ).one()
 
-session_manager._mark_job_completed(job_id, "done", rows=0)
-session_manager.finalize_session()
+mark_processing_job_completed(eng, job_id, "done", rows_uploaded=0)
+finalize_processing_session(eng, session_id)
 
 print(
     json.dumps(
@@ -914,7 +1037,7 @@ print(
     assert payload["message"] == "second progress"
 
 
-def test_session_manager_run_job_persists_explicit_result_and_target_key(
+def test_run_processing_job_persists_explicit_result_and_target_key(
     run_repo_python, tmp_path
 ):
     sqlite_path = tmp_path / "run_job.sqlite3"
@@ -930,37 +1053,40 @@ from e2ude_core.context import EtlContext
 from e2ude_core.db.access import get_engine
 from e2ude_core.db.models import ProcessingJob
 from e2ude_core.db.setup import initialize_database, register_archives_bulk
-from e2ude_core.orchestration.managers import SessionManager
-from e2ude_core.orchestration.spec import JobRunResult, JobSpec
-from e2ude_core.runtime_files import FileType, PipelineId
+from e2ude_core.orchestration.runs import (
+    create_processing_session,
+    finalize_processing_session,
+    JobRunResult,
+    run_processing_job,
+)
 
 zip_path = Path(os.environ["ZIP_PATH"])
 eng = get_engine(settings.database)
 initialize_database(eng, reset_tables=True)
 archive_id = register_archives_bulk(eng, [zip_path])[zip_path]
 
-session_manager = SessionManager(eng, archive_id, EtlContext.capture())
-session_manager.run_job(
-    JobSpec.for_file(
-        pipeline_id=PipelineId("mcdata"),
-        job_name="mcdata: sample [BATCH]",
-        target_label="BATCH",
-        target_key="batch:2:deadbeefcafebabe",
-        handler_version=3,
-        file_type=FileType.MCDATA,
-    ),
+session_id = create_processing_session(eng, EtlContext.capture())
+run_processing_job(
+    eng,
+    session_id,
     lambda _report_progress: JobRunResult(
         rows_uploaded=7,
         completion_message="custom completion",
     ),
+    archive_id=archive_id,
+    file_type="MCDATA",
+    parser_id="mcdata",
+    target_table="rsmdata_mc_pfc_db",
+    parser_version=3,
 )
-session_manager.finalize_session()
+finalize_processing_session(eng, session_id)
 
 with eng.connect() as conn:
     row = conn.execute(
         select(
-            ProcessingJob.target_name,
-            ProcessingJob.dataset_key,
+            ProcessingJob.parser_id,
+            ProcessingJob.target_table,
+            ProcessingJob.parser_version,
             ProcessingJob.rows_uploaded,
             ProcessingJob.message,
             ProcessingJob.status,
@@ -970,8 +1096,9 @@ with eng.connect() as conn:
 print(
     json.dumps(
         {
-            "target_name": row.target_name,
-            "dataset_key": row.dataset_key,
+            "parser_id": row.parser_id,
+            "target_table": row.target_table,
+            "parser_version": row.parser_version,
             "rows_uploaded": row.rows_uploaded,
             "message": row.message,
             "status": row.status.value,
@@ -992,8 +1119,9 @@ print(
     payload = json.loads(result.stdout.strip())
 
     assert payload == {
-        "target_name": "BATCH",
-        "dataset_key": "batch:2:deadbeefcafebabe",
+        "parser_id": "mcdata",
+        "target_table": "rsmdata_mc_pfc_db",
+        "parser_version": 3,
         "rows_uploaded": 7,
         "message": "custom completion",
         "status": "COMPLETED",
@@ -1009,6 +1137,10 @@ def test_main_culls_stale_runs_before_discovery(
     stale_zip = scan_root / "123456_20240101_000000_000_TransportRSM.fpkg.e2d.zip"
     fresh_zip = scan_root / "123457_20240101_000000_000_TransportRSM.fpkg.e2d.zip"
     scan_root.mkdir(parents=True, exist_ok=True)
+    with ZipFile(stale_zip, "w") as zip_file:
+        zip_file.writestr("README.txt", "stale\n")
+    with ZipFile(fresh_zip, "w") as zip_file:
+        zip_file.writestr("README.txt", "fresh\n")
     config_path = write_app_config(
         database={
             "type": "sqlite3",
@@ -1044,14 +1176,12 @@ fresh_start = datetime.utcnow() - timedelta(hours=1)
 with eng.begin() as conn:
     stale_session = conn.execute(
         ProcessingSession.__table__.insert().values(
-            archive_id=archive_map[stale_zip],
             status=StatusEnum.RUNNING,
             start_time=stale_start,
         )
     ).inserted_primary_key[0]
     fresh_session = conn.execute(
         ProcessingSession.__table__.insert().values(
-            archive_id=archive_map[fresh_zip],
             status=StatusEnum.RUNNING,
             start_time=fresh_start,
         )
@@ -1060,10 +1190,9 @@ with eng.begin() as conn:
     stale_running_job = conn.execute(
         ProcessingJob.__table__.insert().values(
             session_id=stale_session,
-            job_name="stale running",
-            pipeline_id="segments",
-            target_name="rsmdata_segments",
-            dataset_key="rsmdata_segments",
+            archive_id=archive_map[stale_zip],
+            parser_id="segments",
+            target_table="rsmdata_segments",
             status=StatusEnum.RUNNING,
             start_time=stale_start,
         )
@@ -1071,20 +1200,18 @@ with eng.begin() as conn:
     stale_pending_job = conn.execute(
         ProcessingJob.__table__.insert().values(
             session_id=stale_session,
-            job_name="stale pending",
-            pipeline_id="mcdata",
-            target_name="rsmdata_mc_pfc_db",
-            dataset_key="rsmdata_mc_pfc_db",
+            archive_id=archive_map[stale_zip],
+            parser_id="mcdata",
+            target_table="rsmdata_mc_pfc_db",
             status=StatusEnum.PENDING,
         )
     ).inserted_primary_key[0]
     fresh_running_job = conn.execute(
         ProcessingJob.__table__.insert().values(
             session_id=fresh_session,
-            job_name="fresh running",
-            pipeline_id="segments",
-            target_name="rsmdata_segments",
-            dataset_key="rsmdata_segments",
+            archive_id=archive_map[fresh_zip],
+            parser_id="segments",
+            target_table="rsmdata_segments",
             status=StatusEnum.RUNNING,
             start_time=fresh_start,
         )
@@ -1098,7 +1225,7 @@ with eng.connect() as conn:
     job_rows = conn.execute(
         select(
             ProcessingJob.id,
-            ProcessingJob.job_name,
+            ProcessingJob.parser_id,
             ProcessingJob.status,
             ProcessingJob.message,
             ProcessingJob.end_time,
@@ -1119,7 +1246,7 @@ print(
             "jobs": [
                 {
                     "id": row.id,
-                    "job_name": row.job_name,
+                    "parser_id": row.parser_id,
                     "status": row.status.value,
                     "message": row.message,
                     "end_time": None if row.end_time is None else str(row.end_time),
@@ -1153,10 +1280,7 @@ print(
         {
             "E2UDE_CONFIG_PATH": config_path,
             "E2UDE_RUNTIME__DISCOVERY_WORKERS": 2,
-            "E2UDE_RUNTIME__UNZIP_WORKERS": 1,
             "E2UDE_RUNTIME__PROCESS_WORKERS": 1,
-            "E2UDE_RUNTIME__DB_WRITE_WORKERS": 1,
-            "E2UDE_RUNTIME__PIPELINE_BUFFER_SIZE": 1,
         },
     )
 
@@ -1180,7 +1304,7 @@ with eng.connect() as conn:
     job_rows = conn.execute(
         select(
             ProcessingJob.id,
-            ProcessingJob.job_name,
+            ProcessingJob.parser_id,
             ProcessingJob.status,
             ProcessingJob.message,
             ProcessingJob.end_time,
@@ -1201,7 +1325,7 @@ print(
             "jobs": [
                 {
                     "id": row.id,
-                    "job_name": row.job_name,
+                    "parser_id": row.parser_id,
                     "status": row.status.value,
                     "message": row.message,
                     "end_time": None if row.end_time is None else str(row.end_time),

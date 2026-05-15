@@ -1,7 +1,7 @@
 from io import BytesIO
 from zipfile import ZipFile
 
-from e2ude_core.services.zip_io import UnzipContext
+from e2ude_core.services.zip_io import extract_archive_members
 
 
 def _build_sample_zip(zip_path):
@@ -21,30 +21,23 @@ def _build_sample_zip(zip_path):
         )
 
 
-def test_unzip_context_extracts_nested_archives(tmp_path):
+def test_extract_archive_members_extracts_selected_nested_members(tmp_path):
     zip_path = tmp_path / "sample_TransportRSM.fpkg.e2d.zip"
     _build_sample_zip(zip_path)
 
-    with UnzipContext(zip_path) as ctx:
-        extracted = (
-            ctx.temp_dir
-            / "123456_20240101_000000_000_RSM_RawArchive"
-            / "RSM"
-            / "TMPTR_LOG"
-        )
-        assert extracted.exists()
-        assert extracted.read_text(encoding="utf-8") == "tmptr payload"
+    extract_dir = tmp_path / "extract"
+    count = extract_archive_members(
+        zip_path,
+        extract_dir,
+        [
+            "123456_20240101_000000_000_RSM_RawArchive/RSM/TMPTR_LOG",
+            "123456_20240101_000000_000_Segments",
+        ],
+    )
 
-        segments = ctx.temp_dir / "123456_20240101_000000_000_Segments"
-        assert segments.exists()
-
-
-def test_unzip_context_cleans_up_temp_dir(tmp_path):
-    zip_path = tmp_path / "sample_TransportRSM.fpkg.e2d.zip"
-    _build_sample_zip(zip_path)
-
-    with UnzipContext(zip_path) as ctx:
-        temp_dir = ctx.temp_dir
-        assert temp_dir.exists()
-
-    assert not temp_dir.exists()
+    assert count == 2
+    extracted = (
+        extract_dir / "123456_20240101_000000_000_RSM_RawArchive" / "RSM" / "TMPTR_LOG"
+    )
+    assert extracted.read_text(encoding="utf-8") == "tmptr payload"
+    assert (extract_dir / "123456_20240101_000000_000_Segments").exists()

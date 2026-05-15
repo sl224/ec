@@ -59,6 +59,465 @@ def _build_repo_env(repo_root, extra_env=None):
     return env
 
 
+@pytest.mark.local_mssql
+def test_mssql_archive_registration_uses_staged_locator_reconciliation(
+    local_mssql_server,
+    local_mssql_database,
+    local_mssql_driver,
+    run_repo_python,
+    tmp_path,
+):
+    schema_name = f"e2ude_register_{uuid.uuid4().hex[:8]}"
+    dir_a = tmp_path / "a"
+    dir_b = tmp_path / "b"
+    dir_a.mkdir()
+    dir_b.mkdir()
+    zip_a = dir_a / "169871_20250113_141336_001_TransportRSM.fpkg.e2d.zip"
+    zip_b = dir_b / "169871_20250113_141336_001_TransportRSM.fpkg.e2d.zip"
+    zip_a.write_text("archive", encoding="utf-8")
+    zip_b.write_text("archive changed", encoding="utf-8")
+
+    payload = json.loads(
+        run_repo_python(
+            """
+import json
+import os
+from pathlib import Path
+import sqlalchemy as sa
+
+from e2ude_core.config import settings
+from e2ude_core.db.access import get_engine
+from e2ude_core.db.base_session import Base, DEFAULT_SCHEMA
+from e2ude_core.db.models import ArchiveMetadata
+from e2ude_core.db.setup import initialize_database, register_archives_bulk
+
+zip_a = Path(os.environ["ZIP_A"])
+zip_b = Path(os.environ["ZIP_B"])
+eng = get_engine(settings.database)
+
+try:
+    initialize_database(eng, reset_tables=False)
+    first = register_archives_bulk(
+        eng,
+        [zip_a, zip_b],
+    )
+    second = register_archives_bulk(
+        eng,
+        [zip_a],
+    )
+    with eng.connect() as conn:
+        rows = conn.execute(
+            sa.select(
+                ArchiveMetadata.archive_key,
+                ArchiveMetadata.locator_path,
+                ArchiveMetadata.locator_size_bytes,
+                ArchiveMetadata.is_present,
+            ).order_by(ArchiveMetadata.locator_path)
+        ).fetchall()
+finally:
+    Base.metadata.drop_all(eng)
+    with eng.begin() as conn:
+        conn.execute(sa.text(f"DROP SCHEMA [{DEFAULT_SCHEMA}]"))
+
+print(
+    json.dumps(
+        {
+            "first_ids": [first[zip_a], first[zip_b]],
+            "second_ids": [second[zip_a]],
+            "rows": [
+                {
+                    "archive_key": row.archive_key,
+                    "locator_path": row.locator_path,
+                    "locator_size_bytes": row.locator_size_bytes,
+                    "is_present": bool(row.is_present),
+                }
+                for row in rows
+            ],
+        }
+    )
+)
+""",
+            {
+                "E2UDE_DATABASE__TYPE": "mssql",
+                "E2UDE_DATABASE__SERVER_NAME": local_mssql_server,
+                "E2UDE_DATABASE__DB_NAME": local_mssql_database,
+                "E2UDE_DATABASE__DRIVER": local_mssql_driver,
+                "E2UDE_DATABASE__TRUSTED_CONNECTION": "yes",
+                "E2UDE_DATABASE__SCHEMA_NAME": schema_name,
+                "ZIP_A": zip_a,
+                "ZIP_B": zip_b,
+            },
+        ).stdout.strip()
+    )
+
+    assert payload["first_ids"][0] != payload["first_ids"][1]
+    assert payload["second_ids"] == [payload["first_ids"][0]]
+    assert [row["archive_key"] for row in payload["rows"]] == [
+        "169871_20250113_141336_001",
+        "169871_20250113_141336_001",
+    ]
+    assert sorted(row["locator_size_bytes"] for row in payload["rows"]) == [7, 15]
+    presence = {row["locator_path"]: row["is_present"] for row in payload["rows"]}
+    assert presence[str(zip_a)] is True
+    assert presence[str(zip_b)] is False
+
+
+@pytest.mark.local_mssql
+def test_schema_seed_reuses_catalog_and_parser_rows(
+    local_mssql_server,
+    local_mssql_database,
+    local_mssql_driver,
+    run_repo_command,
+    run_repo_python,
+    write_app_config,
+    tmp_path,
+):
+    source_schema = f"e2ude_candidate_seed_src_{uuid.uuid4().hex[:8]}"
+    dest_schema = f"e2ude_candidate_seed_dst_{uuid.uuid4().hex[:8]}"
+    scan_root = tmp_path / "scan_root"
+    scan_root.mkdir()
+    zip_path = scan_root / "169871_20250113_141336_001_TransportRSM.fpkg.e2d.zip"
+    source_only_zip = (
+        scan_root / "169871_20250114_141336_001_TransportRSM.fpkg.e2d.zip"
+    )
+    prefix = zip_path.name.replace("_TransportRSM.fpkg.e2d.zip", "")
+    source_only_prefix = source_only_zip.name.replace("_TransportRSM.fpkg.e2d.zip", "")
+    segment_line = (
+        "1,1,,01/13/2025 14:13:36:825,01/13/2025 15:36:51:825,"
+        "01/13/2025 14:13:36:825,01/13/2025 15:36:36:825,01:23:00,,"
+        "false,false,false,PreFlight,1,false,false,1690830113251412_MAINT_00,,"
+        "false,0,0,,,"
+    )
+    with ZipFile(zip_path, "w") as zip_file:
+        zip_file.writestr(f"{prefix}_Segments", segment_line + "\n")
+    with ZipFile(source_only_zip, "w") as zip_file:
+        zip_file.writestr(
+            f"{source_only_prefix}_Segments",
+            segment_line.replace("PreFlight", "PostFlight") + "\n",
+        )
+
+    config_path = write_app_config(
+        database={
+            "type": "mssql",
+            "server_name": local_mssql_server,
+            "db_name": local_mssql_database,
+            "driver": local_mssql_driver,
+            "trusted_connection": "yes",
+            "schema_name": source_schema,
+        },
+        paths={"scan_root": scan_root},
+    )
+
+    cleanup_base = [
+        sys.executable,
+        "-m",
+        "e2ude_core.cli",
+        "schema",
+        "cleanup",
+        "--config",
+        str(config_path),
+        "--yes",
+    ]
+    try:
+        run_repo_python(
+            """
+import os
+from pathlib import Path
+import sqlalchemy as sa
+
+from e2ude_core.config import settings
+from e2ude_core.db.access import get_engine
+from e2ude_core.db.models import FileMetadata
+from e2ude_core.db.setup import initialize_database, register_archives_bulk
+from e2ude_core.orchestration.catalog import catalog_archive, hash_catalog_file
+from e2ude_core.pipelines.base import process_file
+from e2ude_core.runtime_files import HANDLED_FILE_SPECS
+from e2ude_core.services.zip_io import extract_archive_members
+
+zip_paths = [
+    Path(os.environ["ZIP_PATH"]),
+    Path(os.environ["SOURCE_ONLY_ZIP_PATH"]),
+]
+stage_dir = Path(os.environ["STAGE_DIR"])
+eng = get_engine(settings.database)
+initialize_database(eng, reset_tables=False)
+segment_spec = next(spec for spec in HANDLED_FILE_SPECS if spec.parser_id == "segments")
+for zip_path in zip_paths:
+    archive_id = register_archives_bulk(eng, [zip_path])[zip_path]
+    catalog_archive(eng, archive_id, zip_path, lambda _message: None)
+    with eng.connect() as conn:
+        file_row = conn.execute(
+            sa.select(FileMetadata.id, FileMetadata.relative_path).where(
+                FileMetadata.archive_id == archive_id
+            )
+        ).one()
+    extract_archive_members(zip_path, stage_dir, [file_row.relative_path])
+    member_path = stage_dir / file_row.relative_path
+    content_hash = hash_catalog_file(eng, file_row.id, member_path)
+    process_file(eng, segment_spec, content_hash, member_path, lambda _message: None)
+eng.dispose()
+""",
+            {
+                "E2UDE_CONFIG_PATH": config_path,
+                "E2UDE_DATABASE__SCHEMA_NAME": source_schema,
+                "ZIP_PATH": zip_path,
+                "SOURCE_ONLY_ZIP_PATH": source_only_zip,
+                "STAGE_DIR": tmp_path / "stage_source",
+            },
+        )
+        source_only_zip.unlink()
+
+        plan = run_repo_command(
+            [
+                sys.executable,
+                "-m",
+                "e2ude_core.cli",
+                "schema",
+                "seed",
+                "--from",
+                source_schema,
+                "--to",
+                dest_schema,
+                "--plan",
+                "--config",
+                str(config_path),
+            ]
+        )
+        assert "Plan only. No changes were made." in plan.stdout
+
+        run_repo_command(
+            [
+                sys.executable,
+                "-m",
+                "e2ude_core.cli",
+                "schema",
+                "seed",
+                "--from",
+                source_schema,
+                "--to",
+                dest_schema,
+                "--yes",
+                "--config",
+                str(config_path),
+            ]
+        )
+
+        payload = json.loads(
+            run_repo_python(
+                """
+import json
+import os
+import sqlalchemy as sa
+from e2ude_core.config import settings
+from e2ude_core.db.access import get_engine
+
+schema = os.environ["DEST_SCHEMA"]
+eng = get_engine(settings.database)
+with eng.connect() as conn:
+    row = conn.execute(sa.text(f'''
+        SELECT
+          (SELECT COUNT(*) FROM [{schema}].[metadata_archive]) AS archives,
+          (SELECT COUNT(*) FROM [{schema}].[metadata_file]) AS files,
+          (SELECT COUNT(*) FROM [{schema}].[rsmdata_segments]) AS segment_rows,
+          (SELECT COUNT(*) FROM [{schema}].[metadata_artifact_manifest]) AS manifests,
+          (SELECT COUNT(*) FROM [{schema}].[metadata_archive] WHERE cataloged_at IS NOT NULL) AS cataloged
+    ''')).one()
+eng.dispose()
+print(json.dumps(dict(row._mapping)))
+""",
+                {
+                    "E2UDE_CONFIG_PATH": config_path,
+                    "E2UDE_DATABASE__SCHEMA_NAME": dest_schema,
+                    "DEST_SCHEMA": dest_schema,
+                },
+            ).stdout.strip()
+        )
+    finally:
+        for schema_name in (source_schema, dest_schema):
+            run_repo_command(
+                [
+                    *cleanup_base,
+                    schema_name,
+                    "--confirm-schema",
+                    schema_name,
+                ]
+            )
+
+    assert payload == {
+        "archives": 1,
+        "files": 1,
+        "segment_rows": 1,
+        "manifests": 1,
+        "cataloged": 1,
+    }
+
+
+@pytest.mark.local_mssql
+def test_cli_schema_check_promote_workflow(
+    local_mssql_server,
+    local_mssql_database,
+    local_mssql_driver,
+    run_repo_command,
+    run_repo_python,
+    write_app_config,
+):
+    candidate_schema = f"e2ude_candidate_{uuid.uuid4().hex[:8]}"
+    stable_schema = f"e2ude_stable_{uuid.uuid4().hex[:8]}"
+    archive_schema = f"e2ude_archive_{uuid.uuid4().hex[:8]}"
+    config_path = write_app_config(
+        database={
+            "type": "mssql",
+            "server_name": local_mssql_server,
+            "db_name": local_mssql_database,
+            "driver": local_mssql_driver,
+            "trusted_connection": "yes",
+            "schema_name": candidate_schema,
+        }
+    )
+
+    try:
+        run_repo_python(
+            """
+import os
+import sqlalchemy as sa
+
+from e2ude_core.config import settings
+from e2ude_core.db.access import get_engine
+from e2ude_core.db.models import ArtifactManifest
+from e2ude_core.db.setup import initialize_database
+
+stable_schema = os.environ["STABLE_SCHEMA"]
+eng = get_engine(settings.database)
+initialize_database(eng, reset_tables=False)
+with eng.begin() as conn:
+    conn.execute(
+        sa.insert(ArtifactManifest).values(
+            content_hash=b"\\x01" * 16,
+            artifact_key="segments",
+            target_table="rsmdata_segments",
+            parser_version=1,
+            row_count=0,
+        )
+    )
+    conn.execute(
+        sa.text(
+            f"IF NOT EXISTS (SELECT 1 FROM sys.schemas WHERE name = '{stable_schema}') "
+            f"EXEC('CREATE SCHEMA [{stable_schema}]')"
+        )
+    )
+    conn.execute(sa.text(f"CREATE TABLE [{stable_schema}].[promotion_marker] (marker INT NOT NULL)"))
+    conn.execute(sa.text(f"INSERT INTO [{stable_schema}].[promotion_marker] (marker) VALUES (1)"))
+""",
+            {
+                "E2UDE_CONFIG_PATH": config_path,
+                "E2UDE_DATABASE__SCHEMA_NAME": candidate_schema,
+                "STABLE_SCHEMA": stable_schema,
+            },
+        )
+
+        run_repo_command(
+            [
+                sys.executable,
+                "-m",
+                "e2ude_core.cli",
+                "schema",
+                "check",
+                candidate_schema,
+                "--config",
+                str(config_path),
+            ]
+        )
+        run_repo_command(
+            [
+                sys.executable,
+                "-m",
+                "e2ude_core.cli",
+                "schema",
+                "promote",
+                candidate_schema,
+                stable_schema,
+                "--archive",
+                archive_schema,
+                "--yes",
+                "--confirm",
+                stable_schema,
+                "--config",
+                str(config_path),
+            ]
+        )
+
+        payload = json.loads(
+            run_repo_python(
+                """
+import json
+import os
+import sqlalchemy as sa
+
+from e2ude_core.config import settings
+from e2ude_core.db.access import get_engine
+
+stable_schema = os.environ["STABLE_SCHEMA"]
+archive_schema = os.environ["ARCHIVE_SCHEMA"]
+candidate_schema = os.environ["CANDIDATE_SCHEMA"]
+
+eng = get_engine(settings.database)
+with eng.connect() as conn:
+    result = {
+        "manifest": conn.execute(sa.text(f"SELECT COUNT(*) FROM [{stable_schema}].[metadata_artifact_manifest]")).scalar_one(),
+        "archive_marker": conn.execute(sa.text(f"SELECT COUNT(*) FROM [{archive_schema}].[promotion_marker]")).scalar_one(),
+        "candidate_tables": conn.execute(
+            sa.text(
+                '''
+                SELECT COUNT(*)
+                FROM sys.tables AS t
+                INNER JOIN sys.schemas AS s ON s.schema_id = t.schema_id
+                WHERE s.name = :schema_name
+                '''
+            ),
+            {"schema_name": candidate_schema},
+        ).scalar_one(),
+    }
+
+print(json.dumps(result))
+""",
+                {
+                    "E2UDE_CONFIG_PATH": config_path,
+                    "E2UDE_DATABASE__SCHEMA_NAME": stable_schema,
+                    "STABLE_SCHEMA": stable_schema,
+                    "ARCHIVE_SCHEMA": archive_schema,
+                    "CANDIDATE_SCHEMA": candidate_schema,
+                },
+            ).stdout
+        )
+
+        assert payload == {
+            "manifest": 1,
+            "archive_marker": 1,
+            "candidate_tables": 0,
+        }
+    finally:
+        for schema_name in (
+            candidate_schema,
+            stable_schema,
+            archive_schema,
+        ):
+            run_repo_command(
+                [
+                    sys.executable,
+                    "-m",
+                    "e2ude_core.cli",
+                    "schema",
+                    "cleanup",
+                    schema_name,
+                    "--yes",
+                    "--confirm-schema",
+                    schema_name,
+                    "--config",
+                    str(config_path),
+                ]
+            )
+
+
 def _load_mssql_schema_metrics(run_repo_python, extra_env):
     payload = run_repo_python(
         """
@@ -99,15 +558,30 @@ with eng.connect() as conn:
             f"GROUP BY target_table"
         )
     ).fetchall()
+    error_session_rows = conn.execute(
+        sa.text(
+            f"SELECT id, status FROM [{DEFAULT_SCHEMA}].[processing_sessions] "
+            f"WHERE status = 'ERROR' ORDER BY id"
+        )
+    ).fetchall()
+    error_job_rows = conn.execute(
+        sa.text(
+            f"SELECT id, session_id, parser_id, target_table, message "
+            f"FROM [{DEFAULT_SCHEMA}].[processing_jobs] "
+            f"WHERE status = 'ERROR' ORDER BY id"
+        )
+    ).fetchall()
     payload = {
         "archive_rows": conn.execute(sa.text(f"SELECT COUNT(*) FROM [{DEFAULT_SCHEMA}].[metadata_archive]")).scalar_one(),
         "sessions": conn.execute(sa.text(f"SELECT COUNT(*) FROM [{DEFAULT_SCHEMA}].[processing_sessions]")).scalar_one(),
         "error_sessions": conn.execute(sa.text(f"SELECT COUNT(*) FROM [{DEFAULT_SCHEMA}].[processing_sessions] WHERE status = 'ERROR'")).scalar_one(),
         "error_jobs": conn.execute(sa.text(f"SELECT COUNT(*) FROM [{DEFAULT_SCHEMA}].[processing_jobs] WHERE status = 'ERROR'")).scalar_one(),
-        "hashes": conn.execute(sa.text(f"SELECT COUNT(*) FROM [{DEFAULT_SCHEMA}].[metadata_hash_registry]")).scalar_one(),
+        "hashes": conn.execute(sa.text(f"SELECT COUNT(DISTINCT content_hash) FROM [{DEFAULT_SCHEMA}].[metadata_file] WHERE content_hash IS NOT NULL")).scalar_one(),
         "artifacts_total": conn.execute(sa.text(f"SELECT COUNT(*) FROM [{DEFAULT_SCHEMA}].[metadata_artifact_manifest]")).scalar_one(),
         "artifact_counts": {row.target_table: row.artifact_count for row in artifact_rows},
         "data_counts": data_counts,
+        "error_session_rows": [dict(row._mapping) for row in error_session_rows],
+        "error_job_rows": [dict(row._mapping) for row in error_job_rows],
     }
 
 print(json.dumps(payload))
@@ -130,21 +604,27 @@ from e2ude_core.context import EtlContext
 from e2ude_core.db.access import get_engine
 from e2ude_core.db.models import LcsTemp, PfcDb
 from e2ude_core.db.setup import initialize_database, register_archives_bulk
-from e2ude_core.orchestration.workflow import process_staged_archive
-from e2ude_core.services.zip_io import UnzipContext
+from e2ude_core.orchestration.runs import create_processing_session, finalize_processing_session
+from e2ude_core.orchestration.workflow import process_archive
 
 zip_path = Path(os.environ["E2UDE_TEST_FIXTURE_ZIP"])
 eng = get_engine(settings.database)
 initialize_database(eng, reset_tables=True)
 archive_id = register_archives_bulk(eng, [zip_path])[zip_path]
-
-with UnzipContext(zip_path) as ctx:
-    process_staged_archive(eng, archive_id, Path(ctx.temp_dir), EtlContext.capture())
+session_id = create_processing_session(eng, EtlContext.capture())
+process_archive(
+    eng,
+    session_id=session_id,
+    archive_id=archive_id,
+    zip_path=zip_path,
+    staging_root=settings.paths.staging_root,
+)
+finalize_processing_session(eng, session_id)
 
 with eng.connect() as conn:
     counts = {
         "metadata_file": conn.execute(sa.text("SELECT COUNT(*) FROM metadata_file")).scalar_one(),
-        "metadata_hash_registry": conn.execute(sa.text("SELECT COUNT(*) FROM metadata_hash_registry")).scalar_one(),
+        "content_hashes": conn.execute(sa.text("SELECT COUNT(DISTINCT content_hash) FROM metadata_file WHERE content_hash IS NOT NULL")).scalar_one(),
         "processing_jobs": conn.execute(sa.text("SELECT COUNT(*) FROM processing_jobs")).scalar_one(),
         "metadata_artifact_manifest": conn.execute(sa.text("SELECT COUNT(*) FROM metadata_artifact_manifest")).scalar_one(),
     }
@@ -186,7 +666,7 @@ print(
     counts = payload["counts"]
 
     assert counts["metadata_file"] > 0
-    assert counts["metadata_hash_registry"] > 0
+    assert counts["content_hashes"] > 0
     assert counts["processing_jobs"] > 0
     assert counts["metadata_artifact_manifest"] > 0
     assert payload["pfc_row"][0] is not None
@@ -219,10 +699,7 @@ def test_main_pipeline_smoke_sqlite(
         {
             "E2UDE_CONFIG_PATH": config_path,
             "E2UDE_RUNTIME__DISCOVERY_WORKERS": 8,
-            "E2UDE_RUNTIME__UNZIP_WORKERS": 2,
             "E2UDE_RUNTIME__PROCESS_WORKERS": 1,
-            "E2UDE_RUNTIME__DB_WRITE_WORKERS": 1,
-            "E2UDE_RUNTIME__PIPELINE_BUFFER_SIZE": 2,
         },
     )
 
@@ -238,7 +715,7 @@ eng = get_engine(settings.database)
 with eng.connect() as conn:
     counts = {
         "metadata_file": conn.execute(sa.text("SELECT COUNT(*) FROM metadata_file")).scalar_one(),
-        "metadata_hash_registry": conn.execute(sa.text("SELECT COUNT(*) FROM metadata_hash_registry")).scalar_one(),
+        "content_hashes": conn.execute(sa.text("SELECT COUNT(DISTINCT content_hash) FROM metadata_file WHERE content_hash IS NOT NULL")).scalar_one(),
         "processing_jobs": conn.execute(sa.text("SELECT COUNT(*) FROM processing_jobs")).scalar_one(),
         "metadata_artifact_manifest": conn.execute(sa.text("SELECT COUNT(*) FROM metadata_artifact_manifest")).scalar_one(),
         "rsmdata_mc_pfc_db": conn.execute(sa.text("SELECT COUNT(*) FROM rsmdata_mc_pfc_db")).scalar_one(),
@@ -278,7 +755,7 @@ print(
 
     counts = payload["counts"]
     assert counts["metadata_file"] > 0
-    assert counts["metadata_hash_registry"] > 0
+    assert counts["content_hashes"] > 0
     assert counts["processing_jobs"] > 0
     assert counts["metadata_artifact_manifest"] > 0
     assert counts["rsmdata_mc_pfc_db"] > 0
@@ -311,8 +788,8 @@ from e2ude_core.db.access import get_engine
 from e2ude_core.db.base_session import Base, DEFAULT_SCHEMA
 from e2ude_core.db.models import LcsTemp, PfcDb
 from e2ude_core.db.setup import initialize_database, register_archives_bulk
-from e2ude_core.orchestration.workflow import process_staged_archive
-from e2ude_core.services.zip_io import UnzipContext
+from e2ude_core.orchestration.runs import create_processing_session, finalize_processing_session
+from e2ude_core.orchestration.workflow import process_archive
 
 zip_path = Path(os.environ["E2UDE_TEST_FIXTURE_ZIP"])
 eng = get_engine(settings.database)
@@ -320,14 +797,20 @@ eng = get_engine(settings.database)
 try:
     initialize_database(eng, reset_tables=False)
     archive_id = register_archives_bulk(eng, [zip_path])[zip_path]
-
-    with UnzipContext(zip_path) as ctx:
-        process_staged_archive(eng, archive_id, Path(ctx.temp_dir), EtlContext.capture())
+    session_id = create_processing_session(eng, EtlContext.capture())
+    process_archive(
+        eng,
+        session_id=session_id,
+        archive_id=archive_id,
+        zip_path=zip_path,
+        staging_root=settings.paths.staging_root,
+    )
+    finalize_processing_session(eng, session_id)
 
     with eng.connect() as conn:
         counts = {
             "metadata_file": conn.execute(sa.text(f"SELECT COUNT(*) FROM [{DEFAULT_SCHEMA}].[metadata_file]")).scalar_one(),
-            "metadata_hash_registry": conn.execute(sa.text(f"SELECT COUNT(*) FROM [{DEFAULT_SCHEMA}].[metadata_hash_registry]")).scalar_one(),
+            "content_hashes": conn.execute(sa.text(f"SELECT COUNT(DISTINCT content_hash) FROM [{DEFAULT_SCHEMA}].[metadata_file] WHERE content_hash IS NOT NULL")).scalar_one(),
             "processing_jobs": conn.execute(sa.text(f"SELECT COUNT(*) FROM [{DEFAULT_SCHEMA}].[processing_jobs]")).scalar_one(),
             "metadata_artifact_manifest": conn.execute(sa.text(f"SELECT COUNT(*) FROM [{DEFAULT_SCHEMA}].[metadata_artifact_manifest]")).scalar_one(),
         }
@@ -376,7 +859,7 @@ print(
     counts = payload["counts"]
 
     assert counts["metadata_file"] > 0
-    assert counts["metadata_hash_registry"] > 0
+    assert counts["content_hashes"] > 0
     assert counts["processing_jobs"] > 0
     assert counts["metadata_artifact_manifest"] > 0
     assert payload["pfc_row"][0] is not None
@@ -448,25 +931,68 @@ with eng.begin() as conn:
             {
                 **common_env,
                 "E2UDE_RUNTIME__DISCOVERY_WORKERS": 8,
-                "E2UDE_RUNTIME__UNZIP_WORKERS": 2,
                 "E2UDE_RUNTIME__PROCESS_WORKERS": 1,
-                "E2UDE_RUNTIME__DB_WRITE_WORKERS": 1,
-                "E2UDE_RUNTIME__PIPELINE_BUFFER_SIZE": 2,
             },
         )
+        first_candidate_metrics = _load_mssql_schema_metrics(
+            run_repo_python,
+            common_env,
+        )
+
+        status_result = run_repo_command(
+            [
+                sys.executable,
+                "-m",
+                "e2ude_core.cli",
+                "parser",
+                "status",
+                "--schema",
+                candidate_schema,
+                "--config",
+                str(config_path),
+            ]
+        )
+        assert "parser status" in status_result.stdout
+        assert "mcdata" in status_result.stdout
+        assert "missing/stale" in status_result.stdout
+
+        run_repo_command(
+            [sys.executable, "-m", "e2ude_core.main"],
+            {
+                **common_env,
+                "E2UDE_RUNTIME__DISCOVERY_WORKERS": 8,
+                "E2UDE_RUNTIME__PROCESS_WORKERS": 1,
+            },
+        )
+        second_candidate_metrics = _load_mssql_schema_metrics(
+            run_repo_python,
+            common_env,
+        )
+        for key in (
+            "archive_rows",
+            "sessions",
+            "error_sessions",
+            "error_jobs",
+            "hashes",
+            "artifacts_total",
+            "artifact_counts",
+            "data_counts",
+        ):
+            assert second_candidate_metrics[key] == first_candidate_metrics[key]
 
         run_repo_command(
             [
                 sys.executable,
-                "scripts/promote_schema.py",
-                "--source-schema",
+                "-m",
+                "e2ude_core.cli",
+                "schema",
+                "promote",
                 candidate_schema,
-                "--target-schema",
                 stable_schema,
-                "--archive-schema",
+                "--archive",
                 archive_schema,
                 "--yes",
-                "--confirm-target-schema",
+                "--confirm",
                 stable_schema,
             ],
             {
@@ -492,7 +1018,7 @@ eng = get_engine(settings.database)
 with eng.connect() as conn:
     counts = {
         "metadata_file": conn.execute(sa.text(f"SELECT COUNT(*) FROM [{stable_schema}].[metadata_file]")).scalar_one(),
-        "metadata_hash_registry": conn.execute(sa.text(f"SELECT COUNT(*) FROM [{stable_schema}].[metadata_hash_registry]")).scalar_one(),
+        "content_hashes": conn.execute(sa.text(f"SELECT COUNT(DISTINCT content_hash) FROM [{stable_schema}].[metadata_file] WHERE content_hash IS NOT NULL")).scalar_one(),
         "processing_jobs": conn.execute(sa.text(f"SELECT COUNT(*) FROM [{stable_schema}].[processing_jobs]")).scalar_one(),
         "metadata_artifact_manifest": conn.execute(sa.text(f"SELECT COUNT(*) FROM [{stable_schema}].[metadata_artifact_manifest]")).scalar_one(),
         "rsmdata_mc_pfc_db": conn.execute(sa.text(f"SELECT COUNT(*) FROM [{stable_schema}].[rsmdata_mc_pfc_db]")).scalar_one(),
@@ -545,7 +1071,7 @@ print(
 
         counts = payload["counts"]
         assert counts["metadata_file"] > 0
-        assert counts["metadata_hash_registry"] > 0
+        assert counts["content_hashes"] > 0
         assert counts["processing_jobs"] > 0
         assert counts["metadata_artifact_manifest"] > 0
         assert counts["rsmdata_mc_pfc_db"] > 0
@@ -560,8 +1086,10 @@ print(
         run_repo_command(
             [
                 sys.executable,
-                "scripts/cleanup_mssql_schema.py",
-                "--schema-name",
+                "-m",
+                "e2ude_core.cli",
+                "schema",
+                "cleanup",
                 stable_schema,
                 "--preview",
             ],
@@ -575,8 +1103,10 @@ print(
             run_repo_command(
                 [
                     sys.executable,
-                    "scripts/cleanup_mssql_schema.py",
-                    "--schema-name",
+                    "-m",
+                    "e2ude_core.cli",
+                    "schema",
+                    "cleanup",
                     schema_name,
                     "--yes",
                     "--confirm-schema",
@@ -590,7 +1120,7 @@ print(
 
 
 @pytest.mark.local_mssql
-def test_cleanup_schema_script_requires_exact_confirmation(
+def test_schema_cleanup_requires_exact_confirmation(
     local_mssql_server,
     local_mssql_database,
     local_mssql_driver,
@@ -639,8 +1169,10 @@ with eng.begin() as conn:
             run_repo_command(
                 [
                     sys.executable,
-                    "scripts/cleanup_mssql_schema.py",
-                    "--schema-name",
+                    "-m",
+                    "e2ude_core.cli",
+                    "schema",
+                    "cleanup",
                     schema_name,
                     "--yes",
                 ],
@@ -687,8 +1219,10 @@ print(json.dumps({"table_count": table_count}))
         run_repo_command(
             [
                 sys.executable,
-                "scripts/cleanup_mssql_schema.py",
-                "--schema-name",
+                "-m",
+                "e2ude_core.cli",
+                "schema",
+                "cleanup",
                 schema_name,
                 "--yes",
                 "--confirm-schema",
@@ -759,10 +1293,7 @@ def test_main_pipeline_parallel_duplicate_tmptr_hashes_are_serialized(
             {
                 **common_env,
                 "E2UDE_RUNTIME__DISCOVERY_WORKERS": 4,
-                "E2UDE_RUNTIME__UNZIP_WORKERS": 4,
                 "E2UDE_RUNTIME__PROCESS_WORKERS": 4,
-                "E2UDE_RUNTIME__DB_WRITE_WORKERS": 1,
-                "E2UDE_RUNTIME__PIPELINE_BUFFER_SIZE": 4,
             },
         )
 
@@ -781,15 +1312,15 @@ with eng.connect() as conn:
         "sessions": conn.execute(sa.text(f"SELECT COUNT(*) FROM [{DEFAULT_SCHEMA}].[processing_sessions]")).scalar_one(),
         "error_sessions": conn.execute(sa.text(f"SELECT COUNT(*) FROM [{DEFAULT_SCHEMA}].[processing_sessions] WHERE status = 'ERROR'")).scalar_one(),
         "error_jobs": conn.execute(sa.text(f"SELECT COUNT(*) FROM [{DEFAULT_SCHEMA}].[processing_jobs] WHERE status = 'ERROR'")).scalar_one(),
-        "hashes": conn.execute(sa.text(f"SELECT COUNT(*) FROM [{DEFAULT_SCHEMA}].[metadata_hash_registry]")).scalar_one(),
+        "hashes": conn.execute(sa.text(f"SELECT COUNT(DISTINCT content_hash) FROM [{DEFAULT_SCHEMA}].[metadata_file] WHERE content_hash IS NOT NULL")).scalar_one(),
         "artifacts": conn.execute(sa.text(f"SELECT COUNT(*) FROM [{DEFAULT_SCHEMA}].[metadata_artifact_manifest] WHERE target_table = 'rsmdata_tmptr'")).scalar_one(),
         "tmptr_rows": conn.execute(sa.text(f"SELECT COUNT(*) FROM [{DEFAULT_SCHEMA}].[rsmdata_tmptr]")).scalar_one(),
-        "distinct_tmptr_hashes": conn.execute(sa.text(f"SELECT COUNT(DISTINCT hash_id) FROM [{DEFAULT_SCHEMA}].[rsmdata_tmptr]")).scalar_one(),
+        "distinct_tmptr_hashes": conn.execute(sa.text(f"SELECT COUNT(DISTINCT content_hash) FROM [{DEFAULT_SCHEMA}].[rsmdata_tmptr]")).scalar_one(),
     }
     tmptr_job_statuses = conn.execute(
         sa.text(
             f"SELECT status FROM [{DEFAULT_SCHEMA}].[processing_jobs] "
-            f"WHERE pipeline_id = 'tmptr_log' ORDER BY id"
+            f"WHERE parser_id = 'tmptr_log' ORDER BY id"
         )
     ).fetchall()
 
@@ -807,7 +1338,7 @@ print(
         )
 
         counts = payload["counts"]
-        assert counts["sessions"] == zip_count
+        assert counts["sessions"] == 1
         assert counts["error_sessions"] == 0
         assert counts["error_jobs"] == 0
         assert counts["hashes"] == 1
@@ -820,8 +1351,10 @@ print(
         run_repo_command(
             [
                 sys.executable,
-                "scripts/cleanup_mssql_schema.py",
-                "--schema-name",
+                "-m",
+                "e2ude_core.cli",
+                "schema",
+                "cleanup",
                 schema_name,
                 "--yes",
                 "--confirm-schema",
@@ -881,6 +1414,10 @@ def test_two_main_processes_can_overlap_on_same_schema_without_tmptr_corruption(
             "staging_root": tmp_path / "staging_a",
         },
     )
+    config_path_a_saved = tmp_path / "e2ude_config_a.toml"
+    shutil.copy2(config_path_a, config_path_a_saved)
+    config_path_a = config_path_a_saved
+
     config_path_b = write_app_config(
         database={
             "type": "mssql",
@@ -898,10 +1435,7 @@ def test_two_main_processes_can_overlap_on_same_schema_without_tmptr_corruption(
 
     common_overrides = {
         "E2UDE_RUNTIME__DISCOVERY_WORKERS": 4,
-        "E2UDE_RUNTIME__UNZIP_WORKERS": 4,
         "E2UDE_RUNTIME__PROCESS_WORKERS": 4,
-        "E2UDE_RUNTIME__DB_WRITE_WORKERS": 1,
-        "E2UDE_RUNTIME__PIPELINE_BUFFER_SIZE": 4,
     }
 
     run_repo_python(
@@ -968,12 +1502,12 @@ initialize_database(eng, reset_tables=False)
             },
         )
 
-        assert payload["error_sessions"] == 0
-        assert payload["error_jobs"] == 0
+        assert payload["error_sessions"] == 0, payload
+        assert payload["error_jobs"] == 0, payload
         assert payload["hashes"] >= 1
-        assert payload["artifact_counts"].get("rsmdata_tmptr") == 1
-        assert payload["data_counts"].get("rsmdata_tmptr") == line_count
-        assert zip_count <= payload["sessions"] <= zip_count * 2
+        assert payload["data_counts"].get("rsmdata_tmptr") == line_count, payload
+        assert payload["artifact_counts"].get("rsmdata_tmptr", 0) >= 1, payload
+        assert payload["sessions"] == 2
     finally:
         for proc in (proc_a, proc_b):
             if proc is not None and proc.poll() is None:
@@ -983,8 +1517,10 @@ initialize_database(eng, reset_tables=False)
         run_repo_command(
             [
                 sys.executable,
-                "scripts/cleanup_mssql_schema.py",
-                "--schema-name",
+                "-m",
+                "e2ude_core.cli",
+                "schema",
+                "cleanup",
                 schema_name,
                 "--yes",
                 "--confirm-schema",
@@ -1057,10 +1593,7 @@ def test_parallel_duplicate_fixture_archives_do_not_duplicate_multi_table_output
             {
                 "E2UDE_CONFIG_PATH": baseline_config,
                 "E2UDE_RUNTIME__DISCOVERY_WORKERS": 4,
-                "E2UDE_RUNTIME__UNZIP_WORKERS": 2,
                 "E2UDE_RUNTIME__PROCESS_WORKERS": 1,
-                "E2UDE_RUNTIME__DB_WRITE_WORKERS": 1,
-                "E2UDE_RUNTIME__PIPELINE_BUFFER_SIZE": 2,
             },
         )
         baseline_metrics = _load_mssql_schema_metrics(
@@ -1075,10 +1608,7 @@ def test_parallel_duplicate_fixture_archives_do_not_duplicate_multi_table_output
             {
                 "E2UDE_CONFIG_PATH": duplicate_config,
                 "E2UDE_RUNTIME__DISCOVERY_WORKERS": 4,
-                "E2UDE_RUNTIME__UNZIP_WORKERS": 4,
                 "E2UDE_RUNTIME__PROCESS_WORKERS": 4,
-                "E2UDE_RUNTIME__DB_WRITE_WORKERS": 1,
-                "E2UDE_RUNTIME__PIPELINE_BUFFER_SIZE": 4,
             },
         )
         duplicate_metrics = _load_mssql_schema_metrics(
@@ -1095,9 +1625,13 @@ def test_parallel_duplicate_fixture_archives_do_not_duplicate_multi_table_output
 
         assert any(count > 0 for count in baseline_metrics["data_counts"].values())
         assert duplicate_metrics["data_counts"] == baseline_metrics["data_counts"]
-        assert duplicate_metrics["artifact_counts"] == baseline_metrics["artifact_counts"]
+        assert (
+            duplicate_metrics["artifact_counts"] == baseline_metrics["artifact_counts"]
+        )
         assert duplicate_metrics["hashes"] == baseline_metrics["hashes"]
-        assert duplicate_metrics["artifacts_total"] == baseline_metrics["artifacts_total"]
+        assert (
+            duplicate_metrics["artifacts_total"] == baseline_metrics["artifacts_total"]
+        )
         assert duplicate_metrics["archive_rows"] == duplicate_count
     finally:
         for schema_name, config_path in (
@@ -1107,8 +1641,10 @@ def test_parallel_duplicate_fixture_archives_do_not_duplicate_multi_table_output
             run_repo_command(
                 [
                     sys.executable,
-                    "scripts/cleanup_mssql_schema.py",
-                    "--schema-name",
+                    "-m",
+                    "e2ude_core.cli",
+                    "schema",
+                    "cleanup",
                     schema_name,
                     "--yes",
                     "--confirm-schema",

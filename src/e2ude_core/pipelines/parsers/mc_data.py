@@ -90,7 +90,7 @@ def parse_mcdata(file_path: Path) -> Dict[Type[Base], pd.DataFrame]:
         if "LineNumber" in all_model_cols:
             columns.append("LineNumber")
 
-        # Add the data columns, excluding primary keys (like hash_id)
+        # Add the data columns, excluding primary keys supplied by upload.
         data_cols = [c.name for c in model.__table__.columns if not c.primary_key]
         columns.extend(data_cols)
 

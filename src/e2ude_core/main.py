@@ -7,15 +7,13 @@ from e2ude_core.config import settings
 from e2ude_core.db import access as sql_io
 from e2ude_core.db.setup import (
     initialize_database,
-    load_directory_scan_cache,
-    record_directory_snapshots,
     register_archives_bulk,
 )
 from e2ude_core.logging_conf import setup_logging
-from e2ude_core.orchestration.managers import cull_stale_runs
-from e2ude_core.orchestration.pipeline import StagingPipeline
+from e2ude_core.orchestration.pipeline import ArchivePipeline
+from e2ude_core.orchestration.runs import cull_stale_runs
 from e2ude_core.orchestration.state import load_archives_requiring_work
-from e2ude_core.services.discovery import DiscoveryMode, discover_archives
+from e2ude_core.services.discovery import discover_archives
 
 logger = logging.getLogger(__name__)
 
@@ -35,11 +33,15 @@ def _resolve_scan_root() -> Path:
 def main():
     staging_root = _resolve_staging_root()
     setup_logging(settings)
-    logger.info("Starting pipeline. staging=%s", staging_root)
+    logger.info("Refresh starting. staging_root=%s", staging_root)
 
     main_eng = sql_io.get_engine(settings.database, default_pool_size=64)
 
     try:
+        scan_root = _resolve_scan_root()
+        if not scan_root.exists():
+            raise FileNotFoundError(f"Scan root not found: {scan_root}")
+
         initialize_database(main_eng, reset_tables=False)
         culled = cull_stale_runs(main_eng)
         if culled["jobs"] or culled["sessions"]:
@@ -49,66 +51,56 @@ def main():
                 culled["sessions"],
             )
 
-        scan_root = _resolve_scan_root()
-        if not scan_root.exists():
-            logger.error(f"Scan root not found: {scan_root}")
-            return
-
+        logger.info("Discovery: scanning directories.")
         discovery_started_at = time.perf_counter()
-        known_directory_states = load_directory_scan_cache(
-            main_eng, root_path=scan_root
-        )
         discovery_result = discover_archives(
             scan_root,
-            known_directory_states=known_directory_states,
-            mode=DiscoveryMode(settings.runtime.discovery_mode),
             max_workers=settings.runtime.discovery_workers,
         )
-        record_directory_snapshots(
-            main_eng,
-            discovery_result.directory_snapshots,
-            missing_paths=discovery_result.missing_directory_paths,
-        )
-
-        register_archives_bulk(
-            main_eng,
-            list(discovery_result.archives),
-            scanned_directory_paths=discovery_result.scanned_directory_paths,
-            missing_directory_paths=discovery_result.missing_directory_paths,
-        )
         logger.info(
-            "Discovery summary: duration=%.2fs archives=%s scanned_dirs=%s "
-            "archive_dir_scans=%s frontier_dir_scans=%s skipped_dirs=%s "
-            "missing_dirs=%s",
+            "Discovery summary: duration=%.2fs archives=%s scanned_dirs=%s",
             time.perf_counter() - discovery_started_at,
             len(discovery_result.archives),
             discovery_result.scanned_directory_count,
-            discovery_result.archive_directory_scan_count,
-            discovery_result.frontier_directory_scan_count,
-            discovery_result.skipped_directory_count,
-            len(discovery_result.missing_directory_paths),
         )
 
+        logger.info("Register: writing archive locators.")
+        register_started_at = time.perf_counter()
+        register_archives_bulk(
+            main_eng,
+            list(discovery_result.archives),
+        )
+        logger.info(
+            "Register summary: duration=%.2fs archives=%s scanned_dirs=%s",
+            time.perf_counter() - register_started_at,
+            len(discovery_result.archives),
+            discovery_result.scanned_directory_count,
+        )
+
+        logger.info("Plan: selecting archive work.")
         workable_map = load_archives_requiring_work(main_eng)
 
         if not workable_map:
             logger.info("All archives are up to date. Exiting.")
             return
 
-        pipeline = StagingPipeline(
+        logger.info(
+            "Pipeline: processing %s archives.",
+            len(workable_map),
+        )
+        pipeline = ArchivePipeline(
             db_settings=settings.database,
             archive_id_map=workable_map,
             staging_root=staging_root,
-            buffer_size=settings.runtime.pipeline_buffer_size,
-            unzip_workers=settings.runtime.unzip_workers,
             process_workers=settings.runtime.process_workers,
-            db_write_workers=settings.runtime.db_write_workers,
         )
-        pipeline.run()
+        failed_count = pipeline.run()
+        if failed_count:
+            raise SystemExit(1)
 
     except KeyboardInterrupt:
-        print("\n[!] Force Quit (Ctrl+C) Detected.")
-        logger.warning("Killing all threads...")
+        print("\nInterrupted by Ctrl+C.")
+        logger.warning("Refresh interrupted.")
 
         if settings.diagnostics.enable_viztracer:
             try:
@@ -133,11 +125,11 @@ def main():
             os._exit(1)
 
     except Exception as e:
-        logger.critical(f"Fatal Error: {e}", exc_info=True)
+        logger.critical("Refresh failed: %s", e, exc_info=True)
         raise SystemExit(1) from e
     finally:
         main_eng.dispose()
-        logger.info("Exiting.")
+        logger.info("Refresh finished.")
 
 
 if __name__ == "__main__":
